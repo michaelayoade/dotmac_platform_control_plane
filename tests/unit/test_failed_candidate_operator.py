@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import shutil
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,14 @@ from vendor_cp.deployment.transition_fence import FenceRefused
 @pytest.fixture
 def protected_failed(failed, monkeypatch):
     context, successor, now, verifier, request_path = failed
+
+    class FixtureClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    # Keep the real request expiry guard deterministic at this fixture's window.
+    monkeypatch.setattr(op, "datetime", FixtureClock)
     canonical_operator_root = context.prior_store.root.parent / "failed-operator"
     canonical_operator_root.mkdir()
     canonical_store = canonical_operator_root / "artifact-store"

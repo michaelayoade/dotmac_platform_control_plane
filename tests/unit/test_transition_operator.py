@@ -739,3 +739,90 @@ def test_history_loads_explicit_committed_receipt_and_both_contexts(load, monkey
     assert contexts == {SHA: context}
     assert seen["context"] is context and seen["routing_gate"] is True
     assert seen["committed_contexts"] is contexts
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        *op.CandidateReadinessPhase,
+        None,
+        "password_install",
+        "postgresql://NEVER_ECHO",
+        {},
+        1,
+    ],
+)
+def test_operator_propagates_only_fixed_phase_after_compensation(
+    load, monkeypatch, phase
+):
+    from vendor_cp.deployment import cp_transition_host
+
+    installed = load(document())
+    monkeypatch.setattr(op, "load_installation", lambda _: installed)
+    monkeypatch.setattr(cp, "_read_protected", lambda _: canonical_json(request()))
+    host = SimpleNamespace(candidate_phase=phase)
+    actions = []
+    monkeypatch.setattr(
+        cp_transition_host, "ExistingCpTransitionHost", lambda *a, **k: host
+    )
+
+    def execute(*a, **k):
+        actions.append("compensated")
+        raise RuntimeError("NEVER_ECHO_SQL_ENV_CHILD")
+
+    monkeypatch.setattr(cp, "execute_transition", execute)
+    with pytest.raises(op.TransitionOperatorRefused) as caught:
+        op.run_transition(config_file=Path("/config"), request_file=Path("/request"))
+    assert actions == ["compensated"]
+    assert str(caught.value) == "CP_TRANSITION_REFUSED"
+    assert caught.value.candidate_phase is (
+        phase if type(phase) is op.CandidateReadinessPhase else None
+    )
+    assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        *op.CandidateReadinessPhase,
+        None,
+        "password_install",
+        "postgresql://NEVER_ECHO",
+        {},
+        1,
+    ],
+)
+def test_cli_phase_is_validated_even_if_exception_attribute_is_forged(
+    monkeypatch, capsys, phase
+):
+    from vendor_cp.cli import main
+
+    def denied(**kwargs):
+        error = op.TransitionOperatorRefused("NEVER_ECHO_EXCEPTION")
+        error.candidate_phase = phase
+        raise error
+
+    monkeypatch.setattr(op, "run_transition", denied)
+    assert (
+        main(
+            [
+                "--format",
+                "json",
+                "admin",
+                "cp-transition",
+                "--config-file",
+                "/config",
+                "--request-file",
+                "/request",
+            ]
+        )
+        == 3
+    )
+    output = capsys.readouterr()
+    assert "NEVER_ECHO" not in output.out + output.err
+    result = json.loads(output.out)
+    assert "owner.cp_transition_refused" in str(result)
+    message = "CP_TRANSITION_REFUSED"
+    if type(phase) is op.CandidateReadinessPhase:
+        message += f" candidate_phase={phase.value}"
+    assert result["message"] == message

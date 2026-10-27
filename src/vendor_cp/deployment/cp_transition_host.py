@@ -101,6 +101,7 @@ from vendor_cp.deployment.transition_evidence import (
     read_current_migration_heads,
     read_descriptor_at_revision,
 )
+from vendor_cp.deployment.transition_operator import CandidateReadinessPhase
 from vendor_cp.production_secrets import production_deployment_lock
 
 SCRATCH_MAX_SOURCE_BYTES = 384 * 1024 * 1024
@@ -648,6 +649,7 @@ class ExistingCpTransitionHost:
         self._routing_receipt: str | None = None
         self._candidate_created = False
         self._candidate_started = False
+        self.candidate_phase: CandidateReadinessPhase | None = None
         self._acl_restored = False
         self._runtime_inputs: dict[Path, str] = {}
         self._candidate_profile: str | None = None
@@ -2119,6 +2121,7 @@ class ExistingCpTransitionHost:
         }
 
     def candidate_ready(self, request: TransitionRequest, nonce: str) -> bytes:
+        self.candidate_phase = None
         self._bound(request, nonce)
         proof = self._strict(request)
         if request["schema"] == "dotmac.cp_failed_candidate_request/1":
@@ -2168,20 +2171,26 @@ class ExistingCpTransitionHost:
             database=request["database"], run_id=run_id
         )
         self._candidate_created = True  # creation may fail after its atomic DDL
+        self.candidate_phase = CandidateReadinessPhase.ROLES_CREATE
         with self._connect(request["database"]) as connection:
             candidate_roles.create_roles(
                 connection, self.roles, proof, **self._candidate_arguments()
             )
+            self.candidate_phase = CandidateReadinessPhase.PASSWORD_INSTALL
             self._install_candidate_passwords(connection)
+            self.candidate_phase = CandidateReadinessPhase.ROLES_ACTIVATE
             candidate_roles.activate(
                 connection, self.roles, proof, **self._candidate_arguments()
             )
         self._candidate_started = True  # also compensate a partially successful launch
+        self.candidate_phase = CandidateReadinessPhase.COMPOSE_LAUNCH
         self._run(
             (str(config.docker_binary), *self.launch.argv[1:]),
             env=self.launch.subprocess_env({}),
         )
+        self.candidate_phase = CandidateReadinessPhase.CANDIDATE_VERIFY
         self._verify_candidate(request)
+        self.candidate_phase = None
         return self._evidence(
             request,
             nonce,

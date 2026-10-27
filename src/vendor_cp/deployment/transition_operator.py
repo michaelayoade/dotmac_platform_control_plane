@@ -11,6 +11,7 @@ import re
 import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, TypedDict, cast
 
@@ -254,8 +255,24 @@ class _ExecutionContexts(TypedDict, total=False):
     failed_candidate_contexts: dict[str, cp.FailedCandidateContext]
 
 
+class CandidateReadinessPhase(StrEnum):
+    ROLES_CREATE = "roles_create"
+    PASSWORD_INSTALL = "password_install"  # noqa: S105 - fixed phase label, no credential
+    ROLES_ACTIVATE = "roles_activate"
+    COMPOSE_LAUNCH = "compose_launch"
+    CANDIDATE_VERIFY = "candidate_verify"
+
+
 class TransitionOperatorRefused(Exception):
     """Fixed, redacted operator boundary; host compensation remains core-owned."""
+
+    def __init__(self, message: str, *, candidate_phase: object = None) -> None:
+        super().__init__(message)
+        self.candidate_phase = (
+            candidate_phase
+            if type(candidate_phase) is CandidateReadinessPhase
+            else None
+        )
 
 
 def _path(value: str) -> Path:
@@ -1104,6 +1121,7 @@ def run_transition(
     *, config_file: Path, request_file: Path, bundle_file: Path | None = None
 ) -> str:
     """Return a receipt digest only; installation and live approval are external."""
+    host = None
     try:
         installation = load_installation(config_file)
         raw = cp._read_protected(request_file)
@@ -1274,4 +1292,7 @@ def run_transition(
     except Exception:
         # Executor owns post-reservation compensation; never leak child output,
         # database diagnostics, configuration contents or exception strings.
-        raise TransitionOperatorRefused("CP_TRANSITION_REFUSED") from None
+        raise TransitionOperatorRefused(
+            "CP_TRANSITION_REFUSED",
+            candidate_phase=getattr(host, "candidate_phase", None),
+        ) from None

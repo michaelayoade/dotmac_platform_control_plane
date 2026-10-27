@@ -322,6 +322,7 @@ def test_candidate_failure_reuses_cleanup_and_preserves_committed_heads_and_line
     heads = deepcopy(request["target"]["heads"])
     grants = context.proof.prior_grants
     host._candidate_created = True
+    host.candidate_phase = module.CandidateReadinessPhase.PASSWORD_INSTALL
     monkeypatch.setattr(host, "_bound", lambda *a: None)
     monkeypatch.setattr(host, "_maintenance", lambda: actions.append("maintenance"))
 
@@ -347,6 +348,7 @@ def test_candidate_failure_reuses_cleanup_and_preserves_committed_heads_and_line
     assert host.proof.prior_grants == grants
     assert not host._candidate_created and not host._candidate_started
     assert actions.index("owned-candidate-cleanup") < actions.index("refence")
+    assert host.candidate_phase is module.CandidateReadinessPhase.PASSWORD_INSTALL
 
 
 def test_routing_verification_receives_both_runtime_contexts(committed, monkeypatch):

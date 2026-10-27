@@ -1960,3 +1960,132 @@ def test_routing_propagates_failed_context_registry_for_current_and_future_v1(
     else:
         assert "failed_candidate_context" not in forwarded[0]
     assert forwarded[0]["routing_gate"] is True and runtimes == [request]
+
+
+@pytest.fixture
+def candidate_phase_host(failed_candidate, monkeypatch):
+    host, request, context, _, _ = failed_candidate
+    request["target"]["image_digest"] = "sha256:" + "2" * 64
+    actions = []
+
+    def step(name, result=None):
+        def run(*args, **kwargs):
+            actions.append(name)
+            return result
+
+        return run
+
+    for name in (
+        "_bound",
+        "target_heads",
+        "_materialize_candidate_environment",
+        "_candidate_mounts",
+    ):
+        monkeypatch.setattr(host, name, step(name))
+    monkeypatch.setattr(host, "_strict", lambda *a: context.proof)
+    monkeypatch.setattr(host, "_quiescence_snapshot", lambda *a: b"snapshot")
+    monkeypatch.setattr(host, "_retain", lambda *a: "retained")
+    monkeypatch.setattr(host, "_candidate_arguments", lambda: {})
+    monkeypatch.setattr(host, "_connect", lambda *a: nullcontext(object()))
+    monkeypatch.setattr(
+        module,
+        "build_candidate_compose_launch",
+        lambda **k: SimpleNamespace(
+            argv=("docker", "compose"), subprocess_env=lambda _: {}
+        ),
+    )
+    monkeypatch.setattr(module.candidate_roles, "create_roles", step("roles_create"))
+    monkeypatch.setattr(host, "_install_candidate_passwords", step("password_install"))
+    monkeypatch.setattr(module.candidate_roles, "activate", step("roles_activate"))
+    monkeypatch.setattr(host, "_run", step("compose_launch"))
+    monkeypatch.setattr(host, "_verify_candidate", step("candidate_verify"))
+    monkeypatch.setattr(host, "_evidence", step("evidence", b"ready"))
+    return host, request, actions
+
+
+@pytest.mark.parametrize("phase", list(module.CandidateReadinessPhase))
+def test_candidate_phase_failure_is_fixed_and_stops_at_failing_owner(
+    candidate_phase_host, monkeypatch, phase
+):
+    host, request, actions = candidate_phase_host
+    owner, symbol = {
+        "roles_create": (module.candidate_roles, "create_roles"),
+        "password_install": (host, "_install_candidate_passwords"),
+        "roles_activate": (module.candidate_roles, "activate"),
+        "compose_launch": (host, "_run"),
+        "candidate_verify": (host, "_verify_candidate"),
+    }[phase.value]
+
+    def fail(*a, **k):
+        actions.append(phase.value)
+        raise RuntimeError("NEVER_ECHO_PASSWORD_SQL_CHILD_OUTPUT")
+
+    monkeypatch.setattr(owner, symbol, fail)
+    with pytest.raises(RuntimeError):
+        host.candidate_ready(request, "a" * 64)
+    assert host.candidate_phase is phase
+    assert actions[-1] == phase.value
+    assert host._candidate_created
+    assert host._candidate_started == (
+        phase
+        in {
+            module.CandidateReadinessPhase.COMPOSE_LAUNCH,
+            module.CandidateReadinessPhase.CANDIDATE_VERIFY,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "_bound",
+        "target_heads",
+        "_materialize_candidate_environment",
+        "_candidate_mounts",
+    ],
+)
+def test_candidate_phase_is_absent_before_phase_and_stale_value_is_cleared(
+    candidate_phase_host, monkeypatch, boundary
+):
+    host, request, _ = candidate_phase_host
+    host.candidate_phase = module.CandidateReadinessPhase.CANDIDATE_VERIFY
+
+    def fail(*a, **k):
+        raise RuntimeError("pre-phase failure")
+
+    monkeypatch.setattr(host, boundary, fail)
+    with pytest.raises(RuntimeError):
+        host.candidate_ready(request, "a" * 64)
+    assert host.candidate_phase is None
+
+
+def test_successful_candidate_clears_phase_before_later_acl_failure(
+    candidate_phase_host, monkeypatch
+):
+    host, request, actions = candidate_phase_host
+    assert host.candidate_ready(request, "a" * 64) == b"ready"
+    assert actions[-1] == "evidence"
+    assert host.candidate_phase is None
+
+    def denied(*a, **k):
+        raise RuntimeError("later ACL failure")
+
+    monkeypatch.setattr(host, "restore_acl", denied)
+    with pytest.raises(RuntimeError):
+        host.restore_acl(request, "a" * 64)
+    assert host.candidate_phase is None
+
+
+def test_candidate_evidence_failure_has_no_readiness_phase(
+    candidate_phase_host, monkeypatch
+):
+    host, request, actions = candidate_phase_host
+
+    def fail(*a, **k):
+        raise RuntimeError("evidence retention failure")
+
+    monkeypatch.setattr(host, "_evidence", fail)
+    with pytest.raises(RuntimeError):
+        host.candidate_ready(request, "a" * 64)
+    assert actions[-1] == "candidate_verify"
+    assert host.candidate_phase is None
