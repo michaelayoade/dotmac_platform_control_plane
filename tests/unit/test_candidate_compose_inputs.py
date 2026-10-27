@@ -133,6 +133,10 @@ def test_valid_launch_is_redacted_and_secret_dollar_is_literal(
     assert launch.argv[launch.argv.index("-p") + 1] == (  # type: ignore[attr-defined]
         f"vcp-d16-{RUN_ID}"
     )
+    assert launch.project == f"vcp-d16-{RUN_ID}"  # type: ignore[attr-defined]
+    assert launch.probe_network == (  # type: ignore[attr-defined]
+        f"vcp-d16-{RUN_ID}_candidate_probe"
+    )
     assert "password" not in repr(launch).lower()
     for value in (
         values["JWT_SECRET"],

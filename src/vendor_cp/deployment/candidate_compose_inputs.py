@@ -25,7 +25,7 @@ DEFAULT_COMPOSE_FILE: Final = Path(
     "/opt/dotmac/vendor-control-plane/docker-compose.candidate.yml"
 )
 COMPOSE_SHA256: Final = (
-    "a4615d7cb7c7ff5d6998b2b8c37e10988d9777a2cef2dfbeee28855bd8bcc2a1"
+    "dd520657f620533e073a687de191aad6573e93cb654049f681968d0f846cbcb1"
 )
 IMAGE_REPOSITORY: Final = "ghcr.io/michaelayoade/dotmac_vendor_control_plane"
 LICENCE_KEY_HOST_FILE: Final = Path(
@@ -115,6 +115,14 @@ class CandidateComposeLaunch:
     env_file: Path = field(repr=False)
     docker_config: Path
 
+    @property
+    def project(self) -> str:
+        return _candidate_project(self.run_id)
+
+    @property
+    def probe_network(self) -> str:
+        return f"{self.project}_candidate_probe"
+
     def subprocess_env(self, inherited: Mapping[str, str]) -> dict[str, str]:
         """Discard inherited Docker/Compose settings and admit only fixed inputs."""
         return {
@@ -123,6 +131,10 @@ class CandidateComposeLaunch:
             "DOCKER_CONFIG": str(self.docker_config),
             **dict(self.compose_env),
         }
+
+
+def _candidate_project(run_id: str) -> str:
+    return f"vcp-d16-{run_id}"
 
 
 def _invocation_uid() -> int:
@@ -296,12 +308,11 @@ def build_candidate_compose_launch(
         raise CandidateInputRefused(
             "candidate app and platform credentials must differ"
         )
-    project = f"vcp-d16-{run_id}"
     argv = (
         "docker",
         "compose",
         "-p",
-        project,
+        _candidate_project(run_id),
         "-f",
         str(DEFAULT_COMPOSE_FILE),
         "up",

@@ -20,7 +20,7 @@ RUN_ID = "0123456789abcdef0123456789abcdef"
 IMAGE = "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:" + "a" * 64
 RUN_DIR_PREFIX = "/opt/dotmac/vendor-control-plane/candidate-runs/"
 REVIEWED_COMPOSE_SHA256 = (
-    "a4615d7cb7c7ff5d6998b2b8c37e10988d9777a2cef2dfbeee28855bd8bcc2a1"
+    "dd520657f620533e073a687de191aad6573e93cb654049f681968d0f846cbcb1"
 )
 
 
@@ -30,9 +30,13 @@ def test_compose_bytes_are_pinned_and_public_builder_has_no_path_override(
     source = COMPOSE.read_bytes()
     assert hashlib.sha256(source).hexdigest() == REVIEWED_COMPOSE_SHA256
     assert inputs.COMPOSE_SHA256 == REVIEWED_COMPOSE_SHA256
-    assert not {"compose_file", "run_root", "invocation_uid"} & set(
-        inspect.signature(inputs.build_candidate_compose_launch).parameters
-    )
+    assert not {
+        "compose_file",
+        "run_root",
+        "invocation_uid",
+        "project",
+        "probe_network",
+    } & set(inspect.signature(inputs.build_candidate_compose_launch).parameters)
     changed = tmp_path / "changed-compose.yml"
     changed.write_bytes(source + b"# altered after review\n")
     changed.chmod(0o644)
@@ -67,6 +71,12 @@ def test_candidate_compose_declares_only_isolated_app_and_absolute_file() -> Non
     assert "external: true" in source
     assert "dotmac_vendor_control_plane_vendor_backend" in source
     assert "dotmac_vendor_control_plane_vendor_product_manifests" in source
+    assert "    networks: [vendor_backend, candidate_probe]" in source
+    probe = source.split("  candidate_probe:\n", 1)[1]
+    assert "    driver: bridge\n" in probe
+    assert "    internal: false\n" in probe
+    assert "external:" not in probe and "name:" not in probe
+    assert "network_mode:" not in source
 
 
 def test_compose_render_exposes_only_candidate_app_with_relay_disabled(
@@ -144,6 +154,9 @@ def test_compose_render_exposes_only_candidate_app_with_relay_disabled(
     assert app.get("command") is None
     assert app.get("entrypoint") is None
     assert app["restart"] == "no"
-    assert app["networks"] == {"vendor_backend": None}
+    assert app["networks"] == {"vendor_backend": None, "candidate_probe": None}
+    probe = rendered["networks"]["candidate_probe"]
+    assert probe["driver"] == "bridge" and probe["internal"] is False
+    assert not probe.get("external")
     assert rendered["networks"]["vendor_backend"]["external"] is True
     assert rendered["volumes"]["vendor_product_manifests"]["external"] is True

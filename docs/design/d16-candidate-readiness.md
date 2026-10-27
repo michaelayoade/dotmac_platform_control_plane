@@ -13,7 +13,7 @@ from the exact selected immutable image. Use the standalone
 Compose file: merging would import the normal app and relay environment and
 their old-role database URLs. No candidate relay or dispatcher runs before
 the final restore/startup decision. Set `VENDOR_RELAY_EXPECTED=false` only for
-this isolated preflight; its `/health/ready` verdict covers app/database and
+this app-only preflight; its `/health/ready` verdict covers app/database and
 queue-derived readiness, not relay liveness or full production readiness.
 
 The app receives two distinct candidate URLs: `DATABASE_URL` uses the
@@ -42,7 +42,7 @@ another health check.
 
 ## Evidence and open activation gates
 
-An isolated candidate app must prove its bounded `/health/ready` verdict
+An app-only candidate must prove its bounded `/health/ready` verdict
 with the temporary DSNs while no relay worker can claim production events.
 Startup and preflight must be proved not to commit domain, settings, audit,
 or outbox changes. `read_only: true` constrains the container filesystem,
@@ -74,3 +74,15 @@ The dedicated non-production test host for isolated container/PostgreSQL
 tests is `root@85.190.246.211`. This document does not authorize nginx
 installation, public routing changes, shared-host service changes, or
 production activation there.
+
+The candidate joins the canonical internal backend and a separate project-owned
+`candidate_probe` bridge (`internal: false`) so Docker can publish the exact
+`127.0.0.1` readiness port. This normal bridge permits network egress; the
+candidate is not network isolated. It never joins the production frontend.
+The host refuses pre-existing run resources before creating candidate roles,
+then checks immutable image identity, both network identities and ownership,
+probe endpoints, and both requested and actual loopback publications before
+HTTP. Cleanup removes only the owned Compose project and proves its containers
+and probe network absent while the canonical internal backend ID is unchanged.
+New launcher source and reviewed Compose bytes must be installed together; old
+recovery records retain their historical bytes and claims.
