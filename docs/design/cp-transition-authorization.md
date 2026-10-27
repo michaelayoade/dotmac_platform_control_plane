@@ -184,6 +184,48 @@ a typed receipt and future history. This is a source-only amendment with
 isolated PostgreSQL tests; it authorizes no CI publication, installation,
 authorization dispatch or native grant.
 
+The approved 2026-10-27 bounded V2 source amendment adds closed
+`cp_failed_candidate_plan/2`, `cp_failed_candidate_request/2`,
+`cp_failed_candidate_context/2` and `cp_failed_candidate_receipt/2` contracts.
+Exactly one failed V1 successor is eligible; a V2 predecessor is refused before
+ancestry traversal. V1 documents, digest domains and its second-generation
+refusal remain unchanged. Installation retains its existing independently
+protected failed-context pin; that pin selects the separately typed document.
+Completed V2 history has its own `cp_failed_candidate_recovery_context/2` wrapper.
+
+V2 pins the original V1 context and the digest of its existing spent successor
+claim. The verifier first proves that V1 context using that owned claim and
+its full original committed prefix. It then verifies the latest V1 request,
+reservation, genuine failed-candidate evidence, historical authorization under
+its actual schema and execution window, strict fence and equal quiescence.
+The V2 basis retains the original fields bound to the latest failed attempt and
+adds `predecessor_context_digest` and `predecessor_frontier_claim_digest`.
+Neither supplied inventory nor a caller-selected directory defines eligibility:
+the loader derives each failed store from its pinned canonical Installation,
+and the verifier derives the complete permitted file closure from records it
+validated. Unknown files, partial writes and any later stage refuse even when
+included in supplied inventory. Reused context/request/nonce/authorization
+identities, skipped ancestry and aliased stores refuse.
+
+The fixed frontier identity uses the original committed frontier key plus the
+latest failed V1 request digest and nonce in the existing frontier-key domain.
+It excludes protocol, context, fresh authorization and fresh store selections,
+so competing proposals contend on one create-only reservation in the latest
+failed store. Fresh request reservation is separate; a crash leaves written
+reservations spent. Ancestor stores and claims are preserved byte for byte;
+only the exact new claim may be appended to the latest failed store. The
+original backup mapping, ACL/grants, application target and measurement remain
+unchanged. Admission, fence rebinding and the common candidate/readiness/ACL/
+routing suffix use their existing owners. Capture, restore and migration never
+replay. A later ordinary transition independently verifies completed V2 history.
+
+This source amendment provides no operational authorization. The actual prior
+candidate-readiness root cause remains unknown; synthetic unit fixtures do not
+establish production health, authorization or readiness. Dedicated-server
+PostgreSQL readiness, authentication and cleanup evidence remains a separate
+acceptance obligation, alongside independent review and subsequent concrete
+release and execution gates.
+
 This contract authorizes source implementation and isolated tests. Release,
 installation, any maintenance-database ACL repair, fresh protected job approval
 and live execution require their own concrete gates and authority.

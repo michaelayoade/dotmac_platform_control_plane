@@ -103,6 +103,24 @@ def author(value=None, trusted=None):
     )
 
 
+def failed_candidate_plan_v2() -> dict[str, object]:
+    value = failed_candidate_plan()
+    value["schema"] = "dotmac.cp_failed_candidate_plan/2"
+    value["basis"].update(
+        {
+            "predecessor_context_digest": "sha256:" + "f" * 64,
+            "predecessor_frontier_claim_digest": "sha256:" + "0" * 64,
+        }
+    )
+    value["plan_digest"] = cp.digest(
+        {
+            "schema": value["schema"],
+            **{key: value[key] for key in cp.FAILED_CANDIDATE_PLAN_FIELDS},
+        }
+    )
+    return value
+
+
 def test_exact_consumer_roundtrip_and_predicate(tmp_path: Path) -> None:
     request = author()
     assert request["authorization_run_id"] == 123
@@ -272,7 +290,10 @@ def test_foreign_dispatch_actor_id_or_rerun_cannot_author_request(field, foreign
         author(trusted=trusted)
 
 
-def test_actual_producer_cli_runs_with_database_and_kernel_imports_blocked(tmp_path):
+@pytest.mark.parametrize("plan_factory", [plan, failed_candidate_plan_v2])
+def test_actual_producer_cli_runs_with_database_and_kernel_imports_blocked(
+    tmp_path, plan_factory
+):
     """Exercise the workflow's real producer with only portable public imports."""
     import json
     import os
@@ -281,7 +302,7 @@ def test_actual_producer_cli_runs_with_database_and_kernel_imports_blocked(tmp_p
 
     root = Path(__file__).resolve().parents[2]
     plan_path = tmp_path / "plan.json"
-    plan_path.write_bytes(canonical_json(plan()))
+    plan_path.write_bytes(canonical_json(plan_factory()))
     output = tmp_path / "authorization"
     github_output = tmp_path / "github-output"
     program = r"""
@@ -450,3 +471,137 @@ def test_committed_plan_digest_binds_fixed_variant_discriminator():
     assert actual != cp.digest(payload)
     assert actual != cp.digest({"schema": "dotmac.cp_transition_plan/1", **payload})
     assert actual != cp.digest({key: value[key] for key in cp.PLAN_FIELDS})
+
+
+def test_failed_candidate_v2_roundtrip_is_canonical_and_author_identity_is_protected(
+    tmp_path: Path,
+):
+    value = failed_candidate_plan_v2()
+    authored = author(value)
+    assert authored["schema"] == "dotmac.cp_failed_candidate_request/2"
+    assert authored["basis"] == value["basis"]
+    assert authored["operator_revision"] == value["operator_revision"] != REVISION
+    assert authored["authorization_run_id"] == 123
+    assert authored["authorization_run_attempt"] == 2
+    assert authored["trusted_actor"] == producer.REPOSITORY_OWNER
+    assert cp.timestamp(authored["expires_at"]) == NOW + timedelta(hours=23)
+    reordered = dict(reversed(list(value.items())))
+    reordered["basis"] = dict(reversed(list(value["basis"].items())))
+    assert canonical_json(author(reordered)) == canonical_json(authored)
+    assert cp.transition_plan_digest(authored) == value["plan_digest"]
+    identity = cp.CpTransitionIdentity("cp-production", "platform", "123456", 16384)
+    assert (
+        cp.load_failed_candidate_request(
+            canonical_json(authored), identity=identity, now=NOW
+        )
+        == authored
+    )
+    output = tmp_path / "v2"
+    metadata = producer.write_authorization(authored, output)
+    assert (output / "request.json").read_bytes() == canonical_json(authored)
+    assert metadata["subject_digest"] == cp.raw_digest(canonical_json(authored))
+    assert read_json((output / "predicate.json").read_bytes()) == {
+        "request_digest": cp.request_digest(authored),
+        "trusted_actor": producer.REPOSITORY_OWNER,
+        "environment": "production",
+    }
+    with pytest.raises(ContractError):
+        cp.validate_failed_candidate_request(authored, identity=identity, now=NOW)
+
+
+@pytest.mark.parametrize("field", list(context()))
+def test_failed_candidate_v2_refuses_untrusted_workflow_context(field):
+    trusted = context()
+    trusted[field] = "invalid"
+    with pytest.raises(ContractError):
+        author(failed_candidate_plan_v2(), trusted)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "authorization_run_id",
+        "authorization_run_attempt",
+        "trusted_actor",
+        "expires_at",
+        "host_nonce",
+        "build_run_id",
+        "unknown",
+    ],
+)
+def test_failed_candidate_v2_refuses_operator_authorization_fields(field):
+    value = failed_candidate_plan_v2()
+    value[field] = "injected"
+    with pytest.raises(ContractError):
+        author(value)
+
+
+@pytest.mark.parametrize("field", list(failed_candidate_plan_v2()["basis"]))
+def test_failed_candidate_v2_digest_binds_each_basis_join(field):
+    value = failed_candidate_plan_v2()
+    value["basis"][field] = (
+        "1" * 64 if field.endswith(("nonce", "fence_id")) else "sha256:" + "1" * 64
+    )
+    # The context digest already uses this fixture value.
+    if field == "context_digest":
+        value["basis"][field] = "sha256:" + "0" * 64
+    with pytest.raises(ContractError):
+        author(value)
+
+
+@pytest.mark.parametrize(
+    "bad_schema",
+    [
+        "dotmac.cp_failed_candidate_plan/1",
+        "dotmac.cp_failed_candidate_plan/3",
+        "dotmac.cp_failed_candidate_request/2",
+        "dotmac.cp_committed_migration_plan/1",
+    ],
+)
+def test_failed_candidate_v2_refuses_cross_version_and_unknown_schemas(bad_schema):
+    value = failed_candidate_plan_v2()
+    value["schema"] = bad_schema
+    with pytest.raises(ContractError):
+        author(value)
+
+
+@pytest.mark.parametrize("field", list(failed_candidate_plan_v2()["basis"]))
+def test_failed_candidate_v2_basis_is_required_and_typed(field):
+    value = failed_candidate_plan_v2()
+    del value["basis"][field]
+    with pytest.raises(ContractError):
+        author(value)
+    value = failed_candidate_plan_v2()
+    value["basis"][field] = "invalid"
+    with pytest.raises(ContractError):
+        author(value)
+
+
+def test_failed_candidate_v2_refuses_unknown_and_v1_basis_and_v1_digest():
+    value = failed_candidate_plan_v2()
+    value["basis"]["unknown"] = "sha256:" + "1" * 64
+    with pytest.raises(ContractError):
+        author(value)
+    value = failed_candidate_plan_v2()
+    value["basis"] = failed_candidate_plan()["basis"]
+    with pytest.raises(ContractError):
+        author(value)
+    value = failed_candidate_plan_v2()
+    value["plan_digest"] = cp.digest(
+        {
+            "schema": "dotmac.cp_failed_candidate_plan/1",
+            **{key: value[key] for key in cp.FAILED_CANDIDATE_PLAN_FIELDS},
+        }
+    )
+    with pytest.raises(ContractError):
+        author(value)
+
+
+def test_failed_candidate_v1_fixture_digests_remain_unchanged():
+    value = failed_candidate_plan()
+    assert value["plan_digest"] == (
+        "sha256:eefc5aad877d9e80a31414c6fe3e3e36b2f1f272516956b7beae6f915000da8d"
+    )
+    assert cp.request_digest(author(value)) == (
+        "sha256:ea417a809de27a506dd536d7b4917a30bd48b407752d06b02fe8c793b435f240"
+    )

@@ -68,8 +68,10 @@ from vendor_cp.deployment.cp_transition import (
     CommittedMigrationContext,
     CpCommittedMigrationRequestV1,
     CpFailedCandidateRequestV1,
+    CpFailedCandidateRequestV2,
     CpTransitionRequestV1,
     FailedCandidateContext,
+    FailedCandidateContextV2,
     RecoveryContexts,
     SourceObservation,
     TransitionRequest,
@@ -101,6 +103,7 @@ from vendor_cp.deployment.transition_evidence import (
     read_current_migration_heads,
     read_descriptor_at_revision,
 )
+from vendor_cp.deployment.transition_operator import CandidateReadinessPhase
 from vendor_cp.production_secrets import production_deployment_lock
 
 SCRATCH_MAX_SOURCE_BYTES = 384 * 1024 * 1024
@@ -303,12 +306,16 @@ ConnectionFactory = Callable[..., AbstractContextManager[Connection]]
 
 class _CommittedContextArguments(TypedDict, total=False):
     committed_contexts: Mapping[str, CommittedMigrationContext]
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext]
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
 
 
 class _FailedReceiptArguments(TypedDict, total=False):
-    failed_candidate_context: FailedCandidateContext
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext]
+    failed_candidate_context: FailedCandidateContext | FailedCandidateContextV2
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
 
 
 class _CandidateArguments(TypedDict):
@@ -593,8 +600,13 @@ class ExistingCpTransitionHost:
         held_fence: HeldFenceContinuation | None = None,
         committed_context: CommittedMigrationContext | None = None,
         committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-        failed_candidate_context: FailedCandidateContext | None = None,
-        failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+        failed_candidate_context: FailedCandidateContext
+        | FailedCandidateContextV2
+        | None = None,
+        failed_candidate_contexts: Mapping[
+            str, FailedCandidateContext | FailedCandidateContextV2
+        ]
+        | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -648,6 +660,8 @@ class ExistingCpTransitionHost:
         self._routing_receipt: str | None = None
         self._candidate_created = False
         self._candidate_started = False
+        self._candidate_backend_id: str | None = None
+        self.candidate_phase: CandidateReadinessPhase | None = None
         self._acl_restored = False
         self._runtime_inputs: dict[Path, str] = {}
         self._candidate_profile: str | None = None
@@ -794,14 +808,17 @@ class ExistingCpTransitionHost:
             self._committed_binding(
                 cast(CpCommittedMigrationRequestV1, request), self._committed_context
             )
-        elif request.get("schema") == "dotmac.cp_failed_candidate_request/1":
+        elif request.get("schema") in {
+            "dotmac.cp_failed_candidate_request/1",
+            "dotmac.cp_failed_candidate_request/2",
+        }:
             require(
                 self._failed_candidate_context is not None,
                 "failed_candidate_context_required",
             )
             assert self._failed_candidate_context is not None  # noqa: S101
             self._failed_candidate_binding(
-                cast(CpFailedCandidateRequestV1, request),
+                cast(CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2, request),
                 self._failed_candidate_context,
             )
         require(self._request == request, "host_request_mismatch")
@@ -1079,8 +1096,8 @@ class ExistingCpTransitionHost:
 
     def _failed_candidate_binding(
         self,
-        request: CpFailedCandidateRequestV1,
-        context: FailedCandidateContext,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> None:
         require(
             self._held_fence is None
@@ -1125,8 +1142,8 @@ class ExistingCpTransitionHost:
 
     def _failed_candidate_admission(
         self,
-        request: CpFailedCandidateRequestV1,
-        context: FailedCandidateContext,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> None:
         self._failed_candidate_binding(request, context)
         self._continuation_admission(
@@ -1135,8 +1152,12 @@ class ExistingCpTransitionHost:
 
     @staticmethod
     def _check_committed_measurement(
-        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
-        context: CommittedMigrationContext | FailedCandidateContext,
+        request: CpCommittedMigrationRequestV1
+        | CpFailedCandidateRequestV1
+        | CpFailedCandidateRequestV2,
+        context: CommittedMigrationContext
+        | FailedCandidateContext
+        | FailedCandidateContextV2,
         measurement: dict[str, object],
     ) -> None:
         measurement = dict(measurement)
@@ -1160,8 +1181,12 @@ class ExistingCpTransitionHost:
 
     def _continuation_admission(
         self,
-        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
-        context: CommittedMigrationContext | FailedCandidateContext,
+        request: CpCommittedMigrationRequestV1
+        | CpFailedCandidateRequestV1
+        | CpFailedCandidateRequestV2,
+        context: CommittedMigrationContext
+        | FailedCandidateContext
+        | FailedCandidateContextV2,
         *,
         historical: CpTransitionRequestV1,
     ) -> None:
@@ -1271,8 +1296,8 @@ class ExistingCpTransitionHost:
 
     def inspect_failed_candidate(
         self,
-        request: CpFailedCandidateRequestV1,
-        context: FailedCandidateContext,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> bytes:
         self._inspect_installation(request)
         self._failed_candidate_admission(request, context)
@@ -1283,9 +1308,9 @@ class ExistingCpTransitionHost:
 
     def rebind_failed_candidate(
         self,
-        request: CpFailedCandidateRequestV1,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
         nonce: str,
-        context: FailedCandidateContext,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> bytes:
         self._bound(request, nonce)
         require(nonce != context.proof.fence_id, "failed_candidate_nonce_reused")
@@ -1296,9 +1321,13 @@ class ExistingCpTransitionHost:
 
     def _rebind_continuation(
         self,
-        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
+        request: CpCommittedMigrationRequestV1
+        | CpFailedCandidateRequestV1
+        | CpFailedCandidateRequestV2,
         nonce: str,
-        context: CommittedMigrationContext | FailedCandidateContext,
+        context: CommittedMigrationContext
+        | FailedCandidateContext
+        | FailedCandidateContextV2,
         *,
         kind: str,
     ) -> bytes:
@@ -2119,9 +2148,13 @@ class ExistingCpTransitionHost:
         }
 
     def candidate_ready(self, request: TransitionRequest, nonce: str) -> bytes:
+        self.candidate_phase = None
         self._bound(request, nonce)
         proof = self._strict(request)
-        if request["schema"] == "dotmac.cp_failed_candidate_request/1":
+        if request["schema"] in {
+            "dotmac.cp_failed_candidate_request/1",
+            "dotmac.cp_failed_candidate_request/2",
+        }:
             require(
                 self._failed_candidate_context is not None,
                 "failed_candidate_context_required",
@@ -2164,24 +2197,31 @@ class ExistingCpTransitionHost:
             licence_key_host_file=config.licence_key_host_file,
         )
         self._candidate_mounts()
+        self._candidate_resources_absent()
         self.roles = candidate_roles.CandidateRoles.for_run(
             database=request["database"], run_id=run_id
         )
         self._candidate_created = True  # creation may fail after its atomic DDL
+        self.candidate_phase = CandidateReadinessPhase.ROLES_CREATE
         with self._connect(request["database"]) as connection:
             candidate_roles.create_roles(
                 connection, self.roles, proof, **self._candidate_arguments()
             )
+            self.candidate_phase = CandidateReadinessPhase.PASSWORD_INSTALL
             self._install_candidate_passwords(connection)
+            self.candidate_phase = CandidateReadinessPhase.ROLES_ACTIVATE
             candidate_roles.activate(
                 connection, self.roles, proof, **self._candidate_arguments()
             )
         self._candidate_started = True  # also compensate a partially successful launch
+        self.candidate_phase = CandidateReadinessPhase.COMPOSE_LAUNCH
         self._run(
             (str(config.docker_binary), *self.launch.argv[1:]),
             env=self.launch.subprocess_env({}),
         )
+        self.candidate_phase = CandidateReadinessPhase.CANDIDATE_VERIFY
         self._verify_candidate(request)
+        self.candidate_phase = None
         return self._evidence(
             request,
             nonce,
@@ -2303,7 +2343,152 @@ class ExistingCpTransitionHost:
                 "network", "inspect", "dotmac_vendor_control_plane_vendor_backend"
             )
         )[0]
-        require(network.get("Driver") == "bridge", "candidate_network_mismatch")
+        require(
+            network.get("Name") == "dotmac_vendor_control_plane_vendor_backend"
+            and network.get("Driver") == "bridge"
+            and network.get("Internal") is True
+            and isinstance(network.get("Id"), str)
+            and bool(network.get("Id")),
+            "candidate_network_mismatch",
+        )
+        self._candidate_backend_id = cast(str, network["Id"])
+
+    def _candidate_resources(self) -> tuple[list[str], list[str], list[str]]:
+        require(self.launch is not None)
+        assert self.launch is not None  # noqa: S101
+        project = f"label=com.docker.compose.project={self.launch.project}"
+        containers = self._docker("ps", "-aq", "--filter", project).splitlines()
+        networks = self._docker("network", "ls", "-q", "--filter", project).splitlines()
+        # Docker name filters match substrings. Compare returned names exactly;
+        # a discovery failure propagates and never becomes an empty inventory.
+        named = [
+            name
+            for name in self._docker(
+                "network",
+                "ls",
+                "--format",
+                "{{.Name}}",
+                "--filter",
+                f"name={self.launch.probe_network}",
+            ).splitlines()
+            if name == self.launch.probe_network
+        ]
+        return containers, networks, named
+
+    def _candidate_resources_absent(self) -> None:
+        require(
+            not any(self._candidate_resources()),
+            "candidate_resources_present",
+        )
+
+    def _candidate_backend_unchanged(self) -> None:
+        network = json.loads(
+            self._docker(
+                "network", "inspect", "dotmac_vendor_control_plane_vendor_backend"
+            )
+        )[0]
+        require(
+            self._candidate_backend_id is not None
+            and network.get("Id") == self._candidate_backend_id
+            and network.get("Name") == "dotmac_vendor_control_plane_vendor_backend"
+            and network.get("Driver") == "bridge"
+            and network.get("Internal") is True,
+            "candidate_network_mismatch",
+        )
+
+    def _candidate_transport(self, *, cleanup: bool = False) -> None:
+        """Prove ownership before HTTP or teardown, including partial launches."""
+        require(self.launch is not None)
+        assert self.launch is not None  # noqa: S101
+        self._candidate_backend_unchanged()
+        containers, networks, named = self._candidate_resources()
+        require(
+            len(containers) <= 1 and (cleanup or len(containers) == 1),
+            "candidate_container_mismatch",
+        )
+        require(len(networks) <= 1, "candidate_probe_network_mismatch")
+        probe = None
+        if networks:
+            probe = json.loads(self._docker("network", "inspect", networks[0]))[0]
+            labels = probe.get("Labels") or {}
+            require(
+                probe.get("Name") == self.launch.probe_network
+                and probe.get("Driver") == "bridge"
+                and probe.get("Internal") is False
+                and labels.get("com.docker.compose.project") == self.launch.project
+                and labels.get("com.docker.compose.network") == "candidate_probe"
+                and isinstance(probe.get("Id"), str)
+                and bool(probe.get("Id"))
+                and named == [self.launch.probe_network],
+                "candidate_probe_network_mismatch",
+            )
+        else:
+            require(cleanup and not named, "candidate_probe_network_mismatch")
+        info = None
+        if containers:
+            info = self._container(containers[0])
+            labels = cast(dict[str, object], info.get("Config", {})).get("Labels") or {}
+            labels = cast(dict[str, str], labels)
+            require(
+                labels.get("com.docker.compose.project") == self.launch.project
+                and labels.get("com.docker.compose.service") == "candidate-app"
+                and labels.get("com.docker.compose.oneoff") == "False",
+                "candidate_container_mismatch",
+            )
+        if probe is not None:
+            endpoints = probe.get("Containers")
+            require(
+                isinstance(endpoints, dict)
+                and set(endpoints) <= ({info.get("Id")} if info else set()),
+                "candidate_probe_endpoints_mismatch",
+            )
+        if info is not None:
+            target_id = json.loads(self._docker("image", "inspect", self.launch.image))[
+                0
+            ]["Id"]
+            require(
+                info.get("Image") == target_id
+                and cast(dict[str, object], info.get("Config", {})).get("Image")
+                == self.launch.image,
+                "candidate_container_mismatch",
+            )
+            attached = cast(dict[str, object], info.get("NetworkSettings", {})).get(
+                "Networks"
+            )
+            require(isinstance(attached, dict), "candidate_network_mismatch")
+            assert isinstance(attached, dict)  # noqa: S101
+            backend_name = "dotmac_vendor_control_plane_vendor_backend"
+            expected_networks = {backend_name: self._candidate_backend_id}
+            if probe is not None:
+                expected_networks[self.launch.probe_network] = probe["Id"]
+            require(
+                set(attached) <= set(expected_networks)
+                and (cleanup or set(attached) == set(expected_networks))
+                and all(
+                    isinstance(value, dict)
+                    and value.get("NetworkID") == expected_networks[name]
+                    for name, value in attached.items()
+                ),
+                "candidate_network_mismatch",
+            )
+        if cleanup:
+            return
+        assert info is not None and probe is not None  # noqa: S101
+        require(
+            cast(dict[str, object], info.get("State", {})).get("Running") is True
+            and set(probe["Containers"]) == {info.get("Id")},
+            "candidate_container_mismatch",
+        )
+        expected = {
+            "8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(self.launch.port)}]
+        }
+        require(
+            cast(dict[str, object], info.get("HostConfig", {})).get("PortBindings")
+            == expected
+            and cast(dict[str, object], info.get("NetworkSettings", {})).get("Ports")
+            == expected,
+            "candidate_port_binding_mismatch",
+        )
 
     def _install_candidate_passwords(self, connection: Connection) -> None:
         require(self.launch is not None and self.roles is not None)
@@ -2369,6 +2554,7 @@ class ExistingCpTransitionHost:
                 "target_heads_mismatch",
             )
         self._negative_reconnect(request)
+        self._candidate_transport()
         self._http(
             f"http://127.0.0.1:{self.config.candidate_port}/health/ready",
             expected=200,
@@ -2389,17 +2575,19 @@ class ExistingCpTransitionHost:
         # Stop the app, then close LOGIN/CONNECT and terminate/drain any leftover
         # candidate backends before candidate_roles' strict cleanup verifier.
         if self._candidate_started:
+            self._candidate_transport(cleanup=True)
             argv = (
                 str(self.config.docker_binary),
                 "compose",
                 "-p",
-                f"vcp-d16-{self.launch.run_id}",
+                self.launch.project,
                 "-f",
                 str(DEFAULT_COMPOSE_FILE),
                 "down",
-                "--remove-orphans",
             )
             self._run(argv, env=self.launch.subprocess_env({}))
+            self._candidate_resources_absent()
+            self._candidate_backend_unchanged()
         with self._connect(request["database"]) as connection:
             present = set(
                 connection.execute(

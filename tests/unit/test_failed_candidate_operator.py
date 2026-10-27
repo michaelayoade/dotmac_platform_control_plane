@@ -11,12 +11,17 @@ from __future__ import annotations
 import copy
 import shutil
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from test_cp_committed_continuation import committed  # noqa: F401
-from test_cp_failed_candidate_recovery import failed, run_recovery  # noqa: F401
+from test_cp_failed_candidate_recovery import (
+    failed,  # noqa: F401
+    make_failed_v1,
+    run_recovery,
+)
 from test_cp_transition import NOW, request, store, trust  # noqa: F401
 from test_transition_operator import document, load  # noqa: F401
 
@@ -29,6 +34,14 @@ from vendor_cp.deployment.transition_fence import FenceRefused
 @pytest.fixture
 def protected_failed(failed, monkeypatch):
     context, successor, now, verifier, request_path = failed
+
+    class FixtureClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    # Keep the real request expiry guard deterministic at this fixture's window.
+    monkeypatch.setattr(op, "datetime", FixtureClock)
     canonical_operator_root = context.prior_store.root.parent / "failed-operator"
     canonical_operator_root.mkdir()
     canonical_store = canonical_operator_root / "artifact-store"
@@ -623,3 +636,234 @@ def test_same_parent_installation_cannot_choose_copied_spent_store(
         ContractError, match="failed_candidate_canonical_store_mismatch"
     ):
         op._load_failed_candidate_context(active)
+
+
+@pytest.fixture
+def protected_v2(protected_failed, trust, monkeypatch):
+    """Real loader path for both generations and actual-schema authorization."""
+    p = protected_failed
+    predecessor = op._load_failed_candidate_context(p.active)
+    prior = copy.deepcopy(p.successor)
+    prior["basis"]["context_digest"] = predecessor.context_digest
+    prior["plan_digest"] = cp.transition_plan_digest(prior)
+    context, successor, now, verifier, request_path = make_failed_v1(
+        (predecessor, prior, p.now, trust[0], p.request_path), trust
+    )
+    operator_root = context.prior_store.root.parent / "latest-operator"
+    operator_root.mkdir()
+    canonical_store = operator_root / "artifact-store"
+    context.prior_store.root.rename(canonical_store)
+    context.prior_store.root = canonical_store
+    installation_path = operator_root / "installation.json"
+    installation_document = copy.deepcopy(p.installation_document)
+    installation_document.pop("committed_migration_context")
+    installation_document["failed_candidate_context"] = dict(
+        p.active.failed_candidate_context
+    )
+    installation_document["artifact_directory"] = str(canonical_store)
+    installation_document["operator_revision"] = context.request["operator_revision"]
+    latest_installation = op.Installation(
+        verifier.policy,
+        SimpleNamespace(),
+        context.prior_store,
+        (),
+        operator_revision=context.request["operator_revision"],
+        failed_candidate_context=installation_document["failed_candidate_context"],
+    )
+    work = operator_root / (
+        f"native-attempt-{context.request['authorization_run_id']}-"
+        f"{context.request['authorization_run_attempt']}"
+    )
+    invocation = {
+        "status": "ONE_ATTEMPT_STARTED",
+        "run_id": context.request["authorization_run_id"],
+        "started_unix": int(now.timestamp()),
+        "request_sha256": cp.request_digest(context.request)[7:],
+        "bundle_sha256": cp.raw_digest(b"synthetic bundle")[7:],
+    }
+    result = {**p.result, "work": str(work), "completed_unix": int(now.timestamp())}
+    authority_path = operator_root / "authorization.json"
+    historical_document = {
+        **p.historical_document,
+        "invocation_file": str(work / "invocation.json"),
+        "result_file": str(work / "result.json"),
+        "invocation_digest": cp.raw_digest(canonical_json(invocation)),
+        "result_digest": cp.raw_digest(canonical_json(result)),
+    }
+    context_path = operator_root / "v2-context.json"
+    context_document = {
+        "schema": "dotmac.cp_failed_candidate_context/2",
+        "failed_installation": {
+            "path": str(installation_path),
+            "digest": cp.raw_digest(canonical_json(installation_document)),
+        },
+        "request": context.request,
+        "host_nonce": context.host_nonce,
+        "reservation_digest": cp.raw_digest(
+            context.prior_store.read(
+                cp.request_digest(context.request), kind="reservation"
+            )
+        ),
+        "authorization_verification_digest": cp.raw_digest(
+            context.historical_authorization.verification_bytes
+        ),
+        "authorization_context": {
+            "path": str(authority_path),
+            "digest": cp.raw_digest(canonical_json(historical_document)),
+        },
+        "predecessor_context_digest": predecessor.context_digest,
+        "predecessor_frontier_claim_digest": context.predecessor_frontier_claim_digest,
+        "original_context_digest": context.original.context_digest,
+        "original_frontier_claim_digest": context.original_frontier_claim_digest,
+        "current_fence_digest": context.proof.digest(),
+        "current_fence_id": context.proof.fence_id,
+        "evidence": dict(context.evidence),
+        "quiescence_digest": context.quiescence_digest,
+        "inventory": dict(context.inventory),
+    }
+    reads = {
+        installation_path: canonical_json(installation_document),
+        context_path: canonical_json(context_document),
+        authority_path: canonical_json(historical_document),
+        work / "invocation.json": canonical_json(invocation),
+        work / "result.json": canonical_json(result),
+        work / "request.json": canonical_json(context.request),
+        work / "bundle.json": b"synthetic bundle",
+    }
+    p.reads.update(reads)
+    active = replace(
+        p.active,
+        failed_candidate_context={
+            "path": str(context_path),
+            "digest": cp.raw_digest(reads[context_path]),
+        },
+    )
+    monkeypatch.setattr(
+        op,
+        "load_installation",
+        lambda path: (
+            latest_installation
+            if str(latest_installation.store.root)
+            == installation_document["artifact_directory"]
+            else replace(
+                latest_installation,
+                store=cp.ArtifactStore(
+                    Path(installation_document["artifact_directory"])
+                ),
+            )
+        )
+        if path == installation_path
+        else p.failed_installation
+        if path == p.failed_path
+        else active,
+    )
+    successor["basis"]["context_digest"] = active.failed_candidate_context["digest"]
+    successor["plan_digest"] = cp.transition_plan_digest(successor)
+    return SimpleNamespace(
+        active=active,
+        context=context,
+        successor=successor,
+        document=context_document,
+        path=context_path,
+        reads=p.reads,
+        predecessor=p,
+        installation_document=installation_document,
+        installation_path=installation_path,
+        authority_path=authority_path,
+        historical_document=historical_document,
+        invocation=invocation,
+        work=work,
+    )
+
+
+def test_v2_loader_validates_both_canonical_installations_and_full_frontier(
+    protected_v2,
+):
+    p = protected_v2
+    loaded = op._load_failed_candidate_context(p.active)
+    assert isinstance(loaded, cp.FailedCandidateContextV2)
+    assert type(loaded.predecessor) is cp.FailedCandidateContext
+    assert loaded.prior_store is p.context.prior_store
+    assert loaded.predecessor.prior_store is p.predecessor.context.prior_store
+    loaded.historical_authorization.verify(loaded.request)
+    cp.verify_failed_candidate_frontier(loaded, p.successor)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "predecessor_pin",
+        "v2_predecessor",
+        "skipped_predecessor",
+        "latest_installation_alias",
+        "request_schema",
+        "execution_window",
+        "reservation",
+        "authorization",
+    ],
+)
+def test_v2_loader_rejects_mutated_ancestry(protected_v2, mutation):
+    p = protected_v2
+    if mutation == "predecessor_pin":
+        p.document["predecessor_context_digest"] = "sha256:" + "0" * 64
+    elif mutation == "v2_predecessor":
+        prior = copy.deepcopy(p.predecessor.document)
+        prior["schema"] = "dotmac.cp_failed_candidate_context/2"
+        p.reads[p.predecessor.path] = canonical_json(prior)
+    elif mutation == "skipped_predecessor":
+        p.installation_document.pop("failed_candidate_context")
+        p.installation_document["committed_migration_context"] = {
+            "path": "/opt/skipped",
+            "digest": "sha256:" + "0" * 64,
+        }
+    elif mutation == "latest_installation_alias":
+        p.installation_document["artifact_directory"] = str(
+            p.predecessor.context.prior_store.root
+        )
+    elif mutation == "request_schema":
+        p.document["request"] = p.successor
+    elif mutation == "execution_window":
+        p.invocation["started_unix"] -= 25 * 3600
+        p.reads[p.work / "invocation.json"] = canonical_json(p.invocation)
+        p.historical_document["invocation_digest"] = cp.raw_digest(
+            p.reads[p.work / "invocation.json"]
+        )
+        p.reads[p.authority_path] = canonical_json(p.historical_document)
+        p.document["authorization_context"]["digest"] = cp.raw_digest(
+            p.reads[p.authority_path]
+        )
+    elif mutation == "reservation":
+        p.document["reservation_digest"] = "sha256:" + "0" * 64
+    else:
+        p.document["authorization_verification_digest"] = "sha256:" + "0" * 64
+    p.reads[p.installation_path] = canonical_json(p.installation_document)
+    p.document["failed_installation"]["digest"] = cp.raw_digest(
+        p.reads[p.installation_path]
+    )
+    p.reads[p.path] = canonical_json(p.document)
+    active = replace(
+        p.active,
+        failed_candidate_context={
+            "path": str(p.path),
+            "digest": cp.raw_digest(p.reads[p.path]),
+        },
+    )
+    successor = copy.deepcopy(p.successor)
+    successor["basis"]["context_digest"] = active.failed_candidate_context["digest"]
+    successor["plan_digest"] = cp.transition_plan_digest(successor)
+    expected = {
+        "predecessor_pin": "failed_candidate_ancestry_mismatch",
+        "v2_predecessor": "schema_violation",
+        "skipped_predecessor": "failed_candidate_predecessor_kind",
+        "latest_installation_alias": "failed_candidate_canonical_store_mismatch",
+        "request_schema": "schema_violation",
+        "execution_window": "expired",
+        "reservation": "failed_candidate_reservation_mismatch",
+    }
+    if mutation == "authorization":
+        with pytest.raises(FileNotFoundError):
+            op._load_failed_candidate_context(active)
+    else:
+        with pytest.raises(ContractError, match=expected[mutation]):
+            loaded = op._load_failed_candidate_context(active)
+            cp.verify_failed_candidate_frontier(loaded, successor)

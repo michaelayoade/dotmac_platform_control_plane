@@ -1635,8 +1635,9 @@ def test_candidate_password_driver_failure_still_resets_and_redacts(host, monkey
     assert len(connection.passwords) == 1
 
 
-@pytest.fixture
-def failed_candidate(host, monkeypatch):
+@pytest.fixture(params=[1, 2], ids=["failed-v1", "bounded-v2"])
+def failed_candidate(host, monkeypatch, request):
+    generation = request.param
     from copy import deepcopy
 
     catalogue = b"complete retained catalogue"
@@ -1683,7 +1684,7 @@ def failed_candidate(host, monkeypatch):
     )
     request = {
         **deepcopy(prior),
-        "schema": "dotmac.cp_failed_candidate_request/1",
+        "schema": f"dotmac.cp_failed_candidate_request/{generation}",
         "operator_revision": "f" * 40,
         "basis": {
             "context_digest": context.context_digest,
@@ -1960,3 +1961,536 @@ def test_routing_propagates_failed_context_registry_for_current_and_future_v1(
     else:
         assert "failed_candidate_context" not in forwarded[0]
     assert forwarded[0]["routing_gate"] is True and runtimes == [request]
+
+
+@pytest.fixture
+def candidate_phase_host(failed_candidate, monkeypatch):
+    host, request, context, _, _ = failed_candidate
+    request["target"]["image_digest"] = "sha256:" + "2" * 64
+    actions = []
+
+    def step(name, result=None):
+        def run(*args, **kwargs):
+            actions.append(name)
+            return result
+
+        return run
+
+    for name in (
+        "_bound",
+        "target_heads",
+        "_materialize_candidate_environment",
+        "_candidate_mounts",
+        "_candidate_resources_absent",
+    ):
+        monkeypatch.setattr(host, name, step(name))
+    monkeypatch.setattr(host, "_strict", lambda *a: context.proof)
+    monkeypatch.setattr(host, "_quiescence_snapshot", lambda *a: b"snapshot")
+    monkeypatch.setattr(host, "_retain", lambda *a: "retained")
+    monkeypatch.setattr(host, "_candidate_arguments", lambda: {})
+    monkeypatch.setattr(host, "_connect", lambda *a: nullcontext(object()))
+    monkeypatch.setattr(
+        module,
+        "build_candidate_compose_launch",
+        lambda **k: SimpleNamespace(
+            argv=("docker", "compose"), subprocess_env=lambda _: {}
+        ),
+    )
+    monkeypatch.setattr(module.candidate_roles, "create_roles", step("roles_create"))
+    monkeypatch.setattr(host, "_install_candidate_passwords", step("password_install"))
+    monkeypatch.setattr(module.candidate_roles, "activate", step("roles_activate"))
+    monkeypatch.setattr(host, "_run", step("compose_launch"))
+    monkeypatch.setattr(host, "_verify_candidate", step("candidate_verify"))
+    monkeypatch.setattr(host, "_evidence", step("evidence", b"ready"))
+    return host, request, actions
+
+
+@pytest.mark.parametrize("phase", list(module.CandidateReadinessPhase))
+def test_candidate_phase_failure_is_fixed_and_stops_at_failing_owner(
+    candidate_phase_host, monkeypatch, phase
+):
+    host, request, actions = candidate_phase_host
+    owner, symbol = {
+        "roles_create": (module.candidate_roles, "create_roles"),
+        "password_install": (host, "_install_candidate_passwords"),
+        "roles_activate": (module.candidate_roles, "activate"),
+        "compose_launch": (host, "_run"),
+        "candidate_verify": (host, "_verify_candidate"),
+    }[phase.value]
+
+    def fail(*a, **k):
+        actions.append(phase.value)
+        raise RuntimeError("NEVER_ECHO_PASSWORD_SQL_CHILD_OUTPUT")
+
+    monkeypatch.setattr(owner, symbol, fail)
+    with pytest.raises(RuntimeError):
+        host.candidate_ready(request, "a" * 64)
+    assert host.candidate_phase is phase
+    assert actions[-1] == phase.value
+    assert host._candidate_created
+    assert host._candidate_started == (
+        phase
+        in {
+            module.CandidateReadinessPhase.COMPOSE_LAUNCH,
+            module.CandidateReadinessPhase.CANDIDATE_VERIFY,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "_bound",
+        "target_heads",
+        "_materialize_candidate_environment",
+        "_candidate_mounts",
+        "_candidate_resources_absent",
+    ],
+)
+def test_candidate_phase_is_absent_before_phase_and_stale_value_is_cleared(
+    candidate_phase_host, monkeypatch, boundary
+):
+    host, request, _ = candidate_phase_host
+    host.candidate_phase = module.CandidateReadinessPhase.CANDIDATE_VERIFY
+
+    def fail(*a, **k):
+        raise RuntimeError("pre-phase failure")
+
+    monkeypatch.setattr(host, boundary, fail)
+    with pytest.raises(RuntimeError):
+        host.candidate_ready(request, "a" * 64)
+    assert host.candidate_phase is None
+
+
+def test_successful_candidate_clears_phase_before_later_acl_failure(
+    candidate_phase_host, monkeypatch
+):
+    host, request, actions = candidate_phase_host
+    assert host.candidate_ready(request, "a" * 64) == b"ready"
+    assert actions[-1] == "evidence"
+    assert host.candidate_phase is None
+
+    def denied(*a, **k):
+        raise RuntimeError("later ACL failure")
+
+    monkeypatch.setattr(host, "restore_acl", denied)
+    with pytest.raises(RuntimeError):
+        host.restore_acl(request, "a" * 64)
+    assert host.candidate_phase is None
+
+
+def test_candidate_evidence_failure_has_no_readiness_phase(
+    candidate_phase_host, monkeypatch
+):
+    host, request, actions = candidate_phase_host
+
+    def fail(*a, **k):
+        raise RuntimeError("evidence retention failure")
+
+    monkeypatch.setattr(host, "_evidence", fail)
+    with pytest.raises(RuntimeError):
+        host.candidate_ready(request, "a" * 64)
+    assert actions[-1] == "candidate_verify"
+    assert host.candidate_phase is None
+
+
+@pytest.fixture
+def candidate_network(host, monkeypatch):
+    """Docker metadata boundary: both label discovery and exact-name collisions."""
+    run_id = "a" * 32
+    host.launch = module.CandidateComposeLaunch(
+        run_id=run_id,
+        image=host.config.target_image,
+        port=host.config.candidate_port,
+        argv=(),
+        compose_env=(),
+        env_file=Path("/unused/app.env"),
+        docker_config=Path("/unused/docker-config"),
+    )
+    backend_name = "dotmac_vendor_control_plane_vendor_backend"
+    host._candidate_backend_id = "b" * 64
+    container_id = "c" * 64
+    probe_id = "d" * 64
+    ports = {"8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18100"}]}
+    backend = {
+        "Id": host._candidate_backend_id,
+        "Name": backend_name,
+        "Driver": "bridge",
+        "Internal": True,
+    }
+    probe = {
+        "Id": probe_id,
+        "Name": host.launch.probe_network,
+        "Driver": "bridge",
+        "Internal": False,
+        "Labels": {
+            "com.docker.compose.project": host.launch.project,
+            "com.docker.compose.network": "candidate_probe",
+        },
+        "Containers": {container_id: {"Name": "candidate-app"}},
+    }
+    info = {
+        "Id": container_id,
+        "Image": "sha256:" + "e" * 64,
+        "Config": {
+            "Image": host.config.target_image,
+            "Labels": {
+                "com.docker.compose.project": host.launch.project,
+                "com.docker.compose.service": "candidate-app",
+                "com.docker.compose.oneoff": "False",
+            },
+        },
+        "State": {"Running": True},
+        "HostConfig": {"PortBindings": ports},
+        "NetworkSettings": {
+            "Ports": ports.copy(),
+            "Networks": {
+                backend_name: {"NetworkID": backend["Id"]},
+                host.launch.probe_network: {"NetworkID": probe_id},
+            },
+        },
+    }
+    state = {
+        "containers": [container_id],
+        "networks": [probe_id],
+        "named": [host.launch.probe_network],
+        "backend": backend,
+        "probe": probe,
+        "info": info,
+        "commands": [],
+    }
+
+    def docker(*args, **kwargs):
+        state["commands"].append(args)
+        if args[:2] == ("ps", "-aq"):
+            return "\n".join(state["containers"])
+        if args[:3] == ("network", "ls", "-q"):
+            return "\n".join(state["networks"])
+        if args[:3] == ("network", "ls", "--format"):
+            return "\n".join(state["named"])
+        if args[:2] == ("network", "inspect"):
+            return json.dumps([backend if args[2] == backend_name else probe])
+        if args == ("inspect", container_id):
+            return json.dumps([info])
+        if args == ("image", "inspect", host.config.target_image):
+            return json.dumps([{"Id": "sha256:" + "e" * 64}])
+        raise AssertionError(args)
+
+    monkeypatch.setattr(host, "_docker", docker)
+    return host, state
+
+
+def test_candidate_transport_accepts_exact_dual_network_loopback(candidate_network):
+    host, _ = candidate_network
+    host._candidate_transport()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "extra_container",
+        "wrong_image",
+        "wrong_reference",
+        "stopped",
+        "project_label",
+        "service_label",
+        "oneoff",
+        "probe_driver",
+        "probe_internal",
+        "probe_name",
+        "probe_project",
+        "probe_label",
+        "foreign_endpoint",
+        "missing_endpoint",
+        "extra_network",
+        "wrong_backend_id",
+        "wrong_probe_id",
+        "missing_probe",
+        "backend_internal",
+        "backend_driver",
+        "backend_replaced",
+        "extra_project_network",
+    ],
+)
+def test_candidate_transport_refuses_topology_or_ownership(candidate_network, fault):
+    host, state = candidate_network
+    info, probe, backend = state["info"], state["probe"], state["backend"]
+    attached = info["NetworkSettings"]["Networks"]
+    if fault == "extra_container":
+        state["containers"].append("f" * 64)
+    elif fault == "wrong_image":
+        info["Image"] = "sha256:" + "f" * 64
+    elif fault == "wrong_reference":
+        info["Config"]["Image"] = "mutable:latest"
+    elif fault == "stopped":
+        info["State"]["Running"] = False
+    elif fault == "project_label":
+        info["Config"]["Labels"]["com.docker.compose.project"] = "other"
+    elif fault == "service_label":
+        info["Config"]["Labels"]["com.docker.compose.service"] = "relay"
+    elif fault == "oneoff":
+        info["Config"]["Labels"]["com.docker.compose.oneoff"] = "True"
+    elif fault == "probe_driver":
+        probe["Driver"] = "overlay"
+    elif fault == "probe_internal":
+        probe["Internal"] = True
+    elif fault == "probe_name":
+        probe["Name"] = "foreign"
+    elif fault == "probe_project":
+        probe["Labels"]["com.docker.compose.project"] = "other"
+    elif fault == "probe_label":
+        probe["Labels"]["com.docker.compose.network"] = "other"
+    elif fault == "foreign_endpoint":
+        probe["Containers"]["f" * 64] = {}
+    elif fault == "missing_endpoint":
+        probe["Containers"] = {}
+    elif fault == "extra_network":
+        attached["frontend"] = {"NetworkID": "f" * 64}
+    elif fault == "wrong_backend_id":
+        attached[backend["Name"]]["NetworkID"] = "f" * 64
+    elif fault == "wrong_probe_id":
+        attached[probe["Name"]]["NetworkID"] = "f" * 64
+    elif fault == "missing_probe":
+        del attached[probe["Name"]]
+    elif fault == "backend_internal":
+        backend["Internal"] = False
+    elif fault == "backend_driver":
+        backend["Driver"] = "overlay"
+    elif fault == "backend_replaced":
+        backend["Id"] = "f" * 64
+    elif fault == "extra_project_network":
+        state["networks"].append("f" * 64)
+    else:
+        raise AssertionError(fault)
+    with pytest.raises(ContractError, match="candidate_"):
+        host._candidate_transport()
+
+
+@pytest.mark.parametrize("field", ["requested", "actual"])
+@pytest.mark.parametrize(
+    "ports",
+    [
+        {"8000/tcp": None},
+        {},
+        {"8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "18100"}]},  # noqa: S104
+        {"8000/tcp": [{"HostIp": "::", "HostPort": "18100"}]},
+        {"8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18101"}]},
+        {"8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18100"}], "9000/tcp": None},
+        {
+            "8000/tcp": [
+                {"HostIp": "127.0.0.1", "HostPort": "18100"},
+                {"HostIp": "::1", "HostPort": "18100"},
+            ]
+        },
+    ],
+)
+def test_candidate_requires_requested_and_actual_exact_port(
+    candidate_network, field, ports
+):
+    host, state = candidate_network
+    if field == "requested":
+        state["info"]["HostConfig"]["PortBindings"] = ports
+    else:
+        state["info"]["NetworkSettings"]["Ports"] = ports
+    with pytest.raises(ContractError, match="candidate_port_binding_mismatch"):
+        host._candidate_transport()
+
+
+@pytest.mark.parametrize("collision", ["containers", "networks", "named"])
+def test_candidate_prelaunch_refuses_every_resource_collision(
+    candidate_network, collision
+):
+    host, state = candidate_network
+    for field in ("containers", "networks", "named"):
+        if field != collision:
+            state[field] = []
+    with pytest.raises(ContractError, match="candidate_resources_present"):
+        host._candidate_resources_absent()
+
+
+def test_candidate_prelaunch_discovery_error_is_not_absence(
+    candidate_network, monkeypatch
+):
+    host, _ = candidate_network
+
+    def fail(*a, **k):
+        raise RuntimeError("discovery failed")
+
+    monkeypatch.setattr(host, "_docker", fail)
+    with pytest.raises(RuntimeError, match="discovery failed"):
+        host._candidate_resources_absent()
+
+
+def test_candidate_collision_precedes_role_creation(candidate_phase_host, monkeypatch):
+    host, request, actions = candidate_phase_host
+
+    def collision():
+        raise ContractError("candidate_resources_present")
+
+    monkeypatch.setattr(host, "_candidate_resources_absent", collision)
+    with pytest.raises(ContractError, match="candidate_resources_present"):
+        host.candidate_ready(request, "a" * 64)
+    assert "roles_create" not in actions
+    assert not host._candidate_created and not host._candidate_started
+
+
+@pytest.mark.parametrize("fault", ["foreign_endpoint", "probe_label", "extra_network"])
+def test_candidate_cleanup_refuses_unknown_ownership_before_down(
+    candidate_network, monkeypatch, fault
+):
+    host, state = candidate_network
+    host.roles, host.proof = object(), object()
+    host._candidate_created = host._candidate_started = True
+    monkeypatch.setattr(host, "_bound", lambda *a: None)
+    if fault == "foreign_endpoint":
+        state["probe"]["Containers"]["f" * 64] = {}
+    elif fault == "probe_label":
+        state["probe"]["Labels"]["com.docker.compose.network"] = "other"
+    else:
+        state["info"]["NetworkSettings"]["Networks"]["frontend"] = {
+            "NetworkID": "f" * 64
+        }
+    monkeypatch.setattr(
+        host, "_run", lambda *a, **k: pytest.fail("unsafe compose down")
+    )
+    with pytest.raises(ContractError, match="candidate_"):
+        host.close_candidate_and_refence(cast(CpTransitionRequestV1, {}), "nonce")
+
+
+@pytest.mark.parametrize("leftover", ["containers", "networks", "named", "backend"])
+def test_candidate_cleanup_readback_failure_blocks_acl(
+    candidate_network, monkeypatch, leftover
+):
+    host, state = candidate_network
+    host.roles, host.proof = object(), object()
+    host._candidate_created = host._candidate_started = True
+    monkeypatch.setattr(host, "_bound", lambda *a: None)
+    monkeypatch.setattr(host, "_strict", lambda *a: host.proof)
+
+    def down(argv, **kwargs):
+        assert argv[-1] == "down" and "--remove-orphans" not in argv
+        for field in ("containers", "networks", "named"):
+            if field != leftover:
+                state[field] = []
+        if leftover == "backend":
+            state["backend"]["Id"] = "f" * 64
+
+    monkeypatch.setattr(host, "_run", down)
+    monkeypatch.setattr(
+        host, "_connect", lambda *a: pytest.fail("DB mutation after failed cleanup")
+    )
+    request = cast(CpTransitionRequestV1, {})
+    with pytest.raises(ContractError, match="candidate_"):
+        host.close_candidate_and_refence(request, "nonce")
+    assert host._candidate_created and host._candidate_started
+    with pytest.raises(ContractError, match="candidate_cleanup_missing"):
+        host.restore_acl(request, "nonce")
+
+
+def test_partial_launch_cleanup_accepts_absent_owned_resources(candidate_network):
+    host, state = candidate_network
+    for field in ("containers", "networks", "named"):
+        state[field] = []
+    host._candidate_transport(cleanup=True)
+    host._candidate_resources_absent()
+    host._candidate_backend_unchanged()
+
+
+def test_transport_refusal_after_launch_keeps_compensation_armed(
+    candidate_phase_host, candidate_network, monkeypatch
+):
+    host, request, actions = candidate_phase_host
+    network_host, state = candidate_network
+    assert network_host is host
+    launch = host.launch
+    monkeypatch.setattr(module, "build_candidate_compose_launch", lambda **k: launch)
+    monkeypatch.setattr(
+        host, "_verify_candidate", lambda *a: host._candidate_transport()
+    )
+    state["info"]["NetworkSettings"]["Ports"] = {"8000/tcp": None}
+    with pytest.raises(ContractError, match="candidate_port_binding_mismatch"):
+        host.candidate_ready(request, "a" * 64)
+    assert host._candidate_created and host._candidate_started
+    assert host.candidate_phase is module.CandidateReadinessPhase.CANDIDATE_VERIFY
+    assert actions[-1] == "compose_launch"
+
+
+def test_cleanup_failure_still_attempts_independent_database_refence(host, monkeypatch):
+    actions = []
+    host.proof = SimpleNamespace(fence_id="nonce")
+    host._candidate_created = host._candidate_started = True
+    monkeypatch.setattr(host, "_bound", lambda *a: None)
+    monkeypatch.setattr(host, "_maintenance", lambda: actions.append("maintenance"))
+
+    def cleanup(*a):
+        actions.append("cleanup")
+        raise ContractError("candidate_resources_present")
+
+    monkeypatch.setattr(host, "close_candidate_and_refence", cleanup)
+    monkeypatch.setattr(host, "_identity", lambda *a: None)
+    monkeypatch.setattr(host, "_connect", lambda *a: nullcontext(object()))
+
+    def fence(*a, **k):
+        actions.append("refence")
+        return host.proof
+
+    monkeypatch.setattr(module.transition_fence, "fence_writers", fence)
+    monkeypatch.setattr(host, "_strict", lambda *a: actions.append("strict"))
+    with pytest.raises(RuntimeError, match="containment"):
+        host.fail_closed(
+            cast(CpTransitionRequestV1, {"database": "source"}),
+            "nonce",
+            acl_may_be_restored=False,
+        )
+    assert actions == ["maintenance", "cleanup", "refence", "strict"]
+
+
+def test_owned_probe_only_partial_launch_can_be_removed(candidate_network):
+    host, state = candidate_network
+    state["containers"] = []
+    state["probe"]["Containers"] = {}
+    host._candidate_transport(cleanup=True)
+
+
+def test_successful_cleanup_proves_network_absence_before_role_cleanup(
+    candidate_network, monkeypatch
+):
+    host, state = candidate_network
+    actions = []
+    host.roles = SimpleNamespace(bindings=lambda: ())
+    host.proof = object()
+    host._candidate_created = host._candidate_started = True
+    monkeypatch.setattr(host, "_bound", lambda *a: None)
+
+    def down(argv, **kwargs):
+        assert argv[-1] == "down" and "--remove-orphans" not in argv
+        for field in ("containers", "networks", "named"):
+            state[field] = []
+        actions.append("down")
+
+    monkeypatch.setattr(host, "_run", down)
+
+    def connect(*a):
+        assert not state["containers"] and not state["networks"] and not state["named"]
+        actions.append("role-cleanup")
+        return nullcontext(
+            SimpleNamespace(execute=lambda *a: SimpleNamespace(scalars=lambda: ()))
+        )
+
+    monkeypatch.setattr(host, "_connect", connect)
+    monkeypatch.setattr(host, "_drain_candidates", lambda *a: None)
+    monkeypatch.setattr(
+        module.candidate_roles, "cleanup_before_restore", lambda *a, **k: None
+    )
+    monkeypatch.setattr(host, "_strict", lambda *a: None)
+    monkeypatch.setattr(host, "_candidate_arguments", lambda: {})
+    monkeypatch.setattr(host, "_finish_candidate_quiescence", lambda *a: "digest")
+    monkeypatch.setattr(host, "_evidence", lambda *a: b"cleaned")
+    assert (
+        host.close_candidate_and_refence(
+            cast(CpTransitionRequestV1, {"database": "source"}), "nonce"
+        )
+        == b"cleaned"
+    )
+    assert actions == ["down", "role-cleanup"]
+    assert not host._candidate_created and not host._candidate_started

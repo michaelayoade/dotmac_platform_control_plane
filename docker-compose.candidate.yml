@@ -45,7 +45,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    networks: [vendor_backend]
+    networks: [vendor_backend, candidate_probe]
 
 volumes:
   vendor_product_manifests:
@@ -56,3 +56,8 @@ networks:
   vendor_backend:
     external: true
     name: dotmac_vendor_control_plane_vendor_backend
+  # Project-scoped normal bridge enables the exact loopback publication.
+  # It permits ordinary bridge egress; the canonical backend stays internal.
+  candidate_probe:
+    driver: bridge
+    internal: false

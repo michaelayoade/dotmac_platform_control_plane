@@ -11,6 +11,7 @@ import re
 import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, TypedDict, cast
 
@@ -223,8 +224,33 @@ class FailedCandidateContextV1(TypedDict):
     inventory: dict[str, Digest]
 
 
+class FailedCandidateContextV2(TypedDict):
+    schema: Literal["dotmac.cp_failed_candidate_context/2"]
+    failed_installation: FailedCandidatePinsV1
+    request: cp.CpFailedCandidateRequestV1
+    host_nonce: Annotated[str, r"[0-9a-f]{64}"]
+    reservation_digest: Digest
+    authorization_verification_digest: Digest
+    authorization_context: FailedCandidatePinsV1
+    predecessor_context_digest: Digest
+    predecessor_frontier_claim_digest: Digest
+    original_context_digest: Digest
+    original_frontier_claim_digest: Digest
+    current_fence_digest: Digest
+    current_fence_id: Annotated[str, r"[0-9a-f]{64}"]
+    evidence: dict[Identifier, Digest]
+    quiescence_digest: Digest
+    inventory: dict[str, Digest]
+
+
 class HistoricalFailedCandidateContextV1(TypedDict):
     schema: Literal["dotmac.cp_failed_candidate_recovery_context/1"]
+    receipt_digest: Digest
+    failed_candidate_context: FailedCandidatePinsV1
+
+
+class HistoricalFailedCandidateContextV2(TypedDict):
+    schema: Literal["dotmac.cp_failed_candidate_recovery_context/2"]
     receipt_digest: Digest
     failed_candidate_context: FailedCandidatePinsV1
 
@@ -245,17 +271,37 @@ class _HostContinuationArguments(TypedDict, total=False):
     held_fence: HeldFenceContinuation
     committed_context: cp.CommittedMigrationContext
     committed_contexts: dict[str, cp.CommittedMigrationContext]
-    failed_candidate_context: cp.FailedCandidateContext
-    failed_candidate_contexts: dict[str, cp.FailedCandidateContext]
+    failed_candidate_context: cp.FailedCandidateContext | cp.FailedCandidateContextV2
+    failed_candidate_contexts: dict[
+        str, (cp.FailedCandidateContext | cp.FailedCandidateContextV2)
+    ]
 
 
 class _ExecutionContexts(TypedDict, total=False):
     committed_contexts: dict[str, cp.CommittedMigrationContext]
-    failed_candidate_contexts: dict[str, cp.FailedCandidateContext]
+    failed_candidate_contexts: dict[
+        str, (cp.FailedCandidateContext | cp.FailedCandidateContextV2)
+    ]
+
+
+class CandidateReadinessPhase(StrEnum):
+    ROLES_CREATE = "roles_create"
+    PASSWORD_INSTALL = "password_install"  # noqa: S105 - fixed phase label, no credential
+    ROLES_ACTIVATE = "roles_activate"
+    COMPOSE_LAUNCH = "compose_launch"
+    CANDIDATE_VERIFY = "candidate_verify"
 
 
 class TransitionOperatorRefused(Exception):
     """Fixed, redacted operator boundary; host compensation remains core-owned."""
+
+    def __init__(self, message: str, *, candidate_phase: object = None) -> None:
+        super().__init__(message)
+        self.candidate_phase = (
+            candidate_phase
+            if type(candidate_phase) is CandidateReadinessPhase
+            else None
+        )
 
 
 def _path(value: str) -> Path:
@@ -754,7 +800,7 @@ def _load_failed_authorization(
     failed: Installation,
     failed_path: Path,
     failed_trust: TrustV1,
-    context: FailedCandidateContextV1,
+    context: FailedCandidateContextV1 | FailedCandidateContextV2,
 ) -> cp.HistoricalCommittedAuthorization:
     pins = context["authorization_context"]
     raw = cp._read_protected(_path(pins["path"]))
@@ -828,7 +874,7 @@ def _load_failed_authorization(
 def _load_failed_candidate_context(
     installation: Installation,
     pins: FailedCandidatePinsV1 | None = None,
-) -> cp.FailedCandidateContext | None:
+) -> (cp.FailedCandidateContext | cp.FailedCandidateContextV2) | None:
     """Derive the spent store from its immutable Installation, never caller paths."""
     pins = pins if pins is not None else installation.failed_candidate_context
     if pins is None:
@@ -838,8 +884,9 @@ def _load_failed_candidate_context(
         cp.raw_digest(raw) == pins["digest"], "failed_candidate_context_digest_mismatch"
     )
     document = read_json(raw)
-    _shape(document, FailedCandidateContextV1)
-    value = cast(FailedCandidateContextV1, document)
+    v2 = document.get("schema") == "dotmac.cp_failed_candidate_context/2"
+    _shape(document, FailedCandidateContextV2 if v2 else FailedCandidateContextV1)
+    value = cast(FailedCandidateContextV1 | FailedCandidateContextV2, document)
     failed_pins = value["failed_installation"]
     failed_path = _path(failed_pins["path"])
     require(
@@ -854,9 +901,18 @@ def _load_failed_candidate_context(
     _shape(failed_document, InstallationV1)
     failed_value = cast(InstallationV1, failed_document)
     require(
-        "committed_migration_context" in failed_value
-        and "held_fence_context" not in failed_value
-        and "failed_candidate_context" not in failed_value,
+        (
+            (
+                "failed_candidate_context" in failed_value
+                and "committed_migration_context" not in failed_value
+            )
+            if v2
+            else (
+                "committed_migration_context" in failed_value
+                and "failed_candidate_context" not in failed_value
+            )
+        )
+        and "held_fence_context" not in failed_value,
         "failed_candidate_predecessor_kind",
     )
     failed = load_installation(failed_path)
@@ -876,7 +932,37 @@ def _load_failed_candidate_context(
         "historical_identity_mismatch",
     )
     require(failed.store.root != installation.store.root, "recovery_store_reused")
-    original = _load_committed_context(failed)
+    predecessor = None
+    original: cp.CommittedMigrationContext | None
+    if v2:
+        predecessor_pins = failed_value["failed_candidate_context"]
+        require(
+            predecessor_pins["digest"]
+            == cast(FailedCandidateContextV2, value)["predecessor_context_digest"]
+            and predecessor_pins["digest"] != pins["digest"],
+            "failed_candidate_ancestry_mismatch",
+        )
+        predecessor_raw = cp._read_protected(_path(predecessor_pins["path"]))
+        _shape(read_json(predecessor_raw), FailedCandidateContextV1)
+        predecessor = _load_failed_candidate_context(failed)
+        require(
+            type(predecessor) is cp.FailedCandidateContext,
+            "unsupported_recovery_generation",
+        )
+        assert isinstance(predecessor, cp.FailedCandidateContext)  # noqa: S101
+        original = predecessor.original
+        require(
+            predecessor.prior_store.root.resolve()
+            not in {failed.store.root.resolve(), installation.store.root.resolve()},
+            "recovery_store_reused",
+        )
+        require(
+            predecessor.context_digest
+            == cast(FailedCandidateContextV2, value)["predecessor_context_digest"],
+            "failed_candidate_ancestry_mismatch",
+        )
+    else:
+        original = _load_committed_context(failed)
     require(original is not None, "committed_context_missing")
     assert original is not None  # noqa: S101 - narrowed by require
     require(
@@ -912,10 +998,28 @@ def _load_failed_candidate_context(
         proof.fence_id == value["current_fence_id"] == value["host_nonce"],
         "failed_candidate_fence_mismatch",
     )
+    if v2:
+        assert isinstance(predecessor, cp.FailedCandidateContext)  # noqa: S101
+        return cp.FailedCandidateContextV2(
+            original=original,
+            prior_store=failed.store,
+            host_nonce=value["host_nonce"],
+            evidence=value["evidence"],
+            historical_authorization=historical,
+            proof=proof,
+            context_digest=pins["digest"],
+            original_frontier_claim_digest=value["original_frontier_claim_digest"],
+            quiescence_digest=value["quiescence_digest"],
+            inventory=value["inventory"],
+            request=cast(cp.CpFailedCandidateRequestV1, prior),
+            predecessor=predecessor,
+            predecessor_frontier_claim_digest=cast(FailedCandidateContextV2, value)[
+                "predecessor_frontier_claim_digest"
+            ],
+        )
     return cp.FailedCandidateContext(
         original=original,
         prior_store=failed.store,
-        request=prior,
         host_nonce=value["host_nonce"],
         evidence=value["evidence"],
         historical_authorization=historical,
@@ -924,6 +1028,7 @@ def _load_failed_candidate_context(
         original_frontier_claim_digest=value["original_frontier_claim_digest"],
         quiescence_digest=value["quiescence_digest"],
         inventory=value["inventory"],
+        request=cast(cp.CpCommittedMigrationRequestV1, prior),
     )
 
 
@@ -955,7 +1060,10 @@ def _load_recovery(
     installation: Installation,
     *,
     committed_contexts: dict[str, cp.CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: dict[str, cp.FailedCandidateContext] | None = None,
+    failed_candidate_contexts: dict[
+        str, (cp.FailedCandidateContext | cp.FailedCandidateContextV2)
+    ]
+    | None = None,
 ) -> dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]]:
     """Rebuild only independently root-installed historical recovery bindings."""
     recovery: dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]] = {}
@@ -969,14 +1077,33 @@ def _load_recovery(
     committed_entries: set[str] = set()
     for path in installation.historical_context_files:
         document = read_json(cp._read_protected(path))
-        if document.get("schema") == "dotmac.cp_failed_candidate_recovery_context/1":
-            _shape(document, HistoricalFailedCandidateContextV1)
-            failed_entry = cast(HistoricalFailedCandidateContextV1, document)
+        if document.get("schema") in {
+            "dotmac.cp_failed_candidate_recovery_context/1",
+            "dotmac.cp_failed_candidate_recovery_context/2",
+        }:
+            is_v2 = (
+                document.get("schema")
+                == "dotmac.cp_failed_candidate_recovery_context/2"
+            )
+            _shape(
+                document,
+                HistoricalFailedCandidateContextV2
+                if is_v2
+                else HistoricalFailedCandidateContextV1,
+            )
+            failed_entry = cast(
+                HistoricalFailedCandidateContextV1 | HistoricalFailedCandidateContextV2,
+                document,
+            )
             failed_context = _load_failed_candidate_context(
                 installation, failed_entry["failed_candidate_context"]
             )
             require(failed_context is not None, "failed_candidate_context_missing")
             assert failed_context is not None  # noqa: S101 - narrowed by require
+            require(
+                isinstance(failed_context, cp.FailedCandidateContextV2) == is_v2,
+                "historical_recovery_generation_mismatch",
+            )
             require(
                 failed_context.context_digest not in failed_contexts,
                 "duplicate_failed_candidate_context",
@@ -984,14 +1111,28 @@ def _load_recovery(
             original = _register_original_context(
                 contexts, recovery, failed_context.original
             )
-            failed_context = replace(failed_context, original=original)
+            if isinstance(failed_context, cp.FailedCandidateContextV2):
+                failed_context = replace(
+                    failed_context,
+                    original=original,
+                    predecessor=replace(failed_context.predecessor, original=original),
+                )
+            else:
+                failed_context = replace(failed_context, original=original)
             failed_contexts[failed_context.context_digest] = failed_context
             raw = installation.store.read(
                 failed_entry["receipt_digest"], kind="receipt"
             )
             value = read_json(raw)
-            _shape(value, cp.CpFailedCandidateReceiptV1)
-            failed_receipt = cast(cp.CpFailedCandidateReceiptV1, value)
+            _shape(
+                value,
+                cp.CpFailedCandidateReceiptV2
+                if isinstance(failed_context, cp.FailedCandidateContextV2)
+                else cp.CpFailedCandidateReceiptV1,
+            )
+            failed_receipt = cast(
+                cp.CpFailedCandidateReceiptV1 | cp.CpFailedCandidateReceiptV2, value
+            )
             require(
                 failed_receipt["phase"] == "complete"
                 and failed_receipt["historical_context_digest"]
@@ -1104,6 +1245,7 @@ def run_transition(
     *, config_file: Path, request_file: Path, bundle_file: Path | None = None
 ) -> str:
     """Return a receipt digest only; installation and live approval are external."""
+    host = None
     try:
         installation = load_installation(config_file)
         raw = cp._read_protected(request_file)
@@ -1119,7 +1261,11 @@ def run_transition(
             )
         else:
             require(
-                schema == "dotmac.cp_failed_candidate_request/1",
+                schema
+                in {
+                    "dotmac.cp_failed_candidate_request/1",
+                    "dotmac.cp_failed_candidate_request/2",
+                },
                 "unknown_transition_request",
             )
             request = cp.load_failed_candidate_request(
@@ -1128,7 +1274,9 @@ def run_transition(
         if bundle_file is not None:
             cp._read_protected(bundle_file)
         contexts: dict[str, cp.CommittedMigrationContext] = {}
-        failed_contexts: dict[str, cp.FailedCandidateContext] = {}
+        failed_contexts: dict[
+            str, (cp.FailedCandidateContext | cp.FailedCandidateContextV2)
+        ] = {}
         recovery = _load_recovery(
             installation,
             committed_contexts=contexts,
@@ -1149,7 +1297,10 @@ def run_transition(
             for key, binding in context.recovery.items():
                 require(key not in recovery, "duplicate_historical_recovery")
                 recovery[key] = binding
-        elif request["schema"] == "dotmac.cp_failed_candidate_request/1":
+        elif (
+            request["schema"] == "dotmac.cp_failed_candidate_request/1"
+            or request["schema"] == "dotmac.cp_failed_candidate_request/2"
+        ):
             require(
                 request["operator_revision"] == installation.operator_revision,
                 "failed_candidate_operator_revision_mismatch",
@@ -1164,7 +1315,14 @@ def run_transition(
             original = _register_original_context(
                 contexts, recovery, failed_context.original
             )
-            failed_context = replace(failed_context, original=original)
+            if isinstance(failed_context, cp.FailedCandidateContextV2):
+                failed_context = replace(
+                    failed_context,
+                    original=original,
+                    predecessor=replace(failed_context.predecessor, original=original),
+                )
+            else:
+                failed_context = replace(failed_context, original=original)
             failed_contexts[failed_context.context_digest] = failed_context
         else:
             held_fence = _load_held_fence(installation, request)
@@ -1176,10 +1334,23 @@ def run_transition(
                 cp.CpMigrationTransitionReceiptV1
                 | cp.CpCommittedMigrationReceiptV1
                 | cp.CpFailedCandidateReceiptV1
+                | cp.CpFailedCandidateReceiptV2
             )
-            if prior_value.get("schema") == "dotmac.cp_failed_candidate_receipt/1":
-                _shape(prior_value, cp.CpFailedCandidateReceiptV1)
-                prior = cast(cp.CpFailedCandidateReceiptV1, prior_value)
+            if prior_value.get("schema") in {
+                "dotmac.cp_failed_candidate_receipt/1",
+                "dotmac.cp_failed_candidate_receipt/2",
+            }:
+                _shape(
+                    prior_value,
+                    cp.CpFailedCandidateReceiptV2
+                    if prior_value.get("schema")
+                    == "dotmac.cp_failed_candidate_receipt/2"
+                    else cp.CpFailedCandidateReceiptV1,
+                )
+                prior = cast(
+                    cp.CpFailedCandidateReceiptV1 | cp.CpFailedCandidateReceiptV2,
+                    prior_value,
+                )
                 require(
                     prior["historical_context_digest"] in failed_contexts,
                     "historical_recovery_missing",
@@ -1274,4 +1445,7 @@ def run_transition(
     except Exception:
         # Executor owns post-reservation compensation; never leak child output,
         # database diagnostics, configuration contents or exception strings.
-        raise TransitionOperatorRefused("CP_TRANSITION_REFUSED") from None
+        raise TransitionOperatorRefused(
+            "CP_TRANSITION_REFUSED",
+            candidate_phase=getattr(host, "candidate_phase", None),
+        ) from None
