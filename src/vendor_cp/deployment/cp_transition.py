@@ -3916,6 +3916,12 @@ def verify_post_acl_recovery_receipt(
 
 
 class CpPostAclRecoveryHost(CpTransitionHost, Protocol):
+    def stop_and_drain_writers(
+        self,
+        request: CpTransitionRequestV1 | CpPostAclRecoveryRequestV1,
+        nonce: str,
+    ) -> bytes: ...
+
     def inspect_post_acl_recovery(
         self, request: CpPostAclRecoveryRequestV1, context: PostAclRecoveryContext
     ) -> bytes: ...
