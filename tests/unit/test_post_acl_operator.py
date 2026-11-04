@@ -363,6 +363,10 @@ def test_failed_installation_cannot_select_another_protocol(protected_post_acl, 
         "path": "/opt/crossed/context.json",
         "digest": "sha256:" + "f" * 64,
     }
+    if kind == "held_fence_context":
+        p.installation_document[kind].update(
+            proof_digest="sha256:" + "f" * 64, fence_id="f" * 64
+        )
     with pytest.raises(ContractError, match="post_acl_predecessor_kind"):
         op._load_post_acl_recovery_context(repin(p))
 
