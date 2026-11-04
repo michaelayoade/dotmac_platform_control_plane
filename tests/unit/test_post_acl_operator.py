@@ -107,8 +107,12 @@ def protected_post_acl(protected_v2, trust, monkeypatch):
     }
     evidence = {}
     for item in latest.root.glob("*.evidence.json"):
-        value = cp.read_json(item.read_bytes())
-        if value.get("schema") == "dotmac.cp_transition_evidence/2":
+        # The retained verifier report is a JSON array, not a stage envelope.
+        value = json.loads(item.read_bytes())
+        if (
+            isinstance(value, dict)
+            and value.get("schema") == "dotmac.cp_transition_evidence/2"
+        ):
             evidence[value["kind"]] = cp.raw_digest(item.read_bytes())
     quiescence = cp.read_json(latest.read(evidence["candidate-removed-fenced"]))[
         "result"

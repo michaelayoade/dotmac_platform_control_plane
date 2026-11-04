@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import shutil
 from dataclasses import replace
 
@@ -76,8 +77,12 @@ def post_acl(failed_v1, trust, monkeypatch):
     latest.root = canonical_store
     evidence = {}
     for item in latest.root.glob("*.evidence.json"):
-        document = cp.read_json(item.read_bytes())
-        if document.get("schema") == "dotmac.cp_transition_evidence/2":
+        # The retained verifier report is a JSON array, not a stage envelope.
+        document = json.loads(item.read_bytes())
+        if (
+            isinstance(document, dict)
+            and document.get("schema") == "dotmac.cp_transition_evidence/2"
+        ):
             evidence[document["kind"]] = cp.raw_digest(item.read_bytes())
     cleanup = cp.read_json(latest.read(evidence["candidate-removed-fenced"]))["result"]
     receipts = list(latest.root.glob("*.receipt.json"))
