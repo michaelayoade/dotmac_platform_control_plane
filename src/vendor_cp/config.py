@@ -131,14 +131,14 @@ def _positive_seconds(name: str, *, default: int) -> int:
     return seconds
 
 
-def _flag(name: str, *, default: bool) -> bool:
+def parse_boolean_setting(raw: str, *, name: str, default: bool) -> bool:
     """A boolean knob, or a refusal — never a silent fallback to the default.
 
     An unrecognised value is a configuration mistake, and guessing what
     `VENDOR_RELAY_EXPECTED=maybe` meant is how a deployment ends up with the
     permissive reading of a question nobody answered.
     """
-    raw = os.getenv(name, "").strip().lower()
+    raw = raw.strip().lower()
     if not raw:
         return default
     if raw in {"true", "1", "yes", "on"}:
@@ -148,6 +148,11 @@ def _flag(name: str, *, default: bool) -> bool:
     raise ProductionConfigurationError(
         f"{name}={raw!r} is not a boolean; use true or false"
     )
+
+
+def _flag(name: str, *, default: bool) -> bool:
+    """Read the environment and delegate the boolean policy unchanged."""
+    return parse_boolean_setting(os.getenv(name, ""), name=name, default=default)
 
 
 def load_vendor_settings() -> VendorSettings:

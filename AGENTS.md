@@ -440,6 +440,29 @@ disagree, fix the drift.
     only; it grants no CI/build/publication, installation, authorization
     dispatch, native attempt, claim deletion, capture, restore or DDL replay.
 
+    **Finite post-ACL source amendment (2026-11-04):** Michael approved
+    source preparation, a draft PR, hosted CI and independent review for one
+    separately typed successor of a contained failed V2 request that retained
+    candidate cleanup, a pre-routing receipt and ACL restoration. V1 and V2
+    remain closed; this is not unrestricted recursive recovery. The successor
+    validates the complete retained frontier, authorization and execution,
+    every ancestor and spent claim, the current fence and fresh post-containment
+    catalogue/quiescence measurements. A deterministic exclusive claim binds
+    the failed V2 request and nonce across fresh contexts, stores and
+    authorizations. The canonical failed installation and claim store are
+    derived from that signed request's operator revision under the fixed
+    product-owned installation root; repinned clones cannot select another
+    physical claim owner. Changed or unavailable measurements refuse under this
+    amendment; no drift exception or mutation-free ACL-open interval is assumed.
+    Existing fence, cleanup, ACL, readiness, receipt and routing owners retain
+    execution. Full-runtime relay readiness uses its existing durable heartbeat
+    and queue/delivery health owner with relay expected, while retaining app
+    Docker health, immutable input/image checks and the ledger/routing gates.
+    No process-only relay success or second heartbeat policy is introduced.
+    This source/hosted-test approval grants no merge, release/publication,
+    production host action, installation/configuration, authorization dispatch,
+    native attempt, credential ceremony, capture, restore or DDL replay.
+
     **`3` and `4` are different numbers and stay different**, including through
     `docker compose run`, which propagates the container's status unchanged. An
     owner refused and there is no evidence look identical from outside and mean

@@ -31,6 +31,7 @@ from vendor_cp.deployment.cp_transition import (
     CpTransitionIdentity,
     FailedCandidateBasisV1,
     FailedCandidateBasisV2,
+    PostAclRecoveryBasisV1,
     TransitionRequest,
     TransitionSideV1,
     raw_digest,
@@ -114,6 +115,24 @@ class FailedCandidatePlanV2(TypedDict):
     plan_digest: Digest
 
 
+class PostAclRecoveryPlanV1(TypedDict):
+    """Closed intent for one contained post-ACL failed V2 frontier."""
+
+    schema: Literal["dotmac.cp_post_acl_recovery_plan/1"]
+    product: Literal["dotmac_vendor_control_plane"]
+    environment: Literal["production"]
+    host: Identifier
+    database: Identifier
+    cluster_system_identifier: str
+    database_oid: int
+    source: TransitionSideV1
+    target: TransitionSideV1
+    previous_receipt_digest: Digest | None
+    operator_revision: Revision
+    basis: PostAclRecoveryBasisV1
+    plan_digest: Digest
+
+
 def author_request(
     plan_raw: bytes,
     *,
@@ -153,15 +172,18 @@ def author_request(
     actor = context.get("GITHUB_ACTOR", "")
     _shape(actor, Identifier)
     document = read_json(plan_raw)
+    post_acl = document.get("schema") == "dotmac.cp_post_acl_recovery_plan/1"
     failed_candidate_v2 = document.get("schema") == "dotmac.cp_failed_candidate_plan/2"
     failed_candidate = failed_candidate_v2 or (
         document.get("schema") == "dotmac.cp_failed_candidate_plan/1"
     )
-    committed = not failed_candidate and (
+    committed = not (failed_candidate or post_acl) and (
         "basis" in document or "operator_revision" in document
     )
     plan_type = (
-        FailedCandidatePlanV2
+        PostAclRecoveryPlanV1
+        if post_acl
+        else FailedCandidatePlanV2
         if failed_candidate_v2
         else FailedCandidatePlanV1
         if failed_candidate
@@ -174,7 +196,8 @@ def author_request(
         TransitionPlanV1
         | CommittedMigrationPlanV1
         | FailedCandidatePlanV1
-        | FailedCandidatePlanV2,
+        | FailedCandidatePlanV2
+        | PostAclRecoveryPlanV1,
         document,
     )
     identity = CpTransitionIdentity(
@@ -191,7 +214,7 @@ def author_request(
                 for key in (
                     *(
                         FAILED_CANDIDATE_PLAN_FIELDS
-                        if failed_candidate
+                        if failed_candidate or post_acl
                         else COMMITTED_PLAN_FIELDS
                         if committed
                         else PLAN_FIELDS
@@ -199,7 +222,9 @@ def author_request(
                     "plan_digest",
                 )
             },
-            "schema": "dotmac.cp_committed_migration_request/1"
+            "schema": "dotmac.cp_post_acl_recovery_request/1"
+            if post_acl
+            else "dotmac.cp_committed_migration_request/1"
             if committed
             else "dotmac.cp_failed_candidate_request/2"
             if failed_candidate_v2

@@ -37,6 +37,7 @@ from sqlalchemy import Connection, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError
 
+from vendor_cp.config import parse_boolean_setting
 from vendor_cp.deploy_agent.contracts import (
     Envelope,
     _shape,
@@ -65,13 +66,16 @@ from vendor_cp.deployment.cp_catalogue import (
 )
 from vendor_cp.deployment.cp_transition import (
     ArtifactStore,
+    CandidateMeasurementV1,
     CommittedMigrationContext,
     CpCommittedMigrationRequestV1,
     CpFailedCandidateRequestV1,
     CpFailedCandidateRequestV2,
+    CpPostAclRecoveryRequestV1,
     CpTransitionRequestV1,
     FailedCandidateContext,
     FailedCandidateContextV2,
+    PostAclRecoveryContext,
     RecoveryContexts,
     SourceObservation,
     TransitionRequest,
@@ -103,7 +107,10 @@ from vendor_cp.deployment.transition_evidence import (
     read_current_migration_heads,
     read_descriptor_at_revision,
 )
-from vendor_cp.deployment.transition_operator import CandidateReadinessPhase
+from vendor_cp.deployment.transition_operator import (
+    CandidateReadinessPhase,
+    RuntimeReadinessPhase,
+)
 from vendor_cp.production_secrets import production_deployment_lock
 
 SCRATCH_MAX_SOURCE_BYTES = 384 * 1024 * 1024
@@ -312,6 +319,7 @@ class _CommittedContextArguments(TypedDict, total=False):
 
 
 class _FailedReceiptArguments(TypedDict, total=False):
+    post_acl_contexts: Mapping[str, PostAclRecoveryContext]
     failed_candidate_context: FailedCandidateContext | FailedCandidateContextV2
     failed_candidate_contexts: Mapping[
         str, FailedCandidateContext | FailedCandidateContextV2
@@ -607,6 +615,8 @@ class ExistingCpTransitionHost:
             str, FailedCandidateContext | FailedCandidateContextV2
         ]
         | None = None,
+        post_acl_recovery_context: PostAclRecoveryContext | None = None,
+        post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -615,11 +625,27 @@ class ExistingCpTransitionHost:
         require(
             sum(
                 context is not None
-                for context in (held_fence, committed_context, failed_candidate_context)
+                for context in (
+                    held_fence,
+                    committed_context,
+                    failed_candidate_context,
+                    post_acl_recovery_context,
+                )
             )
             <= 1,
             "continuation_contexts_mutually_exclusive",
         )
+        self._post_acl_recovery_context = post_acl_recovery_context
+        self._post_acl_contexts = dict(post_acl_contexts or {})
+        if post_acl_recovery_context is not None:
+            key = post_acl_recovery_context.context_digest
+            require(
+                key not in self._post_acl_contexts
+                or self._post_acl_contexts[key] is post_acl_recovery_context,
+                "post_acl_context_registry_conflict",
+            )
+            self._post_acl_contexts[key] = post_acl_recovery_context
+        self._post_acl_writers_stopped = False
         self._held_fence = held_fence
         self._committed_context = committed_context
         self._failed_candidate_context = failed_candidate_context
@@ -642,7 +668,9 @@ class ExistingCpTransitionHost:
             )
             self._committed_contexts[key] = committed_context
         self.proof = (
-            failed_candidate_context.proof
+            post_acl_recovery_context.proof
+            if post_acl_recovery_context is not None
+            else failed_candidate_context.proof
             if failed_candidate_context is not None
             else committed_context.proof
             if committed_context is not None
@@ -662,6 +690,7 @@ class ExistingCpTransitionHost:
         self._candidate_started = False
         self._candidate_backend_id: str | None = None
         self.candidate_phase: CandidateReadinessPhase | None = None
+        self.runtime_phase: RuntimeReadinessPhase | None = None
         self._acl_restored = False
         self._runtime_inputs: dict[Path, str] = {}
         self._candidate_profile: str | None = None
@@ -820,6 +849,15 @@ class ExistingCpTransitionHost:
             self._failed_candidate_binding(
                 cast(CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2, request),
                 self._failed_candidate_context,
+            )
+        elif request.get("schema") == "dotmac.cp_post_acl_recovery_request/1":
+            require(
+                self._post_acl_recovery_context is not None, "post_acl_context_required"
+            )
+            assert self._post_acl_recovery_context is not None  # noqa: S101
+            self._post_acl_binding(
+                cast(CpPostAclRecoveryRequestV1, request),
+                self._post_acl_recovery_context,
             )
         require(self._request == request, "host_request_mismatch")
         if self._nonce is None:
@@ -1319,6 +1357,237 @@ class ExistingCpTransitionHost:
             request, nonce, context, kind="failed-candidate-rebound"
         )
 
+    def _post_acl_binding(
+        self, request: CpPostAclRecoveryRequestV1, context: PostAclRecoveryContext
+    ) -> None:
+        require(
+            isinstance(context, PostAclRecoveryContext)
+            and self._held_fence is None
+            and self._committed_context is None
+            and self._failed_candidate_context is None
+            and self._post_acl_recovery_context is context,
+            "post_acl_context_mismatch",
+        )
+        require(
+            self.config.operator_revision is not None
+            and self.config.operator_revision == request["operator_revision"],
+            "post_acl_operator_revision_mismatch",
+        )
+        require(
+            context.proof.fence_id == context.host_nonce
+            and request["basis"]["context_digest"] == context.context_digest
+            and request["basis"]["current_fence_digest"] == context.proof.digest()
+            and request["basis"]["current_fence_id"] == context.host_nonce
+            and request["basis"]["original_fence_digest"]
+            == context.original_proof.digest(),
+            "post_acl_fence_basis_mismatch",
+        )
+        require(
+            request["source"] == context.request["source"]
+            and request["target"] == context.request["target"]
+            and all(
+                cast(Mapping[str, object], request)[key]
+                == cast(Mapping[str, object], context.request)[key]
+                for key in (
+                    "host",
+                    "database",
+                    "database_oid",
+                    "cluster_system_identifier",
+                )
+            ),
+            "post_acl_identity_mismatch",
+        )
+        require(
+            context.proof.prior_grants == context.original_proof.prior_grants
+            and context.proof.prior_acl == context.original_proof.prior_acl,
+            "post_acl_original_grants_mismatch",
+        )
+
+    @staticmethod
+    def _post_acl_measurement(
+        connection: Connection,
+        request: CpPostAclRecoveryRequestV1,
+        context: PostAclRecoveryContext,
+    ) -> CandidateMeasurementV1:
+        measurement = dict(measure_candidate_quiescence(connection))
+        require("catalogue_bytes" in measurement, "post_acl_measurement_unavailable")
+        catalogue = measurement.pop("catalogue_bytes")
+        require(type(catalogue) is bytes, "post_acl_measurement_unavailable")
+        measurement["catalogue_digest"] = raw_digest(cast(bytes, catalogue))
+        _shape(measurement, CandidateMeasurementV1)
+        require(
+            canonical_json(measurement) == canonical_json(context.measurement)
+            and raw_digest(canonical_json(measurement))
+            == request["basis"]["frontier_measurement_digest"],
+            "post_acl_measurement_mismatch",
+        )
+        return cast(CandidateMeasurementV1, measurement)
+
+    def _post_acl_current_database(
+        self,
+        connection: Connection,
+        request: CpPostAclRecoveryRequestV1,
+        context: PostAclRecoveryContext,
+    ) -> CandidateMeasurementV1:
+        self._identity(connection, request)
+        self._check_fence_baseline(connection, request)
+        candidate_roles.require_planned_target_only_connect(
+            connection, database=request["database"]
+        )
+        require(
+            list(read_current_migration_heads(connection))
+            == request["target"]["heads"],
+            "post_acl_target_heads_mismatch",
+        )
+        require(
+            not connection.execute(
+                text("SELECT rolname FROM pg_roles WHERE left(rolname,8)='vcp_d16_'")
+            ).all(),
+            "post_acl_candidate_roles_present",
+        )
+        require(
+            not connection.execute(
+                text(
+                    "SELECT pid FROM pg_stat_activity WHERE left(usename,8)='vcp_d16_'"
+                )
+            ).all(),
+            "post_acl_candidate_sessions_present",
+        )
+        return self._post_acl_measurement(connection, request, context)
+
+    def _post_acl_target_runtime(
+        self, request: CpPostAclRecoveryRequestV1, *, stopped: bool
+    ) -> None:
+        descriptor = _read_protected(self.config.target_descriptor)
+        require(
+            raw_digest(descriptor) == request["target"]["raw_descriptor_digest"],
+            "post_acl_target_descriptor_mismatch",
+        )
+        self._target_descriptor = descriptor
+        target_id = self._source_image_identity(
+            self.config.target_image, request["target"]
+        )
+        specification = self._runtime_specification()
+        services: set[str] = set()
+        for info in self._writers():
+            config = cast(dict[str, object], info["Config"])
+            labels = cast(dict[str, str], config["Labels"])
+            require(
+                labels.get("com.docker.compose.project")
+                == "dotmac_vendor_control_plane",
+                "post_acl_runtime_lineage_mismatch",
+            )
+            service = labels.get("com.docker.compose.service")
+            state = cast(dict[str, object], info["State"])
+            if service == "ops":
+                require(
+                    state.get("Running") is False and state.get("Restarting") is False,
+                    "ops_running",
+                )
+            else:
+                require(
+                    service in {"app", "relay"} and service not in services,
+                    "post_acl_runtime_roles_mismatch",
+                )
+                assert service is not None  # noqa: S101 - narrowed by require
+                services.add(service)
+                declared = specification["services"][service]
+                self._runtime_container_inputs(info, declared)
+                require(
+                    declared.get("image") == self.config.target_image
+                    and config.get("Image") == self.config.target_image
+                    and info.get("Image") == target_id,
+                    "post_acl_runtime_lineage_mismatch",
+                )
+                if service == "app":
+                    self._runtime_app_publication(info, declared, active=False)
+            if stopped:
+                host_config = cast(dict[str, object], info["HostConfig"])
+                policy = cast(dict[str, object], host_config["RestartPolicy"])
+                require(
+                    state.get("Running") is False
+                    and state.get("Restarting") is False
+                    and policy.get("Name") == "no",
+                    "writer_stop_unproved",
+                )
+        require(services == {"app", "relay"}, "post_acl_runtime_roles_mismatch")
+        require(
+            not self._docker("ps", "-aq", "--filter", "name=vcp-d16-"),
+            "post_acl_candidate_containers_present",
+        )
+        for identifier in self._docker(
+            "ps", "-aq", "--filter", "label=com.docker.compose.project"
+        ).splitlines():
+            info = self._container(identifier)
+            labels = cast(
+                dict[str, str],
+                cast(dict[str, object], info["Config"]).get("Labels", {}),
+            )
+            require(
+                not labels.get("com.docker.compose.project", "").startswith("vcp-d16-"),
+                "post_acl_candidate_containers_present",
+            )
+
+    def inspect_post_acl_recovery(
+        self, request: CpPostAclRecoveryRequestV1, context: PostAclRecoveryContext
+    ) -> bytes:
+        self._inspect_installation(request)
+        self._post_acl_binding(request, context)
+        require(self.proof == context.proof, "post_acl_current_fence_mismatch")
+        self._http(self.config.external_ready_url, expected=503)
+        self._post_acl_target_runtime(request, stopped=False)
+        self._strict(request)
+        with self._connect(request["database"]) as connection:
+            measurement = self._post_acl_current_database(connection, request, context)
+        self._strict(request)
+        self._request = request
+        return canonical_json(
+            {
+                "source": request["source"],
+                "target": request["target"],
+                "measurement": measurement,
+            }
+        )
+
+    def rebind_post_acl_recovery(
+        self,
+        request: CpPostAclRecoveryRequestV1,
+        nonce: str,
+        context: PostAclRecoveryContext,
+    ) -> bytes:
+        self._bound(request, nonce)
+        require(self._post_acl_writers_stopped, "post_acl_writers_stop_required")
+        self._post_acl_writers_stopped = False  # No resuming a partial rebind.
+        require(nonce != context.host_nonce, "post_acl_nonce_reused")
+        require(self.proof == context.proof, "post_acl_current_fence_mismatch")
+        self._http(self.config.external_ready_url, expected=503)
+        self._post_acl_target_runtime(request, stopped=True)
+        self._strict(request)
+        with self._connect(request["database"]) as connection:
+            measurement = self._post_acl_current_database(connection, request, context)
+            self.proof = transition_fence.fence_writers(
+                connection,
+                database=request["database"],
+                fence_id=nonce,
+                session_wait_seconds=self.config.session_wait_seconds,
+                prior=context.proof,
+                expected_prior_fence_id=context.host_nonce,
+            )
+        self.store.put(canonical_json(self.proof.to_document()))
+        self._strict(request)
+        return self._evidence(
+            request,
+            nonce,
+            "post-acl-rebound",
+            {
+                "prior_fence_id": context.host_nonce,
+                "fence_id": nonce,
+                "original_fence_digest": request["basis"]["original_fence_digest"],
+                "current_fence_digest": request["basis"]["current_fence_digest"],
+                "measurement": measurement,
+            },
+        )
+
     def _rebind_continuation(
         self,
         request: CpCommittedMigrationRequestV1
@@ -1544,11 +1813,15 @@ class ExistingCpTransitionHost:
         )
         require(live == expected, "held_fence_acl_drift")
 
-    def stop_and_drain_writers(
-        self, request: CpTransitionRequestV1, nonce: str
-    ) -> bytes:
+    def stop_and_drain_writers(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
         self._strict(request)
+        post_acl = request["schema"] == "dotmac.cp_post_acl_recovery_request/1"
+        if post_acl:
+            self._post_acl_writers_stopped = False
+            self._post_acl_target_runtime(
+                cast(CpPostAclRecoveryRequestV1, request), stopped=False
+            )
         for info in self._writers():
             identifier = str(info["Id"])
             self._docker("update", "--restart=no", identifier)
@@ -1564,12 +1837,17 @@ class ExistingCpTransitionHost:
                 "writer_stop_unproved",
             )
         self._strict(request)
-        return self._evidence(
+        evidence = self._evidence(
             request,
             nonce,
             "writers-stopped",
             {"running_writers": [], "restart_enabled": []},
         )
+        if post_acl:
+            # _strict observed zero writer backends after container shutdown;
+            # their normal exit flushes pending statistics before remeasurement.
+            self._post_acl_writers_stopped = True
+        return evidence
 
     def _observe(
         self,
@@ -2151,7 +2429,18 @@ class ExistingCpTransitionHost:
         self.candidate_phase = None
         self._bound(request, nonce)
         proof = self._strict(request)
-        if request["schema"] in {
+        if request["schema"] == "dotmac.cp_post_acl_recovery_request/1":
+            require(
+                self._post_acl_recovery_context is not None, "post_acl_context_required"
+            )
+            assert self._post_acl_recovery_context is not None  # noqa: S101
+            historical = self._post_acl_recovery_context.recovery_context()
+            require(
+                request_digest(self._post_acl_recovery_context.original.request)
+                in historical,
+                "recovery_missing",
+            )
+        elif request["schema"] in {
             "dotmac.cp_failed_candidate_request/1",
             "dotmac.cp_failed_candidate_request/2",
         }:
@@ -2740,6 +3029,7 @@ class ExistingCpTransitionHost:
         )
 
     def _full_runtime(self, request: TransitionRequest) -> None:
+        self.runtime_phase = RuntimeReadinessPhase.CONTAINERS_VERIFY
         require(self._acl_restored, "acl_not_restored")
         specification = self._runtime_specification()
         target_id = json.loads(
@@ -2753,26 +3043,53 @@ class ExistingCpTransitionHost:
             )
             if labels["com.docker.compose.service"] == "ops":
                 require(
-                    cast(dict[str, object], info["State"])["Running"] is False,
+                    cast(dict[str, object], info["State"])["Running"] is False
+                    and cast(dict[str, object], info["State"]).get("Restarting")
+                    is False,
                     "ops_running",
                 )
                 continue
-            services.add(labels["com.docker.compose.service"])
             service = labels["com.docker.compose.service"]
+            require(service in {"app", "relay"}, "full_runtime_roles_missing")
+            require(service not in services, "full_runtime_roles_ambiguous")
+            services.add(service)
             declared = specification["services"][service]
             self._runtime_container_inputs(info, declared)
+            config = cast(dict[str, object], info["Config"])
+            state = cast(dict[str, object], info["State"])
             if service == "app":
                 self._runtime_app_publication(info, declared)
+                self._runtime_relay_expected(info)
             require(
-                info["Image"] == target_id
-                and cast(dict[str, object], info["State"])["Running"] is True,
+                declared.get("image") == self.config.target_image
+                and config.get("Image") == self.config.target_image
+                and info["Image"] == target_id
+                and state.get("Running") is True,
                 "full_runtime_image_mismatch",
             )
-            health = cast(
-                dict[str, object],
-                cast(dict[str, object], info["State"]).get("Health", {}),
-            )
-            require(health.get("Status") == "healthy", "full_runtime_unhealthy")
+            require(state.get("Restarting") is False, "full_runtime_restarting")
+            if service == "app":
+                healthcheck = config.get("Healthcheck")
+                require(
+                    isinstance(healthcheck, dict),
+                    "full_runtime_app_healthcheck_disabled",
+                )
+                assert isinstance(healthcheck, dict)  # noqa: S101 - narrowed by require
+                test = healthcheck.get("Test")
+                require(
+                    isinstance(test, list)
+                    and len(test) > 1
+                    and test[0] in {"CMD", "CMD-SHELL"},
+                    "full_runtime_app_healthcheck_disabled",
+                )
+                health = state.get("Health")
+                require(
+                    isinstance(health, dict) and health.get("Status") == "healthy",
+                    "full_runtime_unhealthy",
+                )
+            # Relay has no synthetic Docker healthcheck. The app's positive
+            # readiness owner below checks durable heartbeat, queue and delivery
+            # health with the effective relay expectation proved above.
         require(services == {"app", "relay"}, "full_runtime_roles_missing")
         with self._connect(request["database"]) as connection:
             self._identity(connection, request)
@@ -2781,6 +3098,7 @@ class ExistingCpTransitionHost:
                 == request["target"]["heads"],
                 "target_heads_mismatch",
             )
+        self.runtime_phase = RuntimeReadinessPhase.LOOPBACK_READY
         self._http(
             f"http://127.0.0.1:{self.config.app_port}/health/ready",
             expected=200,
@@ -2793,14 +3111,37 @@ class ExistingCpTransitionHost:
             # The existing signed-fetch route is public/read-only. A disabled
             # runtime returns 503; an empty, available ledger returns the exact
             # owner-specific 404. A generic router 404 is never admitted.
+            self.runtime_phase = RuntimeReadinessPhase.LEDGER_VERIFY
             self._http(
                 self._ledger_probe_url(),
                 expected=(200, 404),
                 ledger=True,
             )
 
+    @staticmethod
+    def _runtime_relay_expected(info: dict[str, object]) -> None:
+        """Prove the readiness owner's effective app composition, not ours."""
+        config = cast(dict[str, object], info["Config"])
+        values = [
+            value.partition("=")[2]
+            for value in cast(list[str], config.get("Env", []))
+            if value.partition("=")[0] == "VENDOR_RELAY_EXPECTED"
+        ]
+        require(len(values) <= 1, "full_runtime_relay_expectation_ambiguous")
+        require(
+            parse_boolean_setting(
+                values[0] if values else "", name="VENDOR_RELAY_EXPECTED", default=True
+            )
+            is True,
+            "full_runtime_relay_not_expected",
+        )
+
     def _runtime_app_publication(
-        self, info: dict[str, object], declared: dict[str, object]
+        self,
+        info: dict[str, object],
+        declared: dict[str, object],
+        *,
+        active: bool = True,
     ) -> None:
         ports = declared.get("ports")
         require(
@@ -2821,8 +3162,19 @@ class ExistingCpTransitionHost:
         }
         host = cast(dict[str, object], info.get("HostConfig", {}))
         network = cast(dict[str, object], info.get("NetworkSettings", {}))
+        live_ports = network.get("Ports")
+        state = cast(dict[str, object], info.get("State", {}))
+        # Post-ACL lineage is observed under a proven fence and may be stopped
+        # or restarting. Its immutable publication must still be exact. A live
+        # binding, whenever present, cannot hide a different exposure.
+        inactive = (
+            not active
+            and not live_ports
+            and (state.get("Running") is False or state.get("Restarting") is True)
+        )
         require(
-            host.get("PortBindings") == expected and network.get("Ports") == expected,
+            host.get("PortBindings") == expected
+            and (live_ports == expected or inactive),
             "runtime_port_binding_mismatch",
         )
 
@@ -2841,7 +3193,9 @@ class ExistingCpTransitionHost:
         )
 
     def full_ready(self, request: TransitionRequest, nonce: str) -> bytes:
+        self.runtime_phase = None
         self._bound(request, nonce)
+        self.runtime_phase = RuntimeReadinessPhase.COMPOSE_LAUNCH
         # Compose reads the root-materialised runtime inputs. The selected image
         # is a fixed explicit env binding, never an environment inheritance.
         argv = self._runtime_argv() + (
@@ -2857,9 +3211,11 @@ class ExistingCpTransitionHost:
         self._runtime_specification()
         self._run(argv, env=self._runtime_environment())
         self._full_runtime(request)
-        return self._evidence(
+        evidence = self._evidence(
             request, nonce, "full-ready", {"side": request["target"], "status": 200}
         )
+        self.runtime_phase = None
+        return evidence
 
     def _runtime_argv(self) -> tuple[str, ...]:
         config = self.config
@@ -2985,6 +3341,8 @@ class ExistingCpTransitionHost:
         require(self._request is not None and self._nonce is not None)
         assert self._request is not None and self._nonce is not None  # noqa: S101
         failed_contexts: _FailedReceiptArguments = {}
+        if self._post_acl_contexts:
+            failed_contexts["post_acl_contexts"] = self._post_acl_contexts
         if self._failed_candidate_context is not None:
             failed_contexts["failed_candidate_context"] = self._failed_candidate_context
         if self._failed_candidate_contexts:
@@ -3009,12 +3367,14 @@ class ExistingCpTransitionHost:
         )
         self._full_runtime(self._request)
         self._routing_receipt = checksum
-        return self._evidence(
+        evidence = self._evidence(
             self._request,
             self._nonce,
             "pre-routing-verified",
             {"receipt_digest": checksum},
         )
+        self.runtime_phase = None
+        return evidence
 
     def restore_routing(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
