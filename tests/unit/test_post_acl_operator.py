@@ -64,8 +64,12 @@ def protected_post_acl(protected_v2, trust, monkeypatch):
     )
     installation_document["artifact_directory"] = str(latest.root)
     installation_document["operator_revision"] = prior["operator_revision"]
+    # The inherited active installation still pins the earlier V1 intent's
+    # operator. This failed V2 attempt was signed by the verifier's revision.
     failed_installation = replace(
         p.active,
+        policy=verifier.policy,
+        operator_revision=prior["operator_revision"],
         store=latest,
         failed_candidate_context=installation_document["failed_candidate_context"],
     )
@@ -168,6 +172,8 @@ def protected_post_acl(protected_v2, trust, monkeypatch):
     )
     active = replace(
         p.active,
+        policy=verifier.policy,
+        operator_revision=prior["operator_revision"],
         store=fresh_store(predecessor.original, "post-acl-current"),
         failed_candidate_context=None,
         post_acl_recovery_context={
