@@ -128,6 +128,7 @@ class InstallationV1(TypedDict):
     operator_revision: NotRequired[Revision]
     failed_candidate_context: NotRequired[FailedCandidatePinsV1]
     post_acl_recovery_context: NotRequired[FailedCandidatePinsV1]
+    adjudicated_post_acl_recovery_context: NotRequired[FailedCandidatePinsV1]
 
 
 class BackupMetadataV1(TypedDict):
@@ -277,6 +278,19 @@ class PostAclRecoveryContextV1(TypedDict):
     pre_routing_receipt_digest: Digest
 
 
+class AdjudicatedPostAclRecoveryContextV1(TypedDict):
+    schema: Literal["dotmac.cp_adjudicated_post_acl_recovery_context/1"]
+    historical_context: FailedCandidatePinsV1
+    adjudication: cp.HeartbeatDriftAdjudicationV1
+    present_measurement: cp.CandidateMeasurementV1
+
+
+class HistoricalAdjudicatedPostAclRecoveryContextV1(TypedDict):
+    schema: Literal["dotmac.cp_adjudicated_post_acl_historical_recovery_context/1"]
+    receipt_digest: Digest
+    adjudicated_post_acl_recovery_context: FailedCandidatePinsV1
+
+
 class HistoricalPostAclRecoveryContextV1(TypedDict):
     schema: Literal["dotmac.cp_post_acl_historical_recovery_context/1"]
     receipt_digest: Digest
@@ -300,6 +314,7 @@ class Installation:
     operator_revision: str | None = None
     failed_candidate_context: FailedCandidatePinsV1 | None = None
     post_acl_recovery_context: FailedCandidatePinsV1 | None = None
+    adjudicated_post_acl_recovery_context: FailedCandidatePinsV1 | None = None
 
 
 class _HostContinuationArguments(TypedDict, total=False):
@@ -310,8 +325,12 @@ class _HostContinuationArguments(TypedDict, total=False):
     failed_candidate_contexts: dict[
         str, (cp.FailedCandidateContext | cp.FailedCandidateContextV2)
     ]
-    post_acl_recovery_context: cp.PostAclRecoveryContext
-    post_acl_contexts: dict[str, cp.PostAclRecoveryContext]
+    post_acl_recovery_context: (
+        cp.PostAclRecoveryContext | cp.AdjudicatedPostAclRecoveryContext
+    )
+    post_acl_contexts: dict[
+        str, cp.PostAclRecoveryContext | cp.AdjudicatedPostAclRecoveryContext
+    ]
 
 
 class _ExecutionContexts(TypedDict, total=False):
@@ -319,7 +338,9 @@ class _ExecutionContexts(TypedDict, total=False):
     failed_candidate_contexts: dict[
         str, (cp.FailedCandidateContext | cp.FailedCandidateContextV2)
     ]
-    post_acl_contexts: dict[str, cp.PostAclRecoveryContext]
+    post_acl_contexts: dict[
+        str, cp.PostAclRecoveryContext | cp.AdjudicatedPostAclRecoveryContext
+    ]
 
 
 class CandidateReadinessPhase(StrEnum):
@@ -510,16 +531,28 @@ def load_installation(path: Path) -> Installation:
     committed = value.get("committed_migration_context")
     failed = value.get("failed_candidate_context")
     post_acl = value.get("post_acl_recovery_context")
+    adjudicated = value.get("adjudicated_post_acl_recovery_context")
     require(
         sum(
             item is not None
-            for item in (committed, failed, post_acl, value.get("held_fence_context"))
+            for item in (
+                committed,
+                failed,
+                post_acl,
+                adjudicated,
+                value.get("held_fence_context"),
+            )
         )
         <= 1,
         "continuation_contexts_conflict",
     )
     require(
-        (committed is None and failed is None and post_acl is None)
+        (
+            committed is None
+            and failed is None
+            and post_acl is None
+            and adjudicated is None
+        )
         or value.get("operator_revision") is not None,
         "committed_operator_revision_required",
     )
@@ -540,6 +573,7 @@ def load_installation(path: Path) -> Installation:
         value.get("operator_revision"),
         failed,
         post_acl,
+        adjudicated,
     )
 
 
@@ -1142,6 +1176,7 @@ def _load_post_acl_recovery_context(
                 "committed_migration_context",
                 "held_fence_context",
                 "post_acl_recovery_context",
+                "adjudicated_post_acl_recovery_context",
             )
         ),
         "post_acl_predecessor_kind",
@@ -1234,6 +1269,42 @@ def _load_post_acl_recovery_context(
     )
 
 
+def _load_adjudicated_post_acl_recovery_context(
+    installation: Installation, pins: FailedCandidatePinsV1 | None = None
+) -> cp.AdjudicatedPostAclRecoveryContext | None:
+    pins = (
+        pins if pins is not None else installation.adjudicated_post_acl_recovery_context
+    )
+    if pins is None:
+        return None
+    raw = cp._read_protected(_path(pins["path"]))
+    require(
+        cp.raw_digest(raw) == pins["digest"],
+        "adjudicated_post_acl_context_digest_mismatch",
+    )
+    document = read_json(raw)
+    _shape(document, AdjudicatedPostAclRecoveryContextV1)
+    value = cast(AdjudicatedPostAclRecoveryContextV1, document)
+    require(
+        value["historical_context"]["digest"] != pins["digest"],
+        "adjudicated_post_acl_context_collision",
+    )
+    historical = _load_post_acl_recovery_context(
+        installation, value["historical_context"]
+    )
+    require(
+        type(historical) is cp.PostAclRecoveryContext,
+        "adjudicated_post_acl_historical_context_required",
+    )
+    assert isinstance(historical, cp.PostAclRecoveryContext)  # noqa: S101
+    return cp.AdjudicatedPostAclRecoveryContext(
+        historical=historical,
+        adjudication=value["adjudication"],
+        present_measurement=value["present_measurement"],
+        context_digest=pins["digest"],
+    )
+
+
 def _register_original_context(
     contexts: dict[str, cp.CommittedMigrationContext],
     recovery: dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]],
@@ -1262,7 +1333,9 @@ def _register_post_acl_context(
     contexts: dict[str, cp.CommittedMigrationContext],
     recovery: dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]],
     failed_contexts: dict[str, cp.FailedCandidateContext | cp.FailedCandidateContextV2],
-    post_contexts: dict[str, cp.PostAclRecoveryContext],
+    post_contexts: dict[
+        str, cp.PostAclRecoveryContext | cp.AdjudicatedPostAclRecoveryContext
+    ],
     context: cp.PostAclRecoveryContext,
 ) -> cp.PostAclRecoveryContext:
     require(context.context_digest not in post_contexts, "duplicate_post_acl_context")
@@ -1290,6 +1363,29 @@ def _register_post_acl_context(
     return context
 
 
+def _register_adjudicated_post_acl_context(
+    contexts: dict[str, cp.CommittedMigrationContext],
+    recovery: dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]],
+    failed_contexts: dict[str, cp.FailedCandidateContext | cp.FailedCandidateContextV2],
+    post_contexts: dict[
+        str, cp.PostAclRecoveryContext | cp.AdjudicatedPostAclRecoveryContext
+    ],
+    context: cp.AdjudicatedPostAclRecoveryContext,
+) -> cp.AdjudicatedPostAclRecoveryContext:
+    require(
+        type(context) is cp.AdjudicatedPostAclRecoveryContext
+        and context.context_digest != context.historical.context_digest
+        and context.context_digest not in post_contexts,
+        "duplicate_adjudicated_post_acl_context",
+    )
+    historical = _register_post_acl_context(
+        contexts, recovery, failed_contexts, post_contexts, context.historical
+    )
+    context = replace(context, historical=historical)
+    post_contexts[context.context_digest] = context
+    return context
+
+
 def _load_recovery(
     installation: Installation,
     *,
@@ -1298,7 +1394,10 @@ def _load_recovery(
         str, (cp.FailedCandidateContext | cp.FailedCandidateContextV2)
     ]
     | None = None,
-    post_acl_contexts: dict[str, cp.PostAclRecoveryContext] | None = None,
+    post_acl_contexts: dict[
+        str, cp.PostAclRecoveryContext | cp.AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]]:
     """Rebuild only independently root-installed historical recovery bindings."""
     recovery: dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]] = {}
@@ -1311,9 +1410,44 @@ def _load_recovery(
     committed_receipts = []
     failed_receipts = []
     post_receipts = []
+    adjudicated_receipts = []
     committed_entries: set[str] = set()
     for path in installation.historical_context_files:
         document = read_json(cp._read_protected(path))
+        if (
+            document.get("schema")
+            == "dotmac.cp_adjudicated_post_acl_historical_recovery_context/1"
+        ):
+            _shape(document, HistoricalAdjudicatedPostAclRecoveryContextV1)
+            adjudicated_entry = cast(
+                HistoricalAdjudicatedPostAclRecoveryContextV1, document
+            )
+            adjudicated_context = _load_adjudicated_post_acl_recovery_context(
+                installation, adjudicated_entry["adjudicated_post_acl_recovery_context"]
+            )
+            require(
+                adjudicated_context is not None, "adjudicated_post_acl_context_missing"
+            )
+            assert adjudicated_context is not None  # noqa: S101
+            adjudicated_context = _register_adjudicated_post_acl_context(
+                contexts, recovery, failed_contexts, post_contexts, adjudicated_context
+            )
+            raw = installation.store.read(
+                adjudicated_entry["receipt_digest"], kind="receipt"
+            )
+            value = read_json(raw)
+            _shape(value, cp.CpAdjudicatedPostAclReceiptV1)
+            adjudicated_receipt = cast(cp.CpAdjudicatedPostAclReceiptV1, value)
+            require(
+                adjudicated_receipt["phase"] == "complete"
+                and adjudicated_receipt["historical_context_digest"]
+                == adjudicated_context.historical.context_digest
+                and adjudicated_receipt["adjudicated_context_digest"]
+                == adjudicated_context.context_digest,
+                "historical_adjudicated_post_acl_receipt_mismatch",
+            )
+            adjudicated_receipts.append((raw, adjudicated_receipt, adjudicated_context))
+            continue
         if document.get("schema") == "dotmac.cp_post_acl_historical_recovery_context/1":
             _shape(document, HistoricalPostAclRecoveryContextV1)
             post_entry = cast(HistoricalPostAclRecoveryContextV1, document)
@@ -1511,6 +1645,17 @@ def _load_recovery(
             routing_gate=True,
             **verification_contexts,
         )
+    for raw, adjudicated_receipt, adjudicated_context in adjudicated_receipts:
+        cp.verify_adjudicated_post_acl_receipt(
+            raw,
+            store=installation.store,
+            request=adjudicated_receipt["request"],
+            host_nonce=adjudicated_receipt["host_nonce"],
+            recovery=recovery,
+            context=adjudicated_context,
+            routing_gate=True,
+            **verification_contexts,
+        )
     return recovery
 
 
@@ -1530,6 +1675,10 @@ def run_transition(
             )
         elif schema == "dotmac.cp_committed_migration_request/1":
             request = cp.load_committed_request(
+                raw, identity=installation.policy.identity, now=datetime.now(UTC)
+            )
+        elif schema == "dotmac.cp_adjudicated_post_acl_request/1":
+            request = cp.load_adjudicated_post_acl_request(
                 raw, identity=installation.policy.identity, now=datetime.now(UTC)
             )
         elif schema == "dotmac.cp_post_acl_recovery_request/1":
@@ -1554,7 +1703,9 @@ def run_transition(
         failed_contexts: dict[
             str, (cp.FailedCandidateContext | cp.FailedCandidateContextV2)
         ] = {}
-        post_contexts: dict[str, cp.PostAclRecoveryContext] = {}
+        post_contexts: dict[
+            str, cp.PostAclRecoveryContext | cp.AdjudicatedPostAclRecoveryContext
+        ] = {}
         recovery = _load_recovery(
             installation,
             committed_contexts=contexts,
@@ -1564,8 +1715,24 @@ def run_transition(
         context = None
         failed_context = None
         post_context = None
+        adjudicated_context = None
         held_fence = None
-        if request["schema"] == "dotmac.cp_post_acl_recovery_request/1":
+        if request["schema"] == "dotmac.cp_adjudicated_post_acl_request/1":
+            require(
+                request["operator_revision"] == installation.operator_revision,
+                "adjudicated_post_acl_operator_revision_mismatch",
+            )
+            adjudicated_context = _load_adjudicated_post_acl_recovery_context(
+                installation
+            )
+            require(
+                adjudicated_context is not None, "adjudicated_post_acl_context_missing"
+            )
+            assert adjudicated_context is not None  # noqa: S101
+            adjudicated_context = _register_adjudicated_post_acl_context(
+                contexts, recovery, failed_contexts, post_contexts, adjudicated_context
+            )
+        elif request["schema"] == "dotmac.cp_post_acl_recovery_request/1":
             require(
                 request["operator_revision"] == installation.operator_revision,
                 "post_acl_operator_revision_mismatch",
@@ -1627,12 +1794,22 @@ def run_transition(
                 | cp.CpFailedCandidateReceiptV1
                 | cp.CpFailedCandidateReceiptV2
                 | cp.CpPostAclRecoveryReceiptV1
+                | cp.CpAdjudicatedPostAclReceiptV1
             )
-            if prior_value.get("schema") == "dotmac.cp_post_acl_recovery_receipt/1":
+            if prior_value.get("schema") == "dotmac.cp_adjudicated_post_acl_receipt/1":
+                _shape(prior_value, cp.CpAdjudicatedPostAclReceiptV1)
+                prior = cast(cp.CpAdjudicatedPostAclReceiptV1, prior_value)
+                require(
+                    type(post_contexts.get(prior["adjudicated_context_digest"]))
+                    is cp.AdjudicatedPostAclRecoveryContext,
+                    "historical_recovery_missing",
+                )
+            elif prior_value.get("schema") == "dotmac.cp_post_acl_recovery_receipt/1":
                 _shape(prior_value, cp.CpPostAclRecoveryReceiptV1)
                 prior = cast(cp.CpPostAclRecoveryReceiptV1, prior_value)
                 require(
-                    prior["historical_context_digest"] in post_contexts,
+                    type(post_contexts.get(prior["historical_context_digest"]))
+                    is cp.PostAclRecoveryContext,
                     "historical_recovery_missing",
                 )
             elif prior_value.get("schema") in {
@@ -1698,7 +1875,9 @@ def run_transition(
             options["failed_candidate_context"] = failed_context
         if failed_contexts:
             options["failed_candidate_contexts"] = failed_contexts
-        if post_context is not None:
+        if adjudicated_context is not None:
+            options["post_acl_recovery_context"] = adjudicated_context
+        elif post_context is not None:
             options["post_acl_recovery_context"] = post_context
         if post_contexts:
             options["post_acl_contexts"] = post_contexts
@@ -1712,6 +1891,19 @@ def run_transition(
             execution_contexts["failed_candidate_contexts"] = failed_contexts
         if post_contexts:
             execution_contexts["post_acl_contexts"] = post_contexts
+        if adjudicated_context is not None:
+            return cp.execute_adjudicated_post_acl_recovery(
+                raw,
+                request_path=request_file,
+                bundle_path=bundle_file,
+                verifier=cp.GhAttestationVerifier(installation.policy),
+                host=host,
+                store=installation.store,
+                recovery=recovery,
+                context=adjudicated_context,
+                clock=lambda: datetime.now(UTC),
+                **execution_contexts,
+            )
         if post_context is not None:
             return cp.execute_post_acl_recovery(
                 raw,

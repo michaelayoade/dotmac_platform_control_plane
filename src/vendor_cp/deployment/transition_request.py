@@ -24,13 +24,16 @@ from vendor_cp.deploy_agent.contracts import (
     sha,
 )
 from vendor_cp.deployment.cp_transition import (
+    ADJUDICATED_POST_ACL_PLAN_FIELDS,
     COMMITTED_PLAN_FIELDS,
     FAILED_CANDIDATE_PLAN_FIELDS,
     PLAN_FIELDS,
+    AdjudicatedPostAclBasisV1,
     CommittedMigrationBasisV1,
     CpTransitionIdentity,
     FailedCandidateBasisV1,
     FailedCandidateBasisV2,
+    HeartbeatDriftAdjudicationV1,
     PostAclRecoveryBasisV1,
     TransitionRequest,
     TransitionSideV1,
@@ -133,6 +136,25 @@ class PostAclRecoveryPlanV1(TypedDict):
     plan_digest: Digest
 
 
+class AdjudicatedPostAclRecoveryPlanV1(TypedDict):
+    """Intent for later protected adjudication, never source approval authority."""
+
+    schema: Literal["dotmac.cp_adjudicated_post_acl_plan/1"]
+    product: Literal["dotmac_vendor_control_plane"]
+    environment: Literal["production"]
+    host: Identifier
+    database: Identifier
+    cluster_system_identifier: str
+    database_oid: int
+    source: TransitionSideV1
+    target: TransitionSideV1
+    previous_receipt_digest: Digest | None
+    operator_revision: Revision
+    basis: AdjudicatedPostAclBasisV1
+    adjudication: HeartbeatDriftAdjudicationV1
+    plan_digest: Digest
+
+
 def author_request(
     plan_raw: bytes,
     *,
@@ -172,16 +194,21 @@ def author_request(
     actor = context.get("GITHUB_ACTOR", "")
     _shape(actor, Identifier)
     document = read_json(plan_raw)
+    adjudicated_post_acl = (
+        document.get("schema") == "dotmac.cp_adjudicated_post_acl_plan/1"
+    )
     post_acl = document.get("schema") == "dotmac.cp_post_acl_recovery_plan/1"
     failed_candidate_v2 = document.get("schema") == "dotmac.cp_failed_candidate_plan/2"
     failed_candidate = failed_candidate_v2 or (
         document.get("schema") == "dotmac.cp_failed_candidate_plan/1"
     )
-    committed = not (failed_candidate or post_acl) and (
+    committed = not (failed_candidate or post_acl or adjudicated_post_acl) and (
         "basis" in document or "operator_revision" in document
     )
     plan_type = (
-        PostAclRecoveryPlanV1
+        AdjudicatedPostAclRecoveryPlanV1
+        if adjudicated_post_acl
+        else PostAclRecoveryPlanV1
         if post_acl
         else FailedCandidatePlanV2
         if failed_candidate_v2
@@ -197,7 +224,8 @@ def author_request(
         | CommittedMigrationPlanV1
         | FailedCandidatePlanV1
         | FailedCandidatePlanV2
-        | PostAclRecoveryPlanV1,
+        | PostAclRecoveryPlanV1
+        | AdjudicatedPostAclRecoveryPlanV1,
         document,
     )
     identity = CpTransitionIdentity(
@@ -213,7 +241,9 @@ def author_request(
                 key: cast(dict[str, object], plan)[key]
                 for key in (
                     *(
-                        FAILED_CANDIDATE_PLAN_FIELDS
+                        ADJUDICATED_POST_ACL_PLAN_FIELDS
+                        if adjudicated_post_acl
+                        else FAILED_CANDIDATE_PLAN_FIELDS
                         if failed_candidate or post_acl
                         else COMMITTED_PLAN_FIELDS
                         if committed
@@ -222,7 +252,9 @@ def author_request(
                     "plan_digest",
                 )
             },
-            "schema": "dotmac.cp_post_acl_recovery_request/1"
+            "schema": "dotmac.cp_adjudicated_post_acl_request/1"
+            if adjudicated_post_acl
+            else "dotmac.cp_post_acl_recovery_request/1"
             if post_acl
             else "dotmac.cp_committed_migration_request/1"
             if committed

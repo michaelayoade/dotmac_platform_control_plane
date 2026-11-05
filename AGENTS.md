@@ -463,6 +463,29 @@ disagree, fix the drift.
     production host action, installation/configuration, authorization dispatch,
     native attempt, credential ceremony, capture, restore or DDL replay.
 
+    **Adjudicated post-ACL source amendment (2026-11-05):** Michael approved
+    isolated source implementation, a draft PR, hosted CI and independent review
+    of one separately typed manual maintenance/adjudication path. The strict
+    post-ACL request, context and receipt remain closed and continue to refuse
+    changed measurements. Source approval does not accept live operational risk.
+    A later protected human authorization must explicitly acknowledge the
+    unavailable historical interval and bind the original baseline, exact
+    reviewed present measurement and heartbeat row-set commitments, complete
+    difference, failed invocation, all retained ancestry and spent claims.
+    The strict and adjudicated protocols share one canonical successor claim
+    domain; another context, authorization, protocol or store cannot create an
+    extra attempt. Fresh complete measurements before and after writer stop
+    must match the reviewed present boundary exactly. That prospective boundary
+    never replaces the historical baseline. Receipts preserve the unavailable
+    baseline-linkage, attribution, intermediate-write, business-row-equality and
+    harmlessness assurances rather than calling adjudication forensic proof.
+    Existing execution owners remain authoritative; no blanket heartbeat
+    exclusion, statistics reset, data repair, capture, restore or DDL replay is
+    introduced. Nonempty or unclassified warning output remains refused. This
+    source-only amendment grants no merge, release, runtime qualification,
+    host action, installation/configuration, authorization dispatch or native
+    execution, and renews no expired proof or consumed authorization.
+
     **`3` and `4` are different numbers and stay different**, including through
     `docker compose run`, which propagates the container's status unchanged. An
     owner refused and there is no evidence look identical from outside and mean

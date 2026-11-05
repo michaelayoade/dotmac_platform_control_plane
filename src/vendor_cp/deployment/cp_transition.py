@@ -193,12 +193,81 @@ class CpPostAclRecoveryRequestV1(TypedDict):
     expires_at: str
 
 
+class AdjudicatedPostAclBasisV1(TypedDict):
+    context_digest: Digest
+    historical_basis: PostAclRecoveryBasisV1
+    adjudication_digest: Digest
+    present_measurement_digest: Digest
+    current_heartbeat_rowset_digest: Digest
+
+
+class HeartbeatCounterDifferenceV1(TypedDict):
+    schema: Literal["public"]
+    relation: Literal["relay_heartbeats"]
+    relation_identity_digest: Digest
+    counter: Literal["n_tup_upd"]
+    direction: Literal["increase"]
+
+
+class AdjudicatedHeartbeatV1(TypedDict):
+    row_count: Literal[1]
+    rowset_digest: Digest
+
+
+class HeartbeatSupportingEvidenceV1(TypedDict):
+    qualification_assessment_digest: Digest
+    comparison_digest: Digest
+    decoder_result_digest: Digest
+
+
+class UnavailableHistoricalAssuranceV1(TypedDict):
+    actor_attribution_proven: Literal[False]
+    backup_to_retained_baseline_linkage: Literal[False]
+    business_row_equality_proven: Literal[False]
+    harmlessness_proven: Literal[False]
+    intermediate_writes_excluded: Literal[False]
+    null_claim_proves_idle_interval: Literal[False]
+
+
+class HeartbeatDriftAdjudicationV1(TypedDict):
+    schema: Literal["dotmac.cp_heartbeat_drift_adjudication/1"]
+    acknowledgement: Literal["HISTORICAL_INTERVAL_NOT_ATTRIBUTED"]
+    historical_measurement_digest: Digest
+    present_measurement_digest: Digest
+    permitted_difference: HeartbeatCounterDifferenceV1
+    current_heartbeat: AdjudicatedHeartbeatV1
+    evidence: HeartbeatSupportingEvidenceV1
+    unavailable_assurance: UnavailableHistoricalAssuranceV1
+
+
+class CpAdjudicatedPostAclRequestV1(TypedDict):
+    schema: Literal["dotmac.cp_adjudicated_post_acl_request/1"]
+    product: Literal["dotmac_vendor_control_plane"]
+    environment: Literal["production"]
+    host: Identifier
+    database: Identifier
+    cluster_system_identifier: str
+    database_oid: int
+    source: TransitionSideV1
+    target: TransitionSideV1
+    previous_receipt_digest: Digest | None
+    operator_revision: Revision
+    basis: AdjudicatedPostAclBasisV1
+    adjudication: HeartbeatDriftAdjudicationV1
+    plan_digest: Digest
+    authorization_run_id: int
+    authorization_run_attempt: int
+    trusted_actor: Identifier
+    expires_at: str
+
+
 TransitionRequest = (
     CpTransitionRequestV1
     | CpCommittedMigrationRequestV1
     | CpFailedCandidateRequestV1
     | CpFailedCandidateRequestV2
     | CpPostAclRecoveryRequestV1
+    | CpAdjudicatedPostAclRequestV1
 )
 
 
@@ -273,18 +342,28 @@ PLAN_FIELDS = (
 
 COMMITTED_PLAN_FIELDS = (*PLAN_FIELDS, "operator_revision", "basis")
 FAILED_CANDIDATE_PLAN_FIELDS = COMMITTED_PLAN_FIELDS
+ADJUDICATED_POST_ACL_PLAN_FIELDS = (*COMMITTED_PLAN_FIELDS, "adjudication")
 
 
 def transition_plan_digest(request: TransitionRequest) -> str:
+    adjudicated = request.get("schema") == "dotmac.cp_adjudicated_post_acl_request/1"
     committed = request.get("schema") == "dotmac.cp_committed_migration_request/1"
     failed = request.get("schema") in {
         "dotmac.cp_failed_candidate_request/1",
         "dotmac.cp_failed_candidate_request/2",
     }
     post_acl = request.get("schema") == "dotmac.cp_post_acl_recovery_request/1"
-    fields = COMMITTED_PLAN_FIELDS if committed or failed or post_acl else PLAN_FIELDS
+    fields = (
+        ADJUDICATED_POST_ACL_PLAN_FIELDS
+        if adjudicated
+        else COMMITTED_PLAN_FIELDS
+        if committed or failed or post_acl
+        else PLAN_FIELDS
+    )
     payload = {key: cast(dict[str, object], request)[key] for key in fields}
-    if post_acl:
+    if adjudicated:
+        payload["schema"] = "dotmac.cp_adjudicated_post_acl_plan/1"
+    elif post_acl:
         payload["schema"] = "dotmac.cp_post_acl_recovery_plan/1"
     elif committed:
         payload["schema"] = "dotmac.cp_committed_migration_plan/1"
@@ -486,6 +565,36 @@ class ArtifactStore:
             )
         )
         key = post_acl_recovery_frontier_key(context)
+        self._create(self._name(key, "reservation"), raw)
+        require(self.read(key, kind="reservation") == raw, "artifact_readback_mismatch")
+        return raw
+
+    def reserve_adjudicated_post_acl_frontier(
+        self,
+        context: AdjudicatedPostAclRecoveryContext,
+        request: CpAdjudicatedPostAclRequestV1,
+        *,
+        host_nonce: str,
+        fresh_reservation_digest: str,
+    ) -> bytes:
+        """Consume exactly the strict path's canonical physical claim owner."""
+        require(
+            type(context) is AdjudicatedPostAclRecoveryContext,
+            "unsupported_recovery_generation",
+        )
+        _shape(request, CpAdjudicatedPostAclRequestV1)
+        historical = context.historical
+        _post_acl_ancestors(historical)
+        require(
+            self.root == historical.prior_store.root, "post_acl_prior_store_mismatch"
+        )
+        _post_acl_canonical_store(historical)
+        raw = canonical_json(
+            _adjudicated_post_acl_claim(
+                context, request, host_nonce, fresh_reservation_digest
+            )
+        )
+        key = post_acl_recovery_frontier_key(historical)
         self._create(self._name(key, "reservation"), raw)
         require(self.read(key, kind="reservation") == raw, "artifact_readback_mismatch")
         return raw
@@ -1250,7 +1359,10 @@ def verify_transition_prefix(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> None:
     """Join retained pre-DDL facts to the single authenticated host attempt.
 
@@ -1309,7 +1421,10 @@ def verify_predecessor(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> None:
     """Verify the complete independent chain anchor before host mutation or DDL."""
     require(depth < 32, "receipt_chain_too_deep")
@@ -1318,7 +1433,9 @@ def verify_predecessor(
         return
     raw = store.read(checksum, kind="receipt")
     prior = read_json(raw)
-    if prior.get("schema") == "dotmac.cp_post_acl_recovery_receipt/1":
+    if prior.get("schema") == "dotmac.cp_adjudicated_post_acl_receipt/1":
+        _shape(prior, CpAdjudicatedPostAclReceiptV1)
+    elif prior.get("schema") == "dotmac.cp_post_acl_recovery_receipt/1":
         _shape(prior, CpPostAclRecoveryReceiptV1)
     elif prior.get("schema") == "dotmac.cp_failed_candidate_receipt/2":
         _shape(prior, CpFailedCandidateReceiptV2)
@@ -1333,7 +1450,8 @@ def verify_predecessor(
         | CpCommittedMigrationReceiptV1
         | CpFailedCandidateReceiptV1
         | CpFailedCandidateReceiptV2
-        | CpPostAclRecoveryReceiptV1,
+        | CpPostAclRecoveryReceiptV1
+        | CpAdjudicatedPostAclReceiptV1,
         prior,
     )
     require(
@@ -1384,7 +1502,10 @@ def verify_receipt(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> CpMigrationTransitionReceiptV1:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation = read_json(store.read(request_digest(request), kind="reservation"))
@@ -1517,7 +1638,10 @@ def execute_transition(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> str:
     """Single-use CP owner. Failure never retries or restores public routing."""
     with host.lock():
@@ -1808,6 +1932,60 @@ def load_post_acl_recovery_request(
     )
 
 
+def validate_adjudicated_post_acl_request(
+    value: object, *, identity: CpTransitionIdentity, now: datetime
+) -> CpAdjudicatedPostAclRequestV1:
+    _shape(value, CpAdjudicatedPostAclRequestV1)
+    request = cast(CpAdjudicatedPostAclRequestV1, value)
+    require(now.tzinfo is not None)
+    require(
+        all(
+            cast(dict[str, object], request)[key] == getattr(identity, key)
+            for key in ("host", "database", "cluster_system_identifier", "database_oid")
+        ),
+        "host_mismatch",
+    )
+    require(
+        request["authorization_run_id"] > 0 and request["authorization_run_attempt"] > 0
+    )
+    require(
+        now < timestamp(request["expires_at"]) <= now + timedelta(hours=24), "expired"
+    )
+    require(
+        request["plan_digest"] == transition_plan_digest(request),
+        "plan_digest_mismatch",
+    )
+    for side in (request["source"], request["target"]):
+        require(bool(side["heads"]) and side["heads"] == sorted(set(side["heads"])))
+    require(request["source"]["image_digest"] != request["target"]["image_digest"])
+    adjudication = request["adjudication"]
+    basis = request["basis"]
+    require(
+        basis["adjudication_digest"] == digest(adjudication)
+        and basis["present_measurement_digest"]
+        == adjudication["present_measurement_digest"]
+        and basis["current_heartbeat_rowset_digest"]
+        == adjudication["current_heartbeat"]["rowset_digest"]
+        and basis["historical_basis"]["frontier_measurement_digest"]
+        == adjudication["historical_measurement_digest"]
+        and adjudication["historical_measurement_digest"]
+        != adjudication["present_measurement_digest"]
+        and adjudication["permitted_difference"]["relation_identity_digest"]
+        == digest(["public", "relay_heartbeats"])
+        and basis["context_digest"] != basis["historical_basis"]["context_digest"],
+        "adjudication_binding_mismatch",
+    )
+    return request
+
+
+def load_adjudicated_post_acl_request(
+    raw: bytes, *, identity: CpTransitionIdentity, now: datetime
+) -> CpAdjudicatedPostAclRequestV1:
+    return validate_adjudicated_post_acl_request(
+        read_json(raw), identity=identity, now=now
+    )
+
+
 def load_failed_candidate_request(
     raw: bytes, *, identity: CpTransitionIdentity, now: datetime
 ) -> CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2:
@@ -1820,6 +1998,8 @@ def load_failed_candidate_request(
 def validate_any_request(
     value: TransitionRequest, *, identity: CpTransitionIdentity, now: datetime
 ) -> TransitionRequest:
+    if value["schema"] == "dotmac.cp_adjudicated_post_acl_request/1":
+        return validate_adjudicated_post_acl_request(value, identity=identity, now=now)
     if value["schema"] == "dotmac.cp_post_acl_recovery_request/1":
         return validate_post_acl_recovery_request(value, identity=identity, now=now)
     if value["schema"] == "dotmac.cp_failed_candidate_request/2":
@@ -2326,7 +2506,10 @@ def verify_committed_receipt(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> CpCommittedMigrationReceiptV1:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation_raw = store.read(request_digest(request), kind="reservation")
@@ -2409,20 +2592,48 @@ def verify_any_receipt(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> (
     CpMigrationTransitionReceiptV1
     | CpCommittedMigrationReceiptV1
     | CpFailedCandidateReceiptV1
     | CpFailedCandidateReceiptV2
     | CpPostAclRecoveryReceiptV1
+    | CpAdjudicatedPostAclReceiptV1
 ):
+    if request["schema"] == "dotmac.cp_adjudicated_post_acl_request/1":
+        adjudicated_context = (post_acl_contexts or {}).get(
+            request["basis"]["context_digest"]
+        )
+        require(
+            type(adjudicated_context) is AdjudicatedPostAclRecoveryContext,
+            "adjudication_context_missing",
+        )
+        assert type(adjudicated_context) is AdjudicatedPostAclRecoveryContext  # noqa: S101
+        return verify_adjudicated_post_acl_receipt(
+            raw,
+            store=store,
+            request=request,
+            host_nonce=host_nonce,
+            recovery=recovery,
+            routing_gate=routing_gate,
+            _depth=_depth,
+            context=adjudicated_context,
+            committed_contexts=committed_contexts,
+            failed_candidate_contexts=failed_candidate_contexts,
+            post_acl_contexts=post_acl_contexts,
+        )
     if request["schema"] == "dotmac.cp_post_acl_recovery_request/1":
         post_acl_context = (post_acl_contexts or {}).get(
             request["basis"]["context_digest"]
         )
-        require(post_acl_context is not None, "post_acl_context_missing")
-        assert post_acl_context is not None  # noqa: S101 - narrowed by require
+        require(
+            type(post_acl_context) is PostAclRecoveryContext, "post_acl_context_missing"
+        )
+        assert type(post_acl_context) is PostAclRecoveryContext  # noqa: S101
         return verify_post_acl_recovery_receipt(
             raw,
             store=store,
@@ -2521,7 +2732,10 @@ def execute_committed_continuation(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> str:
     with host.lock():
         now = clock()
@@ -3162,7 +3376,10 @@ def verify_failed_candidate_receipt(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> CpFailedCandidateReceiptV1 | CpFailedCandidateReceiptV2:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation_raw = store.read(request_digest(request), kind="reservation")
@@ -3264,7 +3481,10 @@ def execute_failed_candidate_recovery(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> str:
     with host.lock():
         now = clock()
@@ -3488,6 +3708,180 @@ def post_acl_recovery_frontier_key(context: PostAclRecoveryContext) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class AdjudicatedPostAclRecoveryContext:
+    """A reviewed present boundary alongside, never replacing, original history."""
+
+    historical: PostAclRecoveryContext
+    adjudication: HeartbeatDriftAdjudicationV1
+    present_measurement: CandidateMeasurementV1
+    context_digest: str
+
+
+def validate_heartbeat_drift_adjudication(
+    adjudication: HeartbeatDriftAdjudicationV1,
+    *,
+    historical_measurement: CandidateMeasurementV1,
+    present_measurement: CandidateMeasurementV1,
+) -> None:
+    """Admit exactly one reviewed counter cell, checking every other dimension."""
+    _shape(adjudication, HeartbeatDriftAdjudicationV1)
+    for measurement in (historical_measurement, present_measurement):
+        _shape(measurement, CandidateMeasurementV1)
+        relations = measurement["relations"]
+        identities: list[tuple[str, str]] = []
+        for row in relations:
+            require(
+                len(row) == 7
+                and all(type(value) is str and bool(value) for value in row[:2])
+                and all(type(value) is int and value >= 0 for value in row[2:])
+                and row[2] > 0,
+                "adjudication_relation_malformed",
+            )
+            identities.append((cast(str, row[0]), cast(str, row[1])))
+        require(
+            bool(relations)
+            and identities == sorted(set(identities))
+            and len({row[2] for row in relations}) == len(relations),
+            "adjudication_relation_malformed",
+        )
+        sequences = measurement["sequences"]
+        sequence_names: list[tuple[str, str]] = []
+        for sequence in sequences:
+            require(
+                len(sequence) == 3
+                and all(type(value) is str and bool(value) for value in sequence[:2])
+                and (sequence[2] is None or type(sequence[2]) is int),
+                "adjudication_sequence_malformed",
+            )
+            sequence_names.append((cast(str, sequence[0]), cast(str, sequence[1])))
+        require(
+            sequence_names == sorted(set(sequence_names)),
+            "adjudication_sequence_malformed",
+        )
+    require(
+        adjudication["historical_measurement_digest"] == digest(historical_measurement)
+        and adjudication["present_measurement_digest"] == digest(present_measurement)
+        and digest(historical_measurement) != digest(present_measurement),
+        "adjudication_measurement_digest_mismatch",
+    )
+    require(
+        all(
+            historical_measurement[name] == present_measurement[name]
+            for name in (
+                "track_counts",
+                "stats_reset",
+                "server_start",
+                "sequences",
+                "catalogue_digest",
+            )
+        ),
+        "adjudication_extra_difference",
+    )
+    before, after = (
+        historical_measurement["relations"],
+        present_measurement["relations"],
+    )
+    require(len(before) == len(after), "adjudication_extra_difference")
+    changed = 0
+    for old, new in zip(before, after, strict=True):
+        require(old[:4] == new[:4], "adjudication_extra_difference")
+        for index in (4, 5, 6):
+            if old[index] == new[index]:
+                continue
+            require(
+                old[:2] == ["public", "relay_heartbeats"]
+                and index == 5
+                and cast(int, new[index]) > cast(int, old[index]),
+                "adjudication_extra_difference",
+            )
+            changed += 1
+    require(changed == 1, "adjudication_difference_mismatch")
+    require(
+        adjudication["permitted_difference"]["relation_identity_digest"]
+        == digest(["public", "relay_heartbeats"]),
+        "adjudication_relation_identity_mismatch",
+    )
+
+
+def adjudicated_post_acl_basis(
+    context: AdjudicatedPostAclRecoveryContext,
+) -> AdjudicatedPostAclBasisV1:
+    require(
+        type(context) is AdjudicatedPostAclRecoveryContext,
+        "unsupported_recovery_generation",
+    )
+    _post_acl_ancestors(context.historical)
+    return {
+        "context_digest": context.context_digest,
+        "historical_basis": post_acl_recovery_basis(context.historical),
+        "adjudication_digest": digest(context.adjudication),
+        "present_measurement_digest": digest(context.present_measurement),
+        "current_heartbeat_rowset_digest": context.adjudication["current_heartbeat"][
+            "rowset_digest"
+        ],
+    }
+
+
+def _adjudicated_post_acl_claim(
+    context: AdjudicatedPostAclRecoveryContext,
+    request: CpAdjudicatedPostAclRequestV1,
+    nonce: str,
+    fresh_reservation_digest: str,
+) -> dict[str, object]:
+    return {
+        "schema": "dotmac.cp_adjudicated_post_acl_frontier_reservation/1",
+        "frontier_key": post_acl_recovery_frontier_key(context.historical),
+        "basis": request["basis"],
+        "request_digest": request_digest(request),
+        "host_nonce": nonce,
+        "fresh_reservation_digest": fresh_reservation_digest,
+    }
+
+
+def verify_adjudicated_post_acl_frontier(
+    context: AdjudicatedPostAclRecoveryContext,
+    request: CpAdjudicatedPostAclRequestV1,
+    *,
+    owned_successor_claim: bytes | None = None,
+) -> None:
+    require(
+        type(context) is AdjudicatedPostAclRecoveryContext,
+        "unsupported_recovery_generation",
+    )
+    _post_acl_ancestors(context.historical)
+    _shape(request, CpAdjudicatedPostAclRequestV1)
+    sha(context.context_digest)
+    require(
+        context.context_digest
+        not in {
+            context.historical.context_digest,
+            context.historical.predecessor.context_digest,
+            context.historical.predecessor.predecessor.context_digest,
+            context.historical.original.context_digest,
+        },
+        "adjudication_context_mismatch",
+    )
+    require(
+        request["basis"] == adjudicated_post_acl_basis(context)
+        and request["adjudication"] == context.adjudication,
+        "adjudication_binding_mismatch",
+    )
+    validate_heartbeat_drift_adjudication(
+        context.adjudication,
+        historical_measurement=context.historical.measurement,
+        present_measurement=context.present_measurement,
+    )
+    _verify_post_acl_historical_frontier(
+        context.historical,
+        request,
+        owned_successor_claim=owned_successor_claim,
+        claim=lambda nonce, reservation: _adjudicated_post_acl_claim(
+            context, request, nonce, reservation
+        ),
+    )
+
+
 def post_acl_recovery_basis(context: PostAclRecoveryContext) -> PostAclRecoveryBasisV1:
     store, prior = context.prior_store, context.request
     return {
@@ -3554,10 +3948,32 @@ def verify_post_acl_recovery_frontier(
     owned_successor_claim: bytes | None = None,
 ) -> None:
     """Validate the full post-ACL frontier, never a flattened prefix or census."""
+    _post_acl_ancestors(context)
+    _shape(request, CpPostAclRecoveryRequestV1)
+    require(
+        request["basis"] == post_acl_recovery_basis(context), "post_acl_basis_mismatch"
+    )
+    _verify_post_acl_historical_frontier(
+        context,
+        request,
+        owned_successor_claim=owned_successor_claim,
+        claim=lambda nonce, reservation: _post_acl_recovery_claim(
+            context, request, nonce, reservation
+        ),
+    )
+
+
+def _verify_post_acl_historical_frontier(
+    context: PostAclRecoveryContext,
+    request: TransitionRequest,
+    *,
+    owned_successor_claim: bytes | None,
+    claim: Callable[[str, str], dict[str, object]],
+) -> None:
+    """Original immutable history shared beneath the closed protocol wrappers."""
     from vendor_cp.deployment.transition_fence import FenceProof
 
     _post_acl_ancestors(context)
-    _shape(request, CpPostAclRecoveryRequestV1)
     _shape(context.request, CpFailedCandidateRequestV2)
     _post_acl_canonical_store(context)
     _shape(context.host_nonce, Nonce)
@@ -3705,9 +4121,6 @@ def verify_post_acl_recovery_frontier(
             == cast(dict[str, object], prior)[name],
             "post_acl_target_or_identity_mismatch",
         )
-    require(
-        request["basis"] == post_acl_recovery_basis(context), "post_acl_basis_mismatch"
-    )
     closure: dict[str, str] = {}
 
     def include(checksum: str, *, kind: str = "evidence") -> None:
@@ -3739,9 +4152,7 @@ def verify_post_acl_recovery_frontier(
         )
         require(
             owned
-            == _post_acl_recovery_claim(
-                context,
-                request,
+            == claim(
                 cast(str, owned["host_nonce"]),
                 cast(str, owned["fresh_reservation_digest"]),
             ),
@@ -3849,8 +4260,13 @@ def verify_post_acl_recovery_receipt(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> CpPostAclRecoveryReceiptV1:
+    require(type(context) is PostAclRecoveryContext, "unsupported_recovery_generation")
+    _shape(request, CpPostAclRecoveryRequestV1)
     require(_depth < 32, "receipt_chain_too_deep")
     reservation_raw = store.read(request_digest(request), kind="reservation")
     reservation = read_json(reservation_raw)
@@ -3949,7 +4365,10 @@ def execute_post_acl_recovery(
         str, FailedCandidateContext | FailedCandidateContextV2
     ]
     | None = None,
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
 ) -> str:
     with host.lock():
         now = clock()
@@ -4094,6 +4513,455 @@ def execute_post_acl_recovery(
             retain(
                 "post-acl-rebound",
                 host.rebind_post_acl_recovery(request, nonce, context),
+            )
+            retain("migrated-target-heads", host.target_heads(request, nonce))
+
+            def mark_acl() -> None:
+                nonlocal acl_may_be_restored
+                acl_may_be_restored = True
+
+            return _execute_common_suffix(
+                request,
+                nonce=nonce,
+                host=host,
+                store=store,
+                evidence=evidence,
+                retain=retain,
+                receipt=receipt,
+                mark_acl=mark_acl,
+            )
+        except BaseException as original:
+            if not host_mutation_started:
+                raise
+            try:
+                retain(
+                    "failure",
+                    host.fail_closed(
+                        request, nonce, acl_may_be_restored=acl_may_be_restored
+                    ),
+                )
+            except BaseException as compensation:
+                original.add_note(
+                    f"Fail-closed compensation failed: {type(compensation).__name__}"
+                )
+            raise
+
+
+ADJUDICATED_POST_ACL_PRE_ACL_EVIDENCE = (
+    POST_ACL_PRE_ACL_EVIDENCE - {"post-acl-rebound"}
+) | {"adjudicated-post-acl-rebound"}
+
+
+def _validate_adjudicated_inspection(
+    value: object,
+    request: CpAdjudicatedPostAclRequestV1,
+    context: AdjudicatedPostAclRecoveryContext,
+) -> None:
+    require(isinstance(value, dict), "adjudication_present_mismatch")
+    document = cast(dict[str, object], value)
+    _shape(document.get("measurement"), CandidateMeasurementV1)
+    require(
+        digest(document["measurement"])
+        == request["basis"]["present_measurement_digest"],
+        "adjudication_present_mismatch",
+    )
+    expected = {
+        "source": request["source"],
+        "target": request["target"],
+        "measurement": context.present_measurement,
+        "heartbeat_rowset_digest": context.adjudication["current_heartbeat"][
+            "rowset_digest"
+        ],
+        "heartbeat_row_count": 1,
+    }
+    require(
+        canonical_json(value) == canonical_json(expected),
+        "adjudication_present_mismatch",
+    )
+
+
+class CpAdjudicatedPostAclReceiptV1(TypedDict):
+    schema: Literal["dotmac.cp_adjudicated_post_acl_receipt/1"]
+    request: CpAdjudicatedPostAclRequestV1
+    request_digest: Digest
+    host_nonce: str
+    phase: Literal["pre-routing", "complete"]
+    historical_context_digest: Digest
+    adjudicated_context_digest: Digest
+    successor_reservation_digest: Digest
+    adjudication_digest: Digest
+    historical_measurement_digest: Digest
+    present_measurement_digest: Digest
+    current_heartbeat_rowset_digest: Digest
+    unavailable_assurance: UnavailableHistoricalAssuranceV1
+    evidence: dict[Identifier, Digest]
+
+
+def _validate_adjudicated_post_acl_evidence(
+    value: dict[str, object],
+    *,
+    request: CpAdjudicatedPostAclRequestV1,
+    nonce: str,
+    kind: str,
+    store: ArtifactStore,
+    evidence: dict[str, str],
+    recovery: RecoveryContexts,
+    context: AdjudicatedPostAclRecoveryContext,
+) -> None:
+    if kind == "inspection":
+        require(
+            set(value) == {"schema", "request_digest", "host_nonce", "kind", "result"}
+            and value["schema"] == "dotmac.cp_transition_evidence/2"
+            and value["request_digest"] == request_digest(request)
+            and value["host_nonce"] == nonce
+            and value["kind"] == kind,
+            "adjudication_inspection_mismatch",
+        )
+        _validate_adjudicated_inspection(value["result"], request, context)
+        return
+    if kind == "adjudicated-post-acl-rebound":
+        expected = {
+            "schema": "dotmac.cp_transition_evidence/2",
+            "request_digest": request_digest(request),
+            "host_nonce": nonce,
+            "kind": kind,
+            "result": {
+                "prior_fence_id": request["basis"]["historical_basis"][
+                    "current_fence_id"
+                ],
+                "fence_id": nonce,
+                "original_fence_digest": request["basis"]["historical_basis"][
+                    "original_fence_digest"
+                ],
+                "current_fence_digest": request["basis"]["historical_basis"][
+                    "current_fence_digest"
+                ],
+                "historical_measurement_digest": digest(context.historical.measurement),
+                "present_measurement_digest": digest(context.present_measurement),
+                "adjudication_digest": digest(context.adjudication),
+                "measurement": context.present_measurement,
+                "heartbeat_rowset_digest": context.adjudication["current_heartbeat"][
+                    "rowset_digest"
+                ],
+                "heartbeat_row_count": 1,
+            },
+        }
+        require(
+            canonical_json(value) == canonical_json(expected),
+            "post_acl_rebind_mismatch",
+        )
+        return
+    _validate_evidence(
+        value,
+        request=request,
+        nonce=nonce,
+        kind=kind,
+        store=store,
+        evidence=evidence,
+        recovery=recovery,
+    )
+    if kind == "candidate-removed-fenced":
+        result = cast(dict[str, object], value["result"])
+        quiescence = read_json(store.read(cast(str, result["quiescence_digest"])))
+        snapshot = read_json(store.read(cast(str, quiescence["after_digest"])))
+        require(
+            canonical_json(snapshot["measurement"])
+            == canonical_json(context.present_measurement),
+            "post_acl_measurement_mismatch",
+        )
+
+
+def verify_adjudicated_post_acl_receipt(
+    raw: bytes,
+    *,
+    store: ArtifactStore,
+    request: CpAdjudicatedPostAclRequestV1,
+    host_nonce: str,
+    recovery: RecoveryContexts,
+    context: AdjudicatedPostAclRecoveryContext,
+    routing_gate: bool = False,
+    _depth: int = 0,
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
+) -> CpAdjudicatedPostAclReceiptV1:
+    require(
+        type(context) is AdjudicatedPostAclRecoveryContext,
+        "unsupported_recovery_generation",
+    )
+    _shape(request, CpAdjudicatedPostAclRequestV1)
+    require(_depth < 32, "receipt_chain_too_deep")
+    reservation_raw = store.read(request_digest(request), kind="reservation")
+    reservation = read_json(reservation_raw)
+    require(
+        reservation
+        == {
+            "schema": "dotmac.cp_transition_attempt/2",
+            "request_digest": request_digest(request),
+            "host_nonce": host_nonce,
+            "authorization_run_id": request["authorization_run_id"],
+            "authorization_run_attempt": request["authorization_run_attempt"],
+            "verification_digest": reservation.get("verification_digest"),
+        },
+        "reservation_mismatch",
+    )
+    sha(reservation["verification_digest"])
+    claim = canonical_json(
+        _adjudicated_post_acl_claim(
+            context, request, host_nonce, raw_digest(reservation_raw)
+        )
+    )
+    verify_adjudicated_post_acl_frontier(context, request, owned_successor_claim=claim)
+    document = read_json(raw)
+    _shape(document, CpAdjudicatedPostAclReceiptV1)
+    value = cast(CpAdjudicatedPostAclReceiptV1, document)
+    require(
+        value["request"] == request
+        and value["request_digest"] == request_digest(request)
+        and value["host_nonce"] == host_nonce
+        and value["historical_context_digest"] == context.historical.context_digest
+        and value["adjudicated_context_digest"] == context.context_digest
+        and value["successor_reservation_digest"] == raw_digest(claim)
+        and value["adjudication_digest"] == digest(context.adjudication)
+        and value["historical_measurement_digest"]
+        == digest(context.historical.measurement)
+        and value["present_measurement_digest"] == digest(context.present_measurement)
+        and value["current_heartbeat_rowset_digest"]
+        == context.adjudication["current_heartbeat"]["rowset_digest"]
+        and value["unavailable_assurance"]
+        == context.adjudication["unavailable_assurance"],
+        "post_acl_receipt_mismatch",
+    )
+    required = ADJUDICATED_POST_ACL_PRE_ACL_EVIDENCE | (
+        RUNTIME_EVIDENCE if routing_gate else set()
+    )
+    allowed = ADJUDICATED_POST_ACL_PRE_ACL_EVIDENCE | RUNTIME_EVIDENCE
+    if value["phase"] == "complete":
+        required |= RUNTIME_EVIDENCE | ROUTING_EVIDENCE
+        allowed |= ROUTING_EVIDENCE
+    require(required <= set(value["evidence"]) <= allowed, "receipt_phase_mismatch")
+    retained = dict(value["evidence"])
+    if "pre-routing-verified" in retained:
+        pre = dict(value)
+        pre["phase"] = "pre-routing"
+        pre["evidence"] = {
+            key: checksum
+            for key, checksum in retained.items()
+            if key not in ROUTING_EVIDENCE
+        }
+        retained["pre-routing-receipt"] = raw_digest(canonical_json(pre))
+        store.read(retained["pre-routing-receipt"], kind="receipt")
+    for kind, checksum in value["evidence"].items():
+        _validate_adjudicated_post_acl_evidence(
+            read_json(store.read(checksum)),
+            request=request,
+            nonce=host_nonce,
+            kind=kind,
+            store=store,
+            evidence=retained,
+            recovery=recovery,
+            context=context,
+        )
+    return value
+
+
+class CpAdjudicatedPostAclHost(CpTransitionHost, Protocol):
+    def stop_and_drain_writers(
+        self,
+        request: CpTransitionRequestV1 | CpAdjudicatedPostAclRequestV1,
+        nonce: str,
+    ) -> bytes: ...
+
+    def inspect_adjudicated_post_acl_recovery(
+        self,
+        request: CpAdjudicatedPostAclRequestV1,
+        context: AdjudicatedPostAclRecoveryContext,
+    ) -> bytes: ...
+    def rebind_adjudicated_post_acl_recovery(
+        self,
+        request: CpAdjudicatedPostAclRequestV1,
+        nonce: str,
+        context: AdjudicatedPostAclRecoveryContext,
+    ) -> bytes: ...
+
+
+def execute_adjudicated_post_acl_recovery(
+    raw_request: bytes,
+    *,
+    request_path: Path,
+    bundle_path: Path | None,
+    verifier: GhAttestationVerifier,
+    host: CpAdjudicatedPostAclHost,
+    store: ArtifactStore,
+    recovery: RecoveryContexts,
+    context: AdjudicatedPostAclRecoveryContext,
+    clock: Callable[[], datetime],
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
+    | None = None,
+) -> str:
+    with host.lock():
+        now = clock()
+        request = load_adjudicated_post_acl_request(
+            raw_request, identity=verifier.policy.identity, now=now
+        )
+        authorization = verifier.verify(
+            request, request_path=request_path, bundle_path=bundle_path, now=now
+        )
+        verify_adjudicated_post_acl_frontier(context, request)
+        ancestors = (
+            context.historical,
+            context.historical.predecessor,
+            context.historical.predecessor.predecessor,
+            context.historical.original,
+        )
+        fresh_path = store.root.resolve()
+        fresh_inode = (fresh_path.stat().st_dev, fresh_path.stat().st_ino)
+        require(
+            all(
+                fresh_path != x.prior_store.root.resolve()
+                and fresh_inode
+                != (x.prior_store.root.stat().st_dev, x.prior_store.root.stat().st_ino)
+                for x in ancestors
+            ),
+            "recovery_store_reused",
+        )
+        directory = _open_directory(store.root)
+        try:
+            require(not os.listdir(directory), "recovery_store_not_fresh")
+        finally:
+            os.close(directory)
+        inspection = read_json(
+            host.inspect_adjudicated_post_acl_recovery(request, context)
+        )
+        _validate_adjudicated_inspection(inspection, request, context)
+        validate_adjudicated_post_acl_request(
+            request, identity=verifier.policy.identity, now=clock()
+        )
+        nonce = store.reserve(request, authorization)
+        evidence: dict[str, str] = {}
+        acl_may_be_restored = False
+        host_mutation_started = False
+
+        def retain(kind: str, raw: bytes) -> str:
+            _validate_adjudicated_post_acl_evidence(
+                read_json(raw),
+                request=request,
+                nonce=nonce,
+                kind=kind,
+                store=store,
+                evidence=evidence,
+                recovery=recovery,
+                context=context,
+            )
+            checksum = store.put(raw)
+            evidence[kind] = checksum
+            return checksum
+
+        def local(kind: str, result: object) -> bytes:
+            return canonical_json(
+                {
+                    "schema": "dotmac.cp_transition_evidence/2",
+                    "request_digest": request_digest(request),
+                    "host_nonce": nonce,
+                    "kind": kind,
+                    "result": result,
+                }
+            )
+
+        def receipt(
+            phase: Literal["pre-routing", "complete"], *, routing_gate: bool
+        ) -> bytes:
+            raw = canonical_json(
+                {
+                    "schema": "dotmac.cp_adjudicated_post_acl_receipt/1",
+                    "request": request,
+                    "request_digest": request_digest(request),
+                    "host_nonce": nonce,
+                    "phase": phase,
+                    "historical_context_digest": context.historical.context_digest,
+                    "adjudicated_context_digest": context.context_digest,
+                    "successor_reservation_digest": raw_digest(claim),
+                    "adjudication_digest": digest(context.adjudication),
+                    "historical_measurement_digest": digest(
+                        context.historical.measurement
+                    ),
+                    "present_measurement_digest": digest(context.present_measurement),
+                    "current_heartbeat_rowset_digest": context.adjudication[
+                        "current_heartbeat"
+                    ]["rowset_digest"],
+                    "unavailable_assurance": context.adjudication[
+                        "unavailable_assurance"
+                    ],
+                    "evidence": dict(evidence),
+                }
+            )
+            verify_adjudicated_post_acl_receipt(
+                raw,
+                store=store,
+                request=request,
+                host_nonce=nonce,
+                recovery=recovery,
+                context=context,
+                routing_gate=routing_gate,
+            )
+            return store.read(store.put(raw, kind="receipt"), kind="receipt")
+
+        try:
+            reservation_raw = store.read(request_digest(request), kind="reservation")
+            claim = (
+                context.historical.prior_store.reserve_adjudicated_post_acl_frontier(
+                    context,
+                    request,
+                    host_nonce=nonce,
+                    fresh_reservation_digest=raw_digest(reservation_raw),
+                )
+            )
+            verify_adjudicated_post_acl_frontier(
+                context, request, owned_successor_claim=claim
+            )
+            retain(
+                "inspection",
+                local(
+                    "inspection",
+                    inspection,
+                ),
+            )
+            auth_digest = store.put(authorization.verification_bytes)
+            retain(
+                "authorization",
+                local(
+                    "authorization",
+                    {
+                        "verification_digest": auth_digest,
+                        "run_id": authorization.authorization_run_id,
+                        "run_attempt": authorization.authorization_run_attempt,
+                        "trusted_actor": authorization.trusted_actor,
+                    },
+                ),
+            )
+            host_mutation_started = True
+            retain("writers-stopped", host.stop_and_drain_writers(request, nonce))
+            _validate_adjudicated_inspection(
+                read_json(host.inspect_adjudicated_post_acl_recovery(request, context)),
+                request,
+                context,
+            )
+            retain(
+                "adjudicated-post-acl-rebound",
+                host.rebind_adjudicated_post_acl_recovery(request, nonce, context),
             )
             retain("migrated-target-heads", host.target_heads(request, nonce))
 

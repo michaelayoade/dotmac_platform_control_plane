@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       plan:
-        description: Closed TransitionPlanV1 or CommittedMigrationPlanV1 JSON with reviewed plan_digest
+        description: Closed transition or finite recovery plan JSON with reviewed plan_digest (including separately adjudicated post-ACL intent)
         required: true
         type: string
 

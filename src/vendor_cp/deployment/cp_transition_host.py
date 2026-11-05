@@ -28,9 +28,10 @@ import urllib.request
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import TypedDict, cast, overload
 
 from dotmac_kernel.session_runtime import DatabaseRuntime
 from sqlalchemy import Connection, text
@@ -65,9 +66,11 @@ from vendor_cp.deployment.cp_catalogue import (
     verify_restore_comparison,
 )
 from vendor_cp.deployment.cp_transition import (
+    AdjudicatedPostAclRecoveryContext,
     ArtifactStore,
     CandidateMeasurementV1,
     CommittedMigrationContext,
+    CpAdjudicatedPostAclRequestV1,
     CpCommittedMigrationRequestV1,
     CpFailedCandidateRequestV1,
     CpFailedCandidateRequestV2,
@@ -75,6 +78,7 @@ from vendor_cp.deployment.cp_transition import (
     CpTransitionRequestV1,
     FailedCandidateContext,
     FailedCandidateContextV2,
+    PostAclRecoveryBasisV1,
     PostAclRecoveryContext,
     RecoveryContexts,
     SourceObservation,
@@ -319,7 +323,9 @@ class _CommittedContextArguments(TypedDict, total=False):
 
 
 class _FailedReceiptArguments(TypedDict, total=False):
-    post_acl_contexts: Mapping[str, PostAclRecoveryContext]
+    post_acl_contexts: Mapping[
+        str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+    ]
     failed_candidate_context: FailedCandidateContext | FailedCandidateContextV2
     failed_candidate_contexts: Mapping[
         str, FailedCandidateContext | FailedCandidateContextV2
@@ -550,6 +556,62 @@ def measure_candidate_quiescence(connection: Connection) -> dict[str, object]:
     }
 
 
+def measure_complete_heartbeat_rowset(connection: Connection) -> tuple[str, int]:
+    """Read the bounded complete gauge; return commitments only, never row bodies.
+
+    The 1025th row proves overflow, rather than silently qualifying a prefix.
+    Readiness remains owned by relay's existing aggregate/health policy.
+    """
+    rows = connection.execute(
+        text(
+            "SELECT worker_id,started_at,last_polled_at,last_claimed_at "
+            "FROM public.relay_heartbeats ORDER BY worker_id LIMIT 1025"
+        )
+    ).all()
+    require(len(rows) <= 1024, "heartbeat_rowset_incomplete")
+    normalized: list[list[object]] = []
+    workers: set[str] = set()
+
+    def timestamp(value: object, *, nullable: bool = False) -> str | None:
+        if value is None and nullable:
+            return None
+        require(
+            isinstance(value, datetime)
+            and value.tzinfo is not None
+            and value.utcoffset() is not None,
+            "heartbeat_rowset_timestamp_invalid",
+        )
+        assert isinstance(value, datetime)  # noqa: S101
+        return (
+            value.astimezone(UTC)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
+
+    for row in rows:
+        require(len(row) == 4, "heartbeat_rowset_shape_invalid")
+        worker, started, polled, claimed = row
+        require(
+            type(worker) is str
+            and 1 <= len(worker) <= 200
+            and "\x00" not in worker
+            and worker not in workers,
+            "heartbeat_rowset_worker_invalid",
+        )
+        assert isinstance(worker, str)  # noqa: S101
+        workers.add(worker)
+        normalized.append(
+            [
+                worker,
+                timestamp(started),
+                timestamp(polled),
+                timestamp(claimed, nullable=True),
+            ]
+        )
+    normalized.sort(key=lambda row: cast(str, row[0]))
+    return raw_digest(canonical_json(normalized)), len(normalized)
+
+
 @dataclass(frozen=True, slots=True)
 class HeldFenceContinuation:
     """Root-loaded prior state, never an authorization for the next attempt."""
@@ -615,8 +677,13 @@ class ExistingCpTransitionHost:
             str, FailedCandidateContext | FailedCandidateContextV2
         ]
         | None = None,
-        post_acl_recovery_context: PostAclRecoveryContext | None = None,
-        post_acl_contexts: Mapping[str, PostAclRecoveryContext] | None = None,
+        post_acl_recovery_context: PostAclRecoveryContext
+        | AdjudicatedPostAclRecoveryContext
+        | None = None,
+        post_acl_contexts: Mapping[
+            str, PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext
+        ]
+        | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -668,7 +735,11 @@ class ExistingCpTransitionHost:
             )
             self._committed_contexts[key] = committed_context
         self.proof = (
-            post_acl_recovery_context.proof
+            (
+                post_acl_recovery_context.historical.proof
+                if type(post_acl_recovery_context) is AdjudicatedPostAclRecoveryContext
+                else post_acl_recovery_context.proof
+            )
             if post_acl_recovery_context is not None
             else failed_candidate_context.proof
             if failed_candidate_context is not None
@@ -850,11 +921,25 @@ class ExistingCpTransitionHost:
                 cast(CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2, request),
                 self._failed_candidate_context,
             )
+        elif request.get("schema") == "dotmac.cp_adjudicated_post_acl_request/1":
+            require(
+                type(self._post_acl_recovery_context)
+                is AdjudicatedPostAclRecoveryContext,
+                "adjudicated_post_acl_context_required",
+            )
+            assert isinstance(  # noqa: S101
+                self._post_acl_recovery_context, AdjudicatedPostAclRecoveryContext
+            )
+            self._adjudicated_post_acl_binding(
+                cast(CpAdjudicatedPostAclRequestV1, request),
+                self._post_acl_recovery_context,
+            )
         elif request.get("schema") == "dotmac.cp_post_acl_recovery_request/1":
             require(
-                self._post_acl_recovery_context is not None, "post_acl_context_required"
+                type(self._post_acl_recovery_context) is PostAclRecoveryContext,
+                "post_acl_context_required",
             )
-            assert self._post_acl_recovery_context is not None  # noqa: S101
+            assert isinstance(self._post_acl_recovery_context, PostAclRecoveryContext)  # noqa: S101
             self._post_acl_binding(
                 cast(CpPostAclRecoveryRequestV1, request),
                 self._post_acl_recovery_context,
@@ -1368,6 +1453,14 @@ class ExistingCpTransitionHost:
             and self._post_acl_recovery_context is context,
             "post_acl_context_mismatch",
         )
+        self._post_acl_common_binding(request, context, request["basis"])
+
+    def _post_acl_common_binding(
+        self,
+        request: CpPostAclRecoveryRequestV1 | CpAdjudicatedPostAclRequestV1,
+        context: PostAclRecoveryContext,
+        basis: PostAclRecoveryBasisV1,
+    ) -> None:
         require(
             self.config.operator_revision is not None
             and self.config.operator_revision == request["operator_revision"],
@@ -1375,11 +1468,10 @@ class ExistingCpTransitionHost:
         )
         require(
             context.proof.fence_id == context.host_nonce
-            and request["basis"]["context_digest"] == context.context_digest
-            and request["basis"]["current_fence_digest"] == context.proof.digest()
-            and request["basis"]["current_fence_id"] == context.host_nonce
-            and request["basis"]["original_fence_digest"]
-            == context.original_proof.digest(),
+            and basis["context_digest"] == context.context_digest
+            and basis["current_fence_digest"] == context.proof.digest()
+            and basis["current_fence_id"] == context.host_nonce
+            and basis["original_fence_digest"] == context.original_proof.digest(),
             "post_acl_fence_basis_mismatch",
         )
         require(
@@ -1403,6 +1495,55 @@ class ExistingCpTransitionHost:
             "post_acl_original_grants_mismatch",
         )
 
+    def _adjudicated_post_acl_binding(
+        self,
+        request: CpAdjudicatedPostAclRequestV1,
+        context: AdjudicatedPostAclRecoveryContext,
+    ) -> None:
+        require(
+            type(context) is AdjudicatedPostAclRecoveryContext
+            and self._post_acl_recovery_context is context
+            and self._held_fence is None
+            and self._committed_context is None
+            and self._failed_candidate_context is None,
+            "adjudicated_post_acl_context_mismatch",
+        )
+        require(
+            request["basis"]["context_digest"] == context.context_digest
+            and request["adjudication"] == context.adjudication,
+            "adjudicated_post_acl_context_mismatch",
+        )
+        self._post_acl_common_binding(
+            request, context.historical, request["basis"]["historical_basis"]
+        )
+
+    @staticmethod
+    def _adjudicated_post_acl_measurement(
+        connection: Connection,
+        request: CpAdjudicatedPostAclRequestV1,
+        context: AdjudicatedPostAclRecoveryContext,
+    ) -> tuple[CandidateMeasurementV1, str, int]:
+        measured = dict(measure_candidate_quiescence(connection))
+        catalogue = measured.pop("catalogue_bytes", None)
+        require(
+            type(catalogue) is bytes, "adjudicated_post_acl_measurement_unavailable"
+        )
+        measured["catalogue_digest"] = raw_digest(cast(bytes, catalogue))
+        _shape(measured, CandidateMeasurementV1)
+        require(
+            canonical_json(measured) == canonical_json(context.present_measurement)
+            and raw_digest(canonical_json(measured))
+            == request["basis"]["present_measurement_digest"],
+            "adjudicated_post_acl_measurement_mismatch",
+        )
+        rowset_digest, count = measure_complete_heartbeat_rowset(connection)
+        require(
+            count == 1
+            and rowset_digest == request["basis"]["current_heartbeat_rowset_digest"],
+            "adjudicated_post_acl_rowset_mismatch",
+        )
+        return cast(CandidateMeasurementV1, measured), rowset_digest, count
+
     @staticmethod
     def _post_acl_measurement(
         connection: Connection,
@@ -1423,12 +1564,28 @@ class ExistingCpTransitionHost:
         )
         return cast(CandidateMeasurementV1, measurement)
 
+    @overload
     def _post_acl_current_database(
         self,
         connection: Connection,
         request: CpPostAclRecoveryRequestV1,
         context: PostAclRecoveryContext,
-    ) -> CandidateMeasurementV1:
+    ) -> CandidateMeasurementV1: ...
+
+    @overload
+    def _post_acl_current_database(
+        self,
+        connection: Connection,
+        request: CpAdjudicatedPostAclRequestV1,
+        context: AdjudicatedPostAclRecoveryContext,
+    ) -> tuple[CandidateMeasurementV1, str, int]: ...
+
+    def _post_acl_current_database(
+        self,
+        connection: Connection,
+        request: CpPostAclRecoveryRequestV1 | CpAdjudicatedPostAclRequestV1,
+        context: PostAclRecoveryContext | AdjudicatedPostAclRecoveryContext,
+    ) -> CandidateMeasurementV1 | tuple[CandidateMeasurementV1, str, int]:
         self._identity(connection, request)
         self._check_fence_baseline(connection, request)
         candidate_roles.require_planned_target_only_connect(
@@ -1453,10 +1610,22 @@ class ExistingCpTransitionHost:
             ).all(),
             "post_acl_candidate_sessions_present",
         )
+        if request["schema"] == "dotmac.cp_adjudicated_post_acl_request/1":
+            require(
+                type(context) is AdjudicatedPostAclRecoveryContext,
+                "adjudicated_post_acl_context_required",
+            )
+            assert isinstance(context, AdjudicatedPostAclRecoveryContext)  # noqa: S101
+            return self._adjudicated_post_acl_measurement(connection, request, context)
+        require(type(context) is PostAclRecoveryContext, "post_acl_context_required")
+        assert isinstance(context, PostAclRecoveryContext)  # noqa: S101
         return self._post_acl_measurement(connection, request, context)
 
     def _post_acl_target_runtime(
-        self, request: CpPostAclRecoveryRequestV1, *, stopped: bool
+        self,
+        request: CpPostAclRecoveryRequestV1 | CpAdjudicatedPostAclRequestV1,
+        *,
+        stopped: bool,
     ) -> None:
         descriptor = _read_protected(self.config.target_descriptor)
         require(
@@ -1585,6 +1754,89 @@ class ExistingCpTransitionHost:
                 "original_fence_digest": request["basis"]["original_fence_digest"],
                 "current_fence_digest": request["basis"]["current_fence_digest"],
                 "measurement": measurement,
+            },
+        )
+
+    def inspect_adjudicated_post_acl_recovery(
+        self,
+        request: CpAdjudicatedPostAclRequestV1,
+        context: AdjudicatedPostAclRecoveryContext,
+    ) -> bytes:
+        self._inspect_installation(request)
+        self._adjudicated_post_acl_binding(request, context)
+        require(
+            self.proof == context.historical.proof, "post_acl_current_fence_mismatch"
+        )
+        self._http(self.config.external_ready_url, expected=503)
+        self._post_acl_target_runtime(request, stopped=False)
+        self._strict(request)
+        with self._connect(request["database"]) as connection:
+            measured = self._post_acl_current_database(connection, request, context)
+        assert isinstance(measured, tuple)  # noqa: S101
+        measurement, rowset_digest, count = measured
+        self._strict(request)
+        self._request = request
+        return canonical_json(
+            {
+                "source": request["source"],
+                "target": request["target"],
+                "measurement": measurement,
+                "heartbeat_rowset_digest": rowset_digest,
+                "heartbeat_row_count": count,
+            }
+        )
+
+    def rebind_adjudicated_post_acl_recovery(
+        self,
+        request: CpAdjudicatedPostAclRequestV1,
+        nonce: str,
+        context: AdjudicatedPostAclRecoveryContext,
+    ) -> bytes:
+        self._bound(request, nonce)
+        require(self._post_acl_writers_stopped, "post_acl_writers_stop_required")
+        self._post_acl_writers_stopped = False
+        historical = context.historical
+        require(nonce != historical.host_nonce, "post_acl_nonce_reused")
+        require(self.proof == historical.proof, "post_acl_current_fence_mismatch")
+        self._http(self.config.external_ready_url, expected=503)
+        self._post_acl_target_runtime(request, stopped=True)
+        self._strict(request)
+        with self._connect(request["database"]) as connection:
+            measured = self._post_acl_current_database(connection, request, context)
+            assert isinstance(measured, tuple)  # noqa: S101
+            measurement, rowset_digest, count = measured
+            self.proof = transition_fence.fence_writers(
+                connection,
+                database=request["database"],
+                fence_id=nonce,
+                session_wait_seconds=self.config.session_wait_seconds,
+                prior=historical.proof,
+                expected_prior_fence_id=historical.host_nonce,
+            )
+        self.store.put(canonical_json(self.proof.to_document()))
+        self._strict(request)
+        basis = request["basis"]
+        return self._evidence(
+            request,
+            nonce,
+            "adjudicated-post-acl-rebound",
+            {
+                "prior_fence_id": historical.host_nonce,
+                "fence_id": nonce,
+                "original_fence_digest": basis["historical_basis"][
+                    "original_fence_digest"
+                ],
+                "current_fence_digest": basis["historical_basis"][
+                    "current_fence_digest"
+                ],
+                "historical_measurement_digest": context.adjudication[
+                    "historical_measurement_digest"
+                ],
+                "present_measurement_digest": basis["present_measurement_digest"],
+                "adjudication_digest": basis["adjudication_digest"],
+                "measurement": measurement,
+                "heartbeat_rowset_digest": rowset_digest,
+                "heartbeat_row_count": count,
             },
         )
 
@@ -1816,11 +2068,17 @@ class ExistingCpTransitionHost:
     def stop_and_drain_writers(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
         self._strict(request)
-        post_acl = request["schema"] == "dotmac.cp_post_acl_recovery_request/1"
+        post_acl = request["schema"] in {
+            "dotmac.cp_post_acl_recovery_request/1",
+            "dotmac.cp_adjudicated_post_acl_request/1",
+        }
         if post_acl:
             self._post_acl_writers_stopped = False
             self._post_acl_target_runtime(
-                cast(CpPostAclRecoveryRequestV1, request), stopped=False
+                cast(
+                    CpPostAclRecoveryRequestV1 | CpAdjudicatedPostAclRequestV1, request
+                ),
+                stopped=False,
             )
         for info in self._writers():
             identifier = str(info["Id"])
@@ -2429,11 +2687,29 @@ class ExistingCpTransitionHost:
         self.candidate_phase = None
         self._bound(request, nonce)
         proof = self._strict(request)
-        if request["schema"] == "dotmac.cp_post_acl_recovery_request/1":
+        if request["schema"] == "dotmac.cp_adjudicated_post_acl_request/1":
             require(
-                self._post_acl_recovery_context is not None, "post_acl_context_required"
+                type(self._post_acl_recovery_context)
+                is AdjudicatedPostAclRecoveryContext,
+                "adjudicated_post_acl_context_required",
             )
-            assert self._post_acl_recovery_context is not None  # noqa: S101
+            assert isinstance(  # noqa: S101
+                self._post_acl_recovery_context, AdjudicatedPostAclRecoveryContext
+            )
+            historical = self._post_acl_recovery_context.historical.recovery_context()
+            require(
+                request_digest(
+                    self._post_acl_recovery_context.historical.original.request
+                )
+                in historical,
+                "recovery_missing",
+            )
+        elif request["schema"] == "dotmac.cp_post_acl_recovery_request/1":
+            require(
+                type(self._post_acl_recovery_context) is PostAclRecoveryContext,
+                "post_acl_context_required",
+            )
+            assert isinstance(self._post_acl_recovery_context, PostAclRecoveryContext)  # noqa: S101
             historical = self._post_acl_recovery_context.recovery_context()
             require(
                 request_digest(self._post_acl_recovery_context.original.request)
