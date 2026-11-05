@@ -3735,7 +3735,7 @@ def validate_heartbeat_drift_adjudication(
                 len(row) == 7
                 and all(type(value) is str and bool(value) for value in row[:2])
                 and all(type(value) is int and value >= 0 for value in row[2:])
-                and row[2] > 0,
+                and cast(int, row[2]) > 0,
                 "adjudication_relation_malformed",
             )
             identities.append((cast(str, row[0]), cast(str, row[1])))
@@ -3766,16 +3766,13 @@ def validate_heartbeat_drift_adjudication(
         "adjudication_measurement_digest_mismatch",
     )
     require(
-        all(
-            historical_measurement[name] == present_measurement[name]
-            for name in (
-                "track_counts",
-                "stats_reset",
-                "server_start",
-                "sequences",
-                "catalogue_digest",
-            )
-        ),
+        historical_measurement["track_counts"] == present_measurement["track_counts"]
+        and historical_measurement["stats_reset"] == present_measurement["stats_reset"]
+        and historical_measurement["server_start"]
+        == present_measurement["server_start"]
+        and historical_measurement["sequences"] == present_measurement["sequences"]
+        and historical_measurement["catalogue_digest"]
+        == present_measurement["catalogue_digest"],
         "adjudication_extra_difference",
     )
     before, after = (

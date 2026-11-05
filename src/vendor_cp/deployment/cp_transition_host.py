@@ -734,12 +734,21 @@ class ExistingCpTransitionHost:
                 "committed_context_registry_conflict",
             )
             self._committed_contexts[key] = committed_context
-        self.proof = (
-            (
-                post_acl_recovery_context.historical.proof
-                if type(post_acl_recovery_context) is AdjudicatedPostAclRecoveryContext
-                else post_acl_recovery_context.proof
+        post_acl_proof: transition_fence.FenceProof | None = None
+        if isinstance(post_acl_recovery_context, AdjudicatedPostAclRecoveryContext):
+            require(
+                type(post_acl_recovery_context) is AdjudicatedPostAclRecoveryContext,
+                "adjudicated_post_acl_context_required",
             )
+            post_acl_proof = post_acl_recovery_context.historical.proof
+        elif post_acl_recovery_context is not None:
+            require(
+                type(post_acl_recovery_context) is PostAclRecoveryContext,
+                "post_acl_context_required",
+            )
+            post_acl_proof = post_acl_recovery_context.proof
+        self.proof = (
+            post_acl_proof
             if post_acl_recovery_context is not None
             else failed_candidate_context.proof
             if failed_candidate_context is not None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import cast
@@ -9,7 +10,6 @@ from typing import cast
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
-from test_cp_post_acl_measurement import wait_for_exit
 
 from vendor_cp.deploy_agent.contracts import ContractError, digest
 from vendor_cp.deployment import cp_transition as cp
@@ -18,6 +18,20 @@ from vendor_cp.deployment.cp_transition_host import (
     measure_candidate_quiescence,
     measure_complete_heartbeat_rowset,
 )
+
+
+def wait_for_exit(observer, producer):
+    """Wait for the producer's normal exit to flush its pending tuple counters."""
+    deadline = time.monotonic() + 3
+    while observer.execute(
+        text(
+            "SELECT count(*) FROM pg_stat_activity WHERE pid=:pid "
+            "AND backend_start::text=:started"
+        ),
+        {"pid": producer[0], "started": producer[1]},
+    ).scalar_one():
+        assert time.monotonic() < deadline, "measurement producer backend did not exit"
+        time.sleep(0.01)
 
 
 def measurement(connection):
