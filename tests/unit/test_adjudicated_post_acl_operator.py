@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -318,11 +319,24 @@ def test_completed_adjudicated_receipt_dispatches_as_previous_ordinary_transitio
     p = completed_adjudicated
     base = p.protected.base
     future = request()
+    # The ancestry fixture advances beyond the original request's expiry.
+    # This is a new request, so give it a fresh window at that fixed clock.
+    future["expires_at"] = (
+        (base.now + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    )
     future["source"] = deepcopy(p.protected.successor["target"])
     future["target"]["image_digest"] = "sha256:" + "e" * 64
     future["previous_receipt_digest"] = p.receipt_digest
     future["plan_digest"] = cp.transition_plan_digest(future)
     base.reads[base.request_path] = canonical_json(future)
+    assert (
+        cp.load_request(
+            canonical_json(future),
+            identity=p.installation.policy.identity,
+            now=base.now,
+        )
+        == future
+    )
     original_load = op.load_installation
     monkeypatch.setattr(
         op,

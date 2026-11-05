@@ -42,7 +42,7 @@ jobs:
       - name: Verify exact public Ubuntu artifacts and prepare disposable binaries
         run: |
           python3 -I -B - <<'PYTHON'
-          import hashlib, json, os, pathlib, subprocess, urllib.request
+          import hashlib, json, os, pathlib, subprocess, time, urllib.error, urllib.request
           root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "gate0-ssh-artifacts"
           root.mkdir(mode=0o700)
           pins = json.loads(pathlib.Path("conformance/openssh-ubuntu-artifacts.json").read_bytes())
@@ -51,9 +51,21 @@ jobs:
           for item in pins["artifacts"]:
               assert item["url"].startswith("https://snapshot.ubuntu.com/ubuntu/20261013T000000Z/pool/main/o/openssh/")
               assert item["version"] == "1:9.6p1-3ubuntu13.19" and item["architecture"] == "amd64"
-              with urllib.request.urlopen(item["url"], timeout=20) as response:
-                  assert response.geturl() == item["url"]
-                  data = response.read(item["size"] + 1)
+              for attempt in range(3):
+                  try:
+                      with urllib.request.urlopen(item["url"], timeout=60) as response:
+                          assert response.geturl() == item["url"]
+                          data = response.read(item["size"] + 1)
+                      break
+                  except urllib.error.HTTPError as error:
+                      if error.code != 503 or attempt == 2:
+                          raise
+                      error.close()
+                  except TimeoutError:
+                      if attempt == 2:
+                          raise
+                  print("Retrying the same pinned Ubuntu artifact after a transient download failure")
+                  time.sleep(2 * (attempt + 1))
               assert len(data) == item["size"]
               assert hashlib.sha256(data).hexdigest() == item["sha256"]
               archive = root / (item["package"] + ".deb")
