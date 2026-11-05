@@ -138,6 +138,7 @@ def admin_cp_transition(args: argparse.Namespace) -> Result:
 
     from vendor_cp.deployment.transition_operator import (
         CandidateReadinessPhase,
+        RuntimeReadinessPhase,
         TransitionOperatorRefused,
         run_transition,
     )
@@ -153,6 +154,9 @@ def admin_cp_transition(args: argparse.Namespace) -> Result:
         phase = error.candidate_phase
         if type(phase) is CandidateReadinessPhase:
             message += f" candidate_phase={phase.value}"
+        runtime_phase = error.runtime_phase
+        if type(runtime_phase) is RuntimeReadinessPhase:
+            message += f" runtime_phase={runtime_phase.value}"
         raise refuse("owner.cp_transition_refused", message) from None
     return Result(command="admin cp-transition", data={"receipt_digest": receipt})
 

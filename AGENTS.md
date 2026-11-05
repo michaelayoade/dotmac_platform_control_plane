@@ -440,6 +440,52 @@ disagree, fix the drift.
     only; it grants no CI/build/publication, installation, authorization
     dispatch, native attempt, claim deletion, capture, restore or DDL replay.
 
+    **Finite post-ACL source amendment (2026-11-04):** Michael approved
+    source preparation, a draft PR, hosted CI and independent review for one
+    separately typed successor of a contained failed V2 request that retained
+    candidate cleanup, a pre-routing receipt and ACL restoration. V1 and V2
+    remain closed; this is not unrestricted recursive recovery. The successor
+    validates the complete retained frontier, authorization and execution,
+    every ancestor and spent claim, the current fence and fresh post-containment
+    catalogue/quiescence measurements. A deterministic exclusive claim binds
+    the failed V2 request and nonce across fresh contexts, stores and
+    authorizations. The canonical failed installation and claim store are
+    derived from that signed request's operator revision under the fixed
+    product-owned installation root; repinned clones cannot select another
+    physical claim owner. Changed or unavailable measurements refuse under this
+    amendment; no drift exception or mutation-free ACL-open interval is assumed.
+    Existing fence, cleanup, ACL, readiness, receipt and routing owners retain
+    execution. Full-runtime relay readiness uses its existing durable heartbeat
+    and queue/delivery health owner with relay expected, while retaining app
+    Docker health, immutable input/image checks and the ledger/routing gates.
+    No process-only relay success or second heartbeat policy is introduced.
+    This source/hosted-test approval grants no merge, release/publication,
+    production host action, installation/configuration, authorization dispatch,
+    native attempt, credential ceremony, capture, restore or DDL replay.
+
+    **Adjudicated post-ACL source amendment (2026-11-05):** Michael approved
+    isolated source implementation, a draft PR, hosted CI and independent review
+    of one separately typed manual maintenance/adjudication path. The strict
+    post-ACL request, context and receipt remain closed and continue to refuse
+    changed measurements. Source approval does not accept live operational risk.
+    A later protected human authorization must explicitly acknowledge the
+    unavailable historical interval and bind the original baseline, exact
+    reviewed present measurement and heartbeat row-set commitments, complete
+    difference, failed invocation, all retained ancestry and spent claims.
+    The strict and adjudicated protocols share one canonical successor claim
+    domain; another context, authorization, protocol or store cannot create an
+    extra attempt. Fresh complete measurements before and after writer stop
+    must match the reviewed present boundary exactly. That prospective boundary
+    never replaces the historical baseline. Receipts preserve the unavailable
+    baseline-linkage, attribution, intermediate-write, business-row-equality and
+    harmlessness assurances rather than calling adjudication forensic proof.
+    Existing execution owners remain authoritative; no blanket heartbeat
+    exclusion, statistics reset, data repair, capture, restore or DDL replay is
+    introduced. Nonempty or unclassified warning output remains refused. This
+    source-only amendment grants no merge, release, runtime qualification,
+    host action, installation/configuration, authorization dispatch or native
+    execution, and renews no expired proof or consumed authorization.
+
     **`3` and `4` are different numbers and stay different**, including through
     `docker compose run`, which propagates the container's status unchanged. An
     owner refused and there is no evidence look identical from outside and mean

@@ -581,7 +581,10 @@ class Host:
                         "track_counts": True,
                         "stats_reset": None,
                         "server_start": "2026-10-24T00:00:00Z",
-                        "relations": [["public", "alembic_version", 1, 1, 0, 0, 0]],
+                        "relations": [
+                            ["public", "alembic_version", 1, 1, 0, 0, 0],
+                            ["public", "relay_heartbeats", 2, 2, 0, 0, 0],
+                        ],
                         "sequences": [],
                         "catalogue_digest": genesis["catalogue_digest"],
                     },
