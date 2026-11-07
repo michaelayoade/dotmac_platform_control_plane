@@ -197,24 +197,24 @@ def test_factory_refuses_closed_naming_missing_startup_inputs() -> None:
     with pytest.raises(FoundationBindingsUnavailable) as caught:
         bindings(environ={})
     message = str(caught.value)
-    assert "CP_FOUNDATION_PLATFORM_DATABASE_URL" in message
+    assert "DATABASE_URL" in message
+    assert "PLATFORM_DATABASE_URL" in message
     assert "host_admission observer" in message
     assert "execution_context observer" in message
 
 
-def test_factory_with_dsn_still_refuses_on_missing_observers_only() -> None:
+def test_factory_with_session_materials_refuses_on_observers_only() -> None:
     with pytest.raises(FoundationBindingsUnavailable) as caught:
         bindings(
             environ={
-                "CP_FOUNDATION_PLATFORM_DATABASE_URL": (
-                    "postgresql+psycopg://u:p@127.0.0.1:1/cp"
-                )
+                "DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:1/cp",
+                "PLATFORM_DATABASE_URL": ("postgresql+psycopg://u:p@127.0.0.1:1/cp"),
             }
         )
     message = str(caught.value)
-    assert "CP_FOUNDATION_PLATFORM_DATABASE_URL" not in message
+    assert "DATABASE_URL" not in message
     assert "host_admission observer" in message
-    # The DSN value itself is never echoed.
+    # DSN values themselves are never echoed.
     assert "127.0.0.1" not in message
 
 

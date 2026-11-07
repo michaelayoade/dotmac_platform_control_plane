@@ -38,7 +38,6 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from vendor_cp.deployment.foundation_execution_approval import (
@@ -67,9 +66,10 @@ __all__ = [
 #: Foundation reserves `compose-host` for its in-package provider.
 ENTRY_POINT_NAME: Final = "dotmac-control-plane"
 
-#: Startup material naming the CP platform database the approval/dispatch
-#: sessions run against. A DSN is a deployment fact, never echoed.
-PLATFORM_DATABASE_URL_ENV: Final = "CP_FOUNDATION_PLATFORM_DATABASE_URL"
+#: Kernel settings materials the platform sessions are built from. The
+#: kernel owns the single engine (D1): this assembly never constructs
+#: one. Values are deployment facts, never echoed.
+SESSION_MATERIAL_ENVS: Final = ("DATABASE_URL", "PLATFORM_DATABASE_URL")
 
 
 class FoundationBindingsUnavailable(RuntimeError):
@@ -213,37 +213,42 @@ def build_execution_bindings(
     )
 
 
-def _sessions_from_dsn(dsn: str) -> Callable[[], Session]:
-    engine = create_engine(dsn, future=True)
+def _platform_sessions() -> Callable[[], Session]:
+    """The kernel's raw platform session factory (D1: its single engine).
 
-    def _session() -> Session:
-        return Session(bind=engine)
+    `PlatformSessionLocal` is the kernel runtime's sessionmaker; calling
+    it yields the fresh raw Session the adapter contract requires (the
+    adapter commits each phase and closes it itself — never the
+    commit-on-exit `platform_session` wrapper).
+    """
+    from dotmac_kernel.db import PlatformSessionLocal
 
-    return _session
+    return PlatformSessionLocal
 
 
 def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
     """The declared entry-point factory. Zero-argument by contract.
 
     Startup materials contract (deployment facts, values never echoed):
-    `CP_FOUNDATION_PLATFORM_DATABASE_URL` supplies approval/dispatch
-    sessions. The `host_admission` and `execution_context` observers
-    have no production source in this assembly yet — they belong to
-    the runner composition that observes the rehearsal target — so
-    this factory currently refuses closed naming every missing input.
-    That refusal IS the gate working: discovery surfaces it loudly on
-    execute paths instead of admitting on partial trust.
+    kernel `DATABASE_URL`/`PLATFORM_DATABASE_URL` build the kernel's
+    single runtime, whose platform session factory supplies approval/
+    dispatch sessions. The `host_admission` and `execution_context`
+    observers have no production source in this assembly yet — they
+    belong to the runner composition that observes the rehearsal
+    target — so this factory currently refuses closed naming every
+    missing input. That refusal IS the gate working: discovery
+    surfaces it loudly on execute paths instead of admitting on
+    partial trust.
     """
     env = os.environ if environ is None else environ
-    missing: list[str] = []
-    dsn = env.get(PLATFORM_DATABASE_URL_ENV, "").strip()
-    if dsn:
-        # Engine construction is lazy (no connection); composing it here
-        # proves the material is a usable DSN shape at startup, so the
+    missing: list[str] = [
+        name for name in SESSION_MATERIAL_ENVS if not env.get(name, "").strip()
+    ]
+    if not missing:
+        # Resolving the kernel factory proves the runtime composes at
+        # startup (engines are lazy; no connection is opened), so the
         # refusal below names only what is genuinely absent.
-        _sessions_from_dsn(dsn)
-    else:
-        missing.append(PLATFORM_DATABASE_URL_ENV)
+        _platform_sessions()
     missing.extend(
         [
             "host_admission observer (no production source in this assembly)",
