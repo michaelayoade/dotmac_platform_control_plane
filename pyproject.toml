@@ -19,6 +19,15 @@ packages = [{ include = "vendor_cp", from = "src" }]
 [tool.poetry.scripts]
 dotmac-platform = "vendor_cp.cli:run"
 
+# Foundation execution bindings (Gate 2): ONE declaration, discovered by the
+# installed `dotmac-deploy` only on execute paths. The factory composes the
+# approval-guarded V3 provider pair from startup materials and refuses
+# closed while any startup input (today: the runner-side observers) has no
+# production source. Metadata only for validate/dry-run; see
+# `vendor_cp.deployment.foundation_bindings`.
+[tool.poetry.plugins."dotmac_deployment_foundation.execution_bindings"]
+"dotmac-control-plane" = "vendor_cp.deployment.foundation_bindings:bindings"
+
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
 # The kernel is PINNED EXACTLY to the published alpha and resolved ONLY from the
