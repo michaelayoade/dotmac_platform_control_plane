@@ -74,6 +74,7 @@ from sqlalchemy.orm import Session
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.approvals_authority import bare_content_hash
 from vendor_cp.deployment import approval_barrier
+from vendor_cp.deployment import foundation_execution_approval as foundation_approval
 from vendor_cp.deployment.protected_rehearsal_issuer import (
     ProposeIssuerPlan,
     approve_issuer_plan,
@@ -1099,3 +1100,161 @@ def test_a1_an_autocommit_session_is_refused_before_any_mutation(
     assert plan is not None
     assert plan.status == "proposed", plan.status
     assert plan.approval_decision_ref is None
+
+
+def _seed_foundation(engine: Engine, *, mismatch: str = "", state: str = "approved"):
+    """Genuine public Approvals lifecycle; no fabricated decision evidence."""
+    with Session(engine) as db:
+        token = uuid.uuid4().hex
+        target = register_target(
+            db,
+            RegisterTargetCommand(
+                command_id=token,
+                target_ref=f"foundation-{token}",
+                subject_ref="foundation-source-conformance",
+                product_code="dotmac_sub",
+                environment="rehearsal",
+            ),
+        )
+        set_desired_state(
+            db,
+            SetDesiredStateCommand(
+                command_id=uuid.uuid4().hex,
+                target_id=target.id,
+                desired=DesiredDeployment(
+                    release_ref="test@source", spec={}, images=[]
+                ),
+            ),
+        )
+        db.commit()
+        policy = f"foundation-{token}"
+        approvals.publish_policy_version(
+            db, approvals.PublishPolicyCommand(uuid.uuid4().hex, policy, 1, 1, False)
+        )
+        if mismatch == "policy":
+            approvals.publish_policy_version(
+                db,
+                approvals.PublishPolicyCommand(
+                    uuid.uuid4().hex, policy + "-other", 1, 1, False
+                ),
+            )
+        db.commit()
+        plan = foundation_approval.propose_foundation_plan(
+            db,
+            foundation_approval.ProposeFoundationPlan(
+                command_id=uuid.uuid4().hex,
+                target_id=target.id,
+                operation="deploy",
+                descriptor_digest=_DESCRIPTOR_DIGEST,
+                execution_plan_digest=_EXECUTION_DIGEST,
+                approval_policy_code=policy,
+                approval_policy_version=1,
+            ),
+        )
+        db.commit()  # each owner stage releases its locks before the next hold
+        subject = foundation_approval.foundation_approval_subject(plan)
+        if mismatch in {"purpose", "operation", "execution_digest", "request"}:
+            replacements = {
+                "purpose": ("foundation_execution", "rehearsal_issuer_operation"),
+                "operation": ("|deploy|", "|rollback|"),
+                "execution_digest": (_EXECUTION_DIGEST, "sha256:" + "aa" * 32),
+                "request": (str(plan.id), str(uuid.uuid4())),
+            }
+            subject = subject.replace(*replacements[mismatch])
+        digest = "sha256:" + "ff" * 32 if mismatch == "digest" else plan.plan_digest
+        opened = approvals.open_request(
+            db,
+            approvals.OpenRequestCommand(
+                command_id=uuid.uuid4().hex,
+                policy_code=policy + "-other" if mismatch == "policy" else policy,
+                policy_version=1,
+                subject_type="wrong.v1"
+                if mismatch == "subject"
+                else foundation_approval.SUBJECT_TYPE,
+                subject_id=subject,
+                content_hash=bare_content_hash(digest),
+                requested_by=uuid.uuid4(),
+            ),
+        )
+        db.commit()
+        if state != "pending":
+            approvals.record_decision(
+                db,
+                approvals.RecordDecisionCommand(
+                    command_id=uuid.uuid4().hex,
+                    request_id=opened.request_id,
+                    approver_id=uuid.uuid4(),
+                    content_hash=bare_content_hash(digest),
+                    approve=state != "rejected",
+                ),
+            )
+            db.commit()
+        if state == "withdrawn":
+            _withdraw(db, request_id=opened.request_id, external_ref=uuid.uuid4().hex)
+            db.commit()
+    return plan.id, opened.request_id
+
+
+@pytest.mark.parametrize("state", ["pending", "rejected", "withdrawn"])
+def test_foundation_approval_requires_real_standing(engine: Engine, state: str):
+    plan_id, request_id = _seed_foundation(engine, state=state)
+    with Session(engine) as db:
+        with pytest.raises(approvals.ApprovalNotHeld):
+            foundation_approval.approve_foundation_plan(
+                db,
+                command_id=uuid.uuid4().hex,
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+        db.rollback()
+        assert control.get_plan(db, plan_id).status == "proposed"
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "subject",
+        "purpose",
+        "operation",
+        "execution_digest",
+        "digest",
+        "request",
+        "policy",
+    ],
+)
+def test_foundation_approval_rejects_wrong_coordinate(engine: Engine, mismatch: str):
+    plan_id, request_id = _seed_foundation(engine, mismatch=mismatch)
+    with Session(engine) as db:
+        with pytest.raises((approvals.ApprovalNotHeld, ValueError)):
+            foundation_approval.approve_foundation_plan(
+                db,
+                command_id=uuid.uuid4().hex,
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+        db.rollback()
+        assert control.get_plan(db, plan_id).status == "proposed"
+
+
+def test_foundation_approval_holds_withdrawal_through_control_commit(engine: Engine):
+    plan_id, request_id = _seed_foundation(engine)
+    # Reuse the real-PG proof, changing ONLY its CP owner. The proof pauses
+    # after Control approval, tests withdrawal blocking and both lock releases.
+    with mock.patch.dict(
+        globals(), approve_issuer_plan=foundation_approval.approve_foundation_plan
+    ):
+        _prove_the_barrier_holds(engine, plan_id, request_id)
+
+
+def test_foundation_approval_refuses_autocommit(engine: Engine):
+    plan_id, request_id = _seed_foundation(engine)
+    with Session(engine.execution_options(isolation_level="AUTOCOMMIT")) as db:
+        with pytest.raises(approval_barrier.ApprovalBarrierUnavailable):
+            foundation_approval.approve_foundation_plan(
+                db,
+                command_id=uuid.uuid4().hex,
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+    with Session(engine) as db:
+        assert control.get_plan(db, plan_id).status == "proposed"

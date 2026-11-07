@@ -412,3 +412,32 @@ def test_the_composition_refuses_bindings_without_get_plan() -> None:
             foundation=providers.execution_authority._foundation,  # noqa: SLF001
             sources=providers.execution_authority._sources,  # noqa: SLF001
         )
+
+
+def test_only_the_outer_cp_factory_installs_the_held_owner(monkeypatch) -> None:
+    from vendor_cp.deployment import foundation_execution_approval as approval
+
+    raw, *_ = _composition(plan_requires_approval=True)
+    provider = raw.execution_authority
+    assert provider._held_finalizer is None  # noqa: SLF001
+    bindings = provider._control  # noqa: SLF001
+    control = SimpleNamespace(
+        resolve_host_admission_context=bindings.resolve_context,
+        attest_foundation_execution_pair=bindings.attest_pair,
+        lookup_foundation_execution_consumption=bindings.lookup_committed,
+        get_plan=bindings.get_plan,
+        HostAdmissionForeignRootV1=bindings.foreign_root_type,
+        HostAdmissionForeignVerificationEvidenceV1=bindings.foreign_evidence_type,
+        FoundationExecutionContextV1=bindings.execution_context_type,
+        FoundationDispatchConsumptionV1=bindings.consumption_request_type,
+    )
+    monkeypatch.setattr(approval, "import_module", lambda _: control)
+    guarded = approval.compose_approved_foundation_v3_providers(
+        foundation=provider._foundation,
+        sources=provider._sources,  # noqa: SLF001
+    )
+    assert (
+        guarded.execution_authority._held_finalizer  # noqa: SLF001
+        is approval.finalize_foundation_dispatch
+    )
+    assert provider._held_finalizer is None  # noqa: SLF001

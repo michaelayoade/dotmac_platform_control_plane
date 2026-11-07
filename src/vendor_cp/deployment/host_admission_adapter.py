@@ -41,8 +41,10 @@ constructors/functions installed once by the successor composition. The older
 the V3 providers never call it and have no alternate consume/launch path.
 That reference lacks the current finalizer's execution input and is not a
 supported adapter for released Control. The real-wheel suite no longer claims
-it is. Positive V3 execution remains gated on the owned approval subject and
-Foundation adoption; current conformance proves CP's required refusal instead.
+it is. The public composition retains its approval refusal. The separate
+source-only CP approval factory binds a held finalizer through a private seam;
+that source composition does not install providers or qualify a Foundation
+candidate for runtime adoption.
 """
 
 from __future__ import annotations
@@ -64,14 +66,15 @@ class HostAdmissionAdapterUsageError(ValueError):
 
 
 class DispatchApprovalSubjectUnavailable(Exception):
-    """Dispatch refused: the plan requires approval, and no approval barrier exists.
+    """Default dispatch refused: no approval barrier is composed in this pair.
 
     C2 holds an approval FOR SHARE through every approval-dependent Control
     transition, so that a withdrawal cannot commit in the window between the
-    check and the effect. A FOUNDATION_EXECUTION plan has no Approvals subject
-    type yet, so there is nothing to hold at dispatch. Michael decided on
+    check and the effect. The public raw composition has no Approvals hold
+    installed. Michael decided on
     2026-09-26 (C2-D1) that dispatch FAILS CLOSED for any plan that requires
-    approval, or that cannot be found, until Gate 3 defines that subject. This
+    approval, or that cannot be found. The outer source-only approval factory
+    supplies the held alternative through its private startup seam. This
     is a refusal, not a wiring mistake, so it is deliberately not a
     `HostAdmissionAdapterUsageError`.
     """
@@ -442,7 +445,14 @@ def _foreign_evidence(pair: object, control: ControlFoundationV3Bindings) -> obj
 
 
 class _FoundationV3Provider:
-    __slots__ = ("_owner", "_control", "_foundation", "_sources", "_attester")
+    __slots__ = (
+        "_owner",
+        "_control",
+        "_foundation",
+        "_sources",
+        "_attester",
+        "_held_finalizer",
+    )
 
     _CONTROL_FACTS = (
         "product_code",
@@ -471,6 +481,7 @@ class _FoundationV3Provider:
         self._foundation = foundation
         self._sources = sources
         self._attester = _ControlReceiptAttester(control.attest_pair)
+        self._held_finalizer: Callable[..., object] | None = None
 
     @property
     def attester(self) -> _ControlReceiptAttester:
@@ -547,20 +558,30 @@ class _FoundationV3Provider:
                 raise HostAdmissionAdapterUsageError(
                     "F2 resolution and V3 finalization require separate sessions"
                 )
-            self._refuse_an_approval_requiring_plan(
-                session, _field(continuation.execution_facts, "plan_id")
-            )
-            self._control.finalize(
-                session, context=resolved, foreign_evidence=foreign, execution=execution
-            )
+            if self._held_finalizer is None:
+                self._refuse_an_approval_requiring_plan(
+                    session, _field(continuation.execution_facts, "plan_id")
+                )
+                self._control.finalize(
+                    session,
+                    context=resolved,
+                    foreign_evidence=foreign,
+                    execution=execution,
+                )
+            else:
+                self._held_finalizer(
+                    session,
+                    context=resolved,
+                    foreign_evidence=foreign,
+                    execution=execution,
+                )
             session.commit()
         # No fallible work follows the successful Control commit.
 
     def _refuse_an_approval_requiring_plan(
         self, session: Session, plan_id: object
     ) -> None:
-        """C2-D1: fail closed at dispatch until a Foundation plan has an
-        Approvals subject that a barrier could hold.
+        """C2-D1: the default composition has no held approval owner.
 
         The plan id comes from the observed execution facts, the same value
         that becomes `expected_context.plan_id`. Control's `finalize` refuses a
@@ -583,8 +604,8 @@ class _FoundationV3Provider:
         if getattr(plan, "requires_approval", True) is not False:
             raise DispatchApprovalSubjectUnavailable(
                 f"dispatch plan {parsed} requires approval, and FOUNDATION_EXECUTION "
-                "plans have no Approvals subject for the C2 barrier to hold; "
-                "dispatch fails closed until Gate 3 (C2-D1)"
+                "the default provider has no composed C2 approval barrier; "
+                "dispatch fails closed (C2-D1)"
             )
 
     def lookup_committed(self, *, control_consumption_ref: str) -> object:
@@ -702,6 +723,26 @@ def compose_foundation_v3_providers(
         host_source=_FoundationHostSourceProvider(owner, control, foundation, sources),
         execution_authority=_FoundationV3Provider(owner, control, foundation, sources),
     )
+
+
+def _compose_approval_guarded_providers(
+    *,
+    control: ControlFoundationV3Bindings,
+    foundation: FoundationHostV3Bindings,
+    sources: FoundationV3Sources,
+    held_finalizer: Callable[..., object],
+) -> FoundationV3ProviderPair:
+    """Private startup seam, owned exclusively by the outer CP factory.
+
+    This is dependency composition, not an authorization capability. Its sole
+    production caller and exact held-owner binding are architecture-ratcheted.
+    The public raw composition above always retains its default refusal.
+    """
+    pair = compose_foundation_v3_providers(
+        control=control, foundation=foundation, sources=sources
+    )
+    pair.execution_authority._held_finalizer = held_finalizer
+    return pair
 
 
 __all__ = [

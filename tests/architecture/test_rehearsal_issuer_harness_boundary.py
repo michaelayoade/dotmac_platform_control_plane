@@ -136,7 +136,11 @@ def test_harness_isolated_from_application_and_product_imports() -> None:
 
 def test_lock_and_verifier_are_wired_to_exact_artifacts() -> None:
     lock = json.loads((HARNESS / "artifacts.json").read_text())
-    assert set(lock["artifacts"]) == {"dotmac-deployment-control", "dotmac-kernel"}
+    assert set(lock["artifacts"]) == {
+        "dotmac-deployment-control",
+        "dotmac-kernel",
+        "dotmac-approvals",
+    }
     for item in lock["artifacts"].values():
         assert item["filename"].endswith(".whl")
         assert len(item["sha256"]) == 64
@@ -182,7 +186,10 @@ def test_harness_proves_the_application_control_and_kernel_artifact_pins() -> No
         assert hashes[evidence["filename"]] == "sha256:" + evidence["sha256"]
     workflow = (ROOT / ".github/workflows/rehearsal-issuer-harness.yml").read_text()
     assert "conformance/test_host_admission_conformance.py" in workflow
-    assert "assert len(cases) == 11" in workflow
+    assert "assert len(cases) == len(expected) == 24" in workflow
+    assert '{case.attrib["name"] for case in cases} == expected' in workflow
+    assert 'f"test_real_approved_cp_v3_lifecycle[{scenario}]"' in workflow
+    assert '"finalization_withdrawal"' in workflow
     assert '"skipped", "failure", "error"' in workflow
     assert "d74bf8dd8c399dd92047174365403b861f82ddd0" in workflow
     assert "assert origin.is_relative_to(installed)" in workflow

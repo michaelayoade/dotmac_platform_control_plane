@@ -789,3 +789,105 @@ read an OpenBao path, allocate a Foundation successor, or authorize any
 candidate. It does not amend § 5's bootstrap or A6's plan-input decisions. It
 is the ratified reference with which B, C1, C2, D, and E must be consistent. Gate 0 does not close until B, C1, C2, and D each close
 against it and E produces its passing protected issuer-readiness receipt.
+
+## Amendment, 2026-11-07 — adopted-path Foundation execution approval source contract
+
+Michael Ayoade is the sole developer, architect, release captain, CP owner and
+human approver. On 2026-11-07 he approved the adopted-path direction in
+[Starter PR #985](https://github.com/michaelayoade/dotmac_starter_mt/pull/985)
+at proposal head `3010599da0b06d8700908493b55d16f589fe1ab8`.
+That decision is recorded at Starter head `251d7c190`; hosted CI and
+protected-main landing remain separate evidence. This amendment records the
+bounded CP source implementation under that direction, pending hosted
+validation. It preserves the historical decisions above; the stopped
+Gate-0/Lane-3 issuer/broker programme is not revived. Earlier Work Packet E
+requirements describe that historical programme, not an instruction to resume
+it under this source change.
+
+### Owned subject and genuine lifecycle
+
+`vendor_cp.deployment.foundation_execution_approval` owns the versioned
+Approvals consumer subject `foundation_execution_plan.v1`, with Control plan
+purpose `foundation_execution`. `foundation_approval_subject` binds
+`v1|<plan UUID>|<purpose>|<deploy or rollback>|<execution_plan_digest>`.
+The Foundation renders the execution-plan digest; CP freezes it through
+Control's public `propose_plan` and does not reconstruct it. Approvals binds
+the separate Control `plan_digest` as the request content hash and the frozen
+policy code/version. The existing Approvals `0.1.0a8` service accepts an
+opaque consumer subject string; this contract needs no upstream subject-enum
+release and introduces no local approval state owner.
+
+The source workflow is `propose_foundation_plan` ->
+`open_foundation_approval` -> a genuine Approvals decision ->
+`approve_foundation_plan` -> `request_foundation_rollout` ->
+`dispatch_foundation_attempt` -> `finalize_foundation_dispatch`.
+The decision is reached through the existing CP approvals adapter and the real
+policy/request/decision service. The request UUID supplies the immutable
+decision reference; neither a fabricated reference nor caller-created
+`ApprovalEvidence` confers authority. Control remains the sole owner of plan
+legality, rollout, dispatch and committed consumption.
+
+Approval-dependent transitions use the existing `held_transition` barrier:
+Approvals' request-row standing hold remains in the same Session and
+transaction through the Control transition and the caller's single commit.
+Autocommit refuses. Lock order remains Approvals request -> Control target ->
+plan -> rollout; an unlocked plan pre-read does not replace Control's locked
+coordinate recheck. Lifecycle helpers return uncommitted state and never
+commit. One lifecycle stage belongs in each caller-owned transaction: the
+preparation/decision stage must commit and release its Control locks before a
+later stage acquires the approval `FOR SHARE` hold. Combining stages while
+retaining Control locks can invert the global order. This is an explicit
+caller contract, not runtime enforcement of every possible caller-held lock.
+Hosted lifecycle and concurrency coverage must exercise those transaction
+boundaries and approval-withdrawal serialization. Genuine finalization calls
+Control's
+`admit_and_consume_host_admission` under that same hold. Control context expiry
+still applies; this amendment invents no approval TTL.
+
+### Startup composition and required refusal
+
+`compose_approved_foundation_v3_providers(foundation=..., sources=...)`
+imports and binds actual Control public functions and the actual
+`finalize_foundation_dispatch` owner. Its private leaf seam is bound at startup,
+not a caller-selected authorization callback. The public
+`compose_foundation_v3_providers` retains its approval-dependent refusal;
+generic `deployment/adapter.py` still refuses Foundation-purpose plans.
+The CP finalizer wrapper only orchestrates the approval barrier around
+Control's genuine finalizer. It introduces no alternate Control decision or
+consumption owner and no CP consumption ledger.
+
+Hosted conformance must prove the genuine lifecycle and refuse wrong subject,
+purpose, operation, digest, decision reference or frozen policy; unapproved or
+withdrawn standing; autocommit; and unguarded approval-dependent composition.
+No host effect may precede consumed, committed genuine authority. Positive
+verification must use the actual Foundation F2 and Control finalizer, retain
+the separate-session boundary, and check the public committed-consumption
+lookup. A self-authorization callback, fake approval reference or a
+Protocol-shaped double cannot establish that evidence. The required recipe
+and pending coverage are in `conformance/README.md`; no new hosted pass count
+or current positive execution proof is claimed by this amendment.
+
+### Readiness and remaining boundaries
+
+Source/candidate-independent conformance comes before freeze. After one
+candidate build, rehearsal must exercise the exact installed candidate and
+preserve build-once/archive identity, exact signed Control plan authority,
+executor lock/compensation, external-vantage exposure, real recovery, all
+sixteen v2 receipt items and exact run/artifact bindings. CP's published
+Foundation pin and production activation follow publication. This source
+implementation adds neither a Foundation runtime dependency nor installed
+executor bindings and cannot discharge the exact-candidate gate.
+
+Q2 and Rule 49 remain open. The installed Foundation CLI hardwires
+`RefusingHostSourceAdmissionProvider` at deploy/recover/rollback;
+`ExecutionBindings` lacks an admission field. `RecoveryExecutor` has no
+`ExecutionGrant`/V3 consumption path, so trusted host provenance alone must
+not enable recovery. Asynchronous approval-withdrawal consequences for this
+new subject also remain open: the current relay explicitly refuses unknown
+subjects. The synchronous barrier does not establish relay closure.
+
+Michael owns acceptance of those remaining proofs and any later operational
+authorization. Direction approval and source preparation authorize no version
+allocation, freeze, candidate build, publication, governed execution,
+credential/provisioning ceremony or production risk acceptance. Agent review
+is evidence only, never human approval.

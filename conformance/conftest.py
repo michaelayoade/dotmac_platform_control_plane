@@ -21,6 +21,7 @@ errors, never skips.
 from __future__ import annotations
 
 import os
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -40,3 +41,33 @@ def pytest_configure(config: pytest.Config) -> None:
             "explicit single-file D16 source-verifier run is database-free. "
             "A missing configuration is a usage error, not a skip."
         )
+    # Hosted noncandidate source fixture: validate the actual imported private
+    # wheels again in-process, independently of workflow download checks.
+    from rehearsal_issuer_harness.artifacts import (
+        read_lock,
+        verify_installed,
+        verify_wheels,
+    )
+
+    private = os.environ.get("CONFORMANCE_PRIVATE_WHEELHOUSE")
+    public = os.environ.get("CONFORMANCE_PUBLIC_WHEELHOUSE")
+    if not private or not public:
+        raise pytest.UsageError("conformance requires exact private/public wheelhouses")
+    pins = read_lock()["artifacts"]
+    wheels = {name: Path(private) / pin["filename"] for name, pin in pins.items()}
+    try:
+        verify_wheels(
+            wheels["dotmac-deployment-control"],
+            wheels["dotmac-kernel"],
+            approvals_wheel=wheels["dotmac-approvals"],
+        )
+        verify_installed(
+            wheels["dotmac-deployment-control"],
+            wheels["dotmac-kernel"],
+            Path(public),
+            approvals_wheel=wheels["dotmac-approvals"],
+        )
+    except (ValueError, RuntimeError, OSError, metadata.PackageNotFoundError) as exc:
+        raise pytest.UsageError(
+            f"conformance artifact precondition failed: {exc}"
+        ) from exc

@@ -622,12 +622,17 @@ have all been verified. An existing Certbot account may be reused without
 restating its contact; a new registration still requires an explicit contact.
 The deployment path never creates or repairs the marker itself.
 
-The Foundation V3 successor composition is kept in the import-light
+The Foundation V3 successor provider is kept in the import-light
 `vendor_cp.deployment.host_admission_adapter` leaf. CP pins Control
 0.1.0a17, which exports these V3 symbols, but does not install Foundation, so
-the factory is not wired at startup until a published Foundation release is
-pinned and conformance-tested against its real types. Its single startup
-factory binds Control's public resolve/finalize/lookup contracts, Foundation's
+the source factories are not installed runtime bindings. The public
+`compose_foundation_v3_providers` retains the approval-required refusal.
+The separate source-only
+`foundation_execution_approval.compose_approved_foundation_v3_providers`
+imports the actual Control public functions and binds the actual
+`finalize_foundation_dispatch` owner through a private startup seam; callers
+cannot supply an approval callback to that factory. These factories bind
+Control's public resolve/finalize/lookup contracts, Foundation's
 real F2 admission function and types, fixed trust and clock, and local session
 and observation sources. F2 resolves in a committed, closed Session A, then
 verifies the actual attestation pair with no open Control transaction; its
@@ -635,8 +640,48 @@ trace retains the real pair result and a transient, identity-bound continuation.
 V3 maps that exact trace and fresh independently observed facts to Control's
 sole finalizer in Session B, returning only after CP commits. The signed
 `dispatch_id` is the observation and recovery coordinate; Control's committed
-lookup is the post-crash source of authority. No new consumption ledger, CP
-fallback finalizer, request-supplied verifier or per-call clock is installed.
+lookup is the post-crash source of authority. CP's guarded wrapper only
+orchestrates the approval barrier around Control's genuine finalizer; it adds
+no alternate Control decision/consumption owner or CP consumption ledger.
+No request-supplied verifier or per-call clock is installed.
+
+As of 2026-11-07, `vendor_cp.deployment.foundation_execution_approval` owns
+the versioned consumer subject `foundation_execution_plan.v1` and the
+`foundation_execution` purpose. Its propose/open/approve/rollout/dispatch
+workflow delegates to the existing Control and Approvals owners. The subject
+binds the frozen Control plan id, purpose, deploy/rollback operation and
+Foundation-rendered execution-plan digest; Approvals separately binds the
+Control plan digest and frozen policy code/version. Existing Approvals
+`0.1.0a8` accepts this opaque consumer subject string; no upstream subject-enum
+release is required. Approval-dependent transitions and genuine finalization
+use `held_transition` in the same transaction through the caller's commit,
+refusing autocommit. Lifecycle helpers return uncommitted state and never
+commit. Callers must use one lifecycle stage per caller-owned transaction:
+commit the preparation/decision stage and release its Control locks before a
+later stage acquires the approval `FOR SHARE` hold. The global lock order is
+Approvals request -> Control target -> plan -> rollout. This is a caller
+contract, not a claim that every possible caller-held lock is detected at
+runtime; hosted lifecycle and concurrency coverage must verify the prescribed
+stage boundaries and withdrawal serialization. This is source implementation
+pending hosted validation,
+not runtime adoption or positive execution evidence. Generic
+`deployment/adapter.py` retains its Foundation-purpose refusal.
+
+Michael is the sole developer and approver. His 2026-11-07 adopted-path
+direction (Starter PR #985 proposal `3010599da`, recorded at `251d7c190`;
+hosted CI and landing tracked separately) preserves the phase order: establish
+source/candidate-independent conformance before freeze; rehearse the exact
+installed candidate after the one build; pin and activate the published
+Foundation only after publication. No Foundation runtime dependency or
+installed executor binding is added here. Q2/Rule 49 remain open: the
+Foundation CLI hardwires `RefusingHostSourceAdmissionProvider` for deploy,
+recover and rollback, `ExecutionBindings` lacks an admission field, and
+`RecoveryExecutor` has no `ExecutionGrant`/V3 consumption path. Host provenance
+alone cannot authorize recovery. Asynchronous approval-withdrawal consequences
+for this new subject remain open; the relay explicitly refuses unknown
+subjects. This source contract does not revive the stopped issuer programme
+or authorize allocation, freeze, candidate build/publication or governed
+execution (ADR-0013, 2026-11-07 amendment).
 
 ## The installed operator CLI
 
@@ -685,6 +730,14 @@ wheel root, colliding with the Alembic distribution's own import name — and
 layout.
 
 ## Ownership (what this control plane owns)
+
+| Foundation execution concern | Owner and source boundary |
+| --- | --- |
+| Versioned approval subject and lifecycle composition | CP `foundation_execution_approval`; source-only, pending hosted validation |
+| Approval policy, request, decision and standing hold | `dotmac-approvals`, through CP's existing approvals adapter |
+| Frozen plan, rollout, dispatch and committed consumption | `dotmac-deployment-control`; CP guards its transitions, not their legality |
+| Host admission verification and execution/recovery semantics | Foundation; installed provider wiring and recovery authority remain open |
+| Direction, evidence acceptance and operational approval | Michael alone; source preparation grants no execution authority |
 
 - **Production secret materialization** — `vendor_cp.production_secrets` is the
   sole schema, generation, validation, and host-projection owner for Vendor's

@@ -1,5 +1,12 @@
 {
   "artifacts": {
+    "dotmac-approvals": {
+      "filename": "dotmac_approvals-0.1.0a8-py3-none-any.whl",
+      "version": "0.1.0a8",
+      "sha256": "f37f02ac98734b6a65690f2f39c839fde9c0cb6545a71e70e090666deb8f01d7",
+      "source_commit": "9e2d69f4913474d9504cfaeca81a9105919b8555",
+      "tag_object": "0f307476725579c0fd22d1e64fb3ad05778ae528"
+    },
     "dotmac-deployment-control": {
       "filename": "dotmac_deployment_control-0.1.0a17-py3-none-any.whl",
       "version": "0.1.0a17",

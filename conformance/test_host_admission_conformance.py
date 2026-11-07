@@ -26,6 +26,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -42,6 +43,8 @@ import pytest
 from dotmac_deployment_control import (
     ApprovalEvidence,
     ApprovePlanCommand,
+    AuthorizationEnvelopeRefusalCode,
+    AuthorizationEnvelopeRefusedError,
     AuthorizationSignature,
     AuthorizationSignerIdentity,
     BindTargetHostCommand,
@@ -50,6 +53,7 @@ from dotmac_deployment_control import (
     DispatchSignature,
     DispatchSignerIdentity,
     EnrolHostAdmissionCredentialCommand,
+    FoundationConsumptionRefusedError,
     FoundationDispatchConsumptionV1,
     FoundationExecutionContextV1,
     HostAdmissionForeignRootV1,
@@ -63,6 +67,7 @@ from dotmac_deployment_control import (
     RequestRolloutCommand,
     SetDesiredStateCommand,
     SetTargetAdmissionPolicyCommand,
+    TransitionRefusedError,
     activate_credential,
     admit_and_consume_host_admission,
     approve_plan,
@@ -121,8 +126,13 @@ from dotmac_deployment_foundation.host_source import read_installed_artifact
 # imports it from here too.
 from dotmac_deployment_foundation.trusted_host_source import candidate_subject_digest
 from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+
+from vendor_cp.approvals import adapter as approvals
+from vendor_cp.approvals_authority import bare_content_hash
+from vendor_cp.deployment import foundation_execution_approval as foundation_approval
 
 # The LEAF module only -- see its own docstring and
 # tests/architecture/test_host_admission_adapter_import_boundary.py. NEVER
@@ -134,6 +144,7 @@ from vendor_cp.deployment.host_admission_adapter import (
     DispatchApprovalSubjectUnavailable,
     FoundationHostV3Bindings,
     FoundationV3Sources,
+    HostAdmissionAdapterUsageError,
     HostAdmissionObservation,
     compose_foundation_v3_providers,
 )
@@ -440,10 +451,13 @@ def _installed_module_audit_actions() -> None:
     Same pattern as every one of Control's own unit tests (e.g.
     `tests/unit/test_deployment_control_intent.py`) -- verified there, not
     guessed."""
+    from dotmac_approvals import module as approvals_module
     from dotmac_deployment_control import module
     from dotmac_kernel.audit_actions import AuditActionRegistry, install_audit_actions
 
-    install_audit_actions(AuditActionRegistry.from_manifests([module]))
+    install_audit_actions(
+        AuditActionRegistry.from_manifests([module, approvals_module])
+    )
 
 
 # ── Control-side setup: target, plan, rollout, dispatch, host-admission
@@ -516,6 +530,51 @@ def _approved_plan(db: Session, target_id: uuid.UUID) -> Any:
     )
 
 
+def _genuine_approved_plan(db: Session, target_id: uuid.UUID) -> Any:
+    """Real policy/request/decision, never the component fixture's apr-* proof."""
+    policy = f"foundation-{uuid.uuid4().hex}"
+    approvals.publish_policy_version(
+        db, approvals.PublishPolicyCommand(_cmd(), policy, 1, 1, False)
+    )
+    db.commit()
+    plan = foundation_approval.propose_foundation_plan(
+        db,
+        foundation_approval.ProposeFoundationPlan(
+            command_id=_cmd(),
+            target_id=target_id,
+            operation="deploy",
+            descriptor_digest=_DESCRIPTOR,
+            execution_plan_digest=_EXECUTION_PLAN,
+            approval_policy_code=policy,
+            approval_policy_version=1,
+        ),
+    )
+    db.commit()  # release Control locks before entering an approval hold
+    opened = foundation_approval.open_foundation_approval(
+        db, command_id=_cmd(), plan_id=plan.id, requested_by=uuid.uuid4()
+    )
+    db.commit()
+    approvals.record_decision(
+        db,
+        approvals.RecordDecisionCommand(
+            command_id=_cmd(),
+            request_id=opened.request_id,
+            approver_id=uuid.uuid4(),
+            content_hash=bare_content_hash(plan.plan_digest),
+        ),
+    )
+    db.commit()
+    plan = foundation_approval.approve_foundation_plan(
+        db,
+        command_id=_cmd(),
+        plan_id=plan.id,
+        approval_request_id=opened.request_id,
+    )
+    db.commit()
+    assert plan.approval_decision_ref == str(opened.request_id)
+    return plan
+
+
 def _rollout(db: Session, plan_id: uuid.UUID, signer: _AuthorizationSigner) -> Any:
     return request_rollout(
         db,
@@ -570,6 +629,7 @@ def _build_admission_coordinate(
     db: Session,
     *,
     now: datetime,
+    genuine_approval: bool = False,
 ) -> _AdmissionCoordinate:
     # Every identity below is suffixed with a fresh per-call token. The
     # commands this function calls (register_target, enrol_host_admission_
@@ -586,17 +646,40 @@ def _build_admission_coordinate(
 
     target = _register_target(db)
     _set_desired(db, target.id)
-    plan = _approved_plan(db, target.id)
+    db.commit()
+    plan = (
+        _genuine_approved_plan(db, target.id)
+        if genuine_approval
+        else _approved_plan(db, target.id)
+    )
+    db.commit()
     authorization_signer = _AuthorizationSigner()
-    rollout = _rollout(db, plan.id, authorization_signer)
+    if genuine_approval:
+        rollout = foundation_approval.request_foundation_rollout(
+            db,
+            command_id=_cmd(),
+            plan_id=plan.id,
+            rollout_ref=f"rol-{uuid.uuid4().hex[:8]}",
+            authorization_expires_at=now + timedelta(minutes=1),
+            signer=authorization_signer,
+        )
+    else:
+        rollout = _rollout(db, plan.id, authorization_signer)
+    db.commit()
     dispatch_signer = _DispatchSigner()
-    dispatch_attempt(
+    dispatch_owner = (
+        foundation_approval.dispatch_foundation_attempt
+        if genuine_approval
+        else dispatch_attempt
+    )
+    dispatch_owner(
         db,
         command_id=_cmd(),
         rollout_id=rollout.id,
         verifier=_AuthorizationVerifier(authorization_signer),
         dispatch_signer=dispatch_signer,
     )
+    db.commit()
     stored_dispatch = control_service._stored_dispatch_coordinate(
         db, _latest_attempt_id(db, rollout.id)
     )
@@ -1572,6 +1655,245 @@ def test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization(
             plant.setitem(globals(), "get_plan", lambda *_: None)
             with pytest.raises(AssertionError, match="real plan read must succeed"):
                 _checked_get_plan(db, uuid.UUID(coordinate.facts.plan_id))
+    finally:
+        for session in sessions:
+            session.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "positive",
+        "withdrawn",
+        "replay",
+        "finalize_failure",
+        "expired",
+        "revoked",
+        "changed_target",
+        "changed_observation",
+        "changed_host",
+        "ambiguous_commit",
+        "swapped_request",
+        "session_reuse",
+        "finalization_withdrawal",
+    ],
+)
+def test_real_approved_cp_v3_lifecycle(db: Session, monkeypatch, scenario: str) -> None:
+    """Noncandidate source composition with real Approvals, Control and F2."""
+    coordinate = _build_admission_coordinate(db, now=_NOW, genuine_approval=True)
+    install_host_admission_security(
+        verifier=coordinate.presentation_verifier, clock=coordinate.clock
+    )
+    db.commit()
+    engine = create_engine(CONFORMANCE_DATABASE_URL, future=True)
+    sessions: list[Session] = []
+    facts = [coordinate.facts]
+
+    class _CommitSession(Session):
+        def commit(self):
+            super().commit()
+            if scenario == "ambiguous_commit" and len(sessions) == 2:
+                raise RuntimeError("simulated lost commit acknowledgement")
+
+    def session_factory():
+        if scenario == "session_reuse" and sessions:
+            return sessions[0]
+        session = _CommitSession(bind=engine)
+        sessions.append(session)
+        return session
+
+    providers = foundation_approval.compose_approved_foundation_v3_providers(
+        foundation=FoundationHostV3Bindings(
+            admit_host_source=admit_host_source,
+            trust_policy_from_context=_build_trust_policy_from_resolved_context,
+            verifier=coordinate.foundation_verifier,
+            trace_type=HostSourceAdmissionTrace,
+            pair_result_type=AttestationPairVerificationResultV1,
+            consumption_request_type=ControlConsumptionRequestV3,
+            execution_context_type=ExecutionContextV3,
+        ),
+        sources=FoundationV3Sources(
+            sessions=session_factory,
+            host_admission=lambda: HostAdmissionObservation(
+                coordinate.attempt_id,
+                coordinate.presentation,
+                coordinate.candidate_envelope,
+                coordinate.installed_envelope,
+            ),
+            execution_context=lambda: facts[0],
+            clock=coordinate.clock.now,
+        ),
+    )
+    try:
+        _, trace = providers.host_source.admit_host_source()
+        request = ControlConsumptionRequestV3(
+            authorization_material_json=coordinate.execution.authorization_material_json,
+            dispatch_material_json=coordinate.execution.dispatch_material_json,
+            host_source_trace=trace,
+            expected_execution_plan_digest=_EXECUTION_PLAN,
+            control_consumption_ref=coordinate.execution.control_consumption_ref,
+        )
+        if scenario == "withdrawn":
+            approvals.withdraw_request(
+                db,
+                approvals.WithdrawRequestCommand(
+                    request_id=uuid.UUID(coordinate.facts.approval_decision_ref),
+                    actor_id=uuid.uuid4(),
+                    authority_ref="source-conformance",
+                    reason="withdraw before finalization",
+                    external_ref=_cmd(),
+                ),
+            )
+            db.commit()
+        elif scenario == "revoked":
+            import dotmac_deployment_control as control
+
+            control.revoke_plan_approval(
+                db,
+                control.RevokePlanApprovalCommand(
+                    command_id=_cmd(),
+                    plan_id=uuid.UUID(coordinate.facts.plan_id),
+                    revocation_ref="source-conformance-revocation",
+                ),
+            )
+            db.commit()
+        elif scenario == "expired":
+            coordinate.clock.advance(timedelta(minutes=2))
+        elif scenario in {"changed_target", "changed_host", "swapped_request"}:
+            field = {
+                "changed_target": "target_id",
+                "changed_host": "host_id",
+                "swapped_request": "approval_decision_ref",
+            }[scenario]
+            facts[0] = dataclasses.replace(facts[0], **{field: str(uuid.uuid4())})
+        elif scenario == "changed_observation":
+            request = dataclasses.replace(
+                request,
+                host_source_trace=dataclasses.replace(
+                    trace, host_observation_id=str(uuid.uuid4())
+                ),
+            )
+        elif scenario == "finalize_failure":
+            import dotmac_deployment_control as control
+
+            real_finalize = control.admit_and_consume_host_admission
+
+            def fail_after_preparation(*args, **kwargs):
+                real_finalize(*args, **kwargs)
+                raise RuntimeError("simulated finalizer failure before commit")
+
+            monkeypatch.setattr(
+                control, "admit_and_consume_host_admission", fail_after_preparation
+            )
+        elif scenario == "finalization_withdrawal":
+            import dotmac_deployment_control as control
+
+            real_finalize = control.admit_and_consume_host_admission
+            withdrawal_results: list[object] = []
+
+            def withdraw_while_finalization_is_held():
+                with Session(engine) as peer:
+                    peer.execute(text("SET LOCAL lock_timeout = '500ms'"))
+                    try:
+                        approvals.withdraw_request(
+                            peer,
+                            approvals.WithdrawRequestCommand(
+                                request_id=uuid.UUID(
+                                    coordinate.facts.approval_decision_ref
+                                ),
+                                actor_id=uuid.uuid4(),
+                                authority_ref="source-conformance",
+                                reason="concurrent finalization withdrawal",
+                                external_ref=_cmd(),
+                            ),
+                        )
+                        withdrawal_results.append("unexpectedly_unblocked")
+                    except OperationalError as exc:
+                        withdrawal_results.append(getattr(exc.orig, "sqlstate", None))
+                    finally:
+                        peer.rollback()
+
+            def finalize_with_peer_withdrawal(*args, **kwargs):
+                result = real_finalize(*args, **kwargs)
+                # The real finalizer has staged consumption, but its caller
+                # has not committed. Approvals' FOR SHARE must still stand.
+                peer = threading.Thread(target=withdraw_while_finalization_is_held)
+                peer.start()
+                peer.join(timeout=5)
+                assert not peer.is_alive(), "withdrawal exceeded bounded wait"
+                assert withdrawal_results == ["55P03"]
+                return result
+
+            monkeypatch.setattr(
+                control,
+                "admit_and_consume_host_admission",
+                finalize_with_peer_withdrawal,
+            )
+
+        if scenario in {"positive", "replay", "finalization_withdrawal"}:
+            providers.execution_authority.consume_dispatch(request=request)
+        elif scenario == "expired":
+            with pytest.raises(AuthorizationEnvelopeRefusedError) as refused:
+                providers.execution_authority.consume_dispatch(request=request)
+            assert refused.value.code is AuthorizationEnvelopeRefusalCode.EXPIRED
+        else:
+            # Owner exceptions vary by refusing boundary; every case below
+            # independently proves the durable marker remains absent.
+            with pytest.raises(
+                (
+                    RuntimeError,
+                    approvals.ApprovalNotHeld,
+                    HostAdmissionRefusedError,
+                    HostAdmissionAdapterUsageError,
+                    FoundationConsumptionRefusedError,
+                    TransitionRefusedError,
+                )
+            ):
+                providers.execution_authority.consume_dispatch(request=request)
+
+        expected = scenario in {
+            "positive",
+            "replay",
+            "ambiguous_commit",
+            "finalization_withdrawal",
+        }
+        db.rollback()
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == int(expected)
+        committed = providers.execution_authority.lookup_committed(
+            control_consumption_ref=coordinate.execution.control_consumption_ref
+        )
+        assert (committed is not None) is expected
+        if scenario == "finalization_withdrawal":
+            # The provider's single commit released the hold. A subsequent
+            # real withdrawal succeeds without erasing committed consumption.
+            result = approvals.withdraw_request(
+                db,
+                approvals.WithdrawRequestCommand(
+                    request_id=uuid.UUID(coordinate.facts.approval_decision_ref),
+                    actor_id=uuid.uuid4(),
+                    authority_ref="source-conformance",
+                    reason="withdraw after committed consumption",
+                    external_ref=_cmd(),
+                ),
+            )
+            db.commit()
+            assert result.satisfied is False
+            assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+        if scenario == "replay":
+            with pytest.raises(
+                (
+                    HostAdmissionRefusedError,
+                    FoundationConsumptionRefusedError,
+                    TransitionRefusedError,
+                )
+            ):
+                providers.execution_authority.consume_dispatch(request=request)
+            db.rollback()
+            assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+        # An ambiguous commit is resolved only through committed lookup above.
+        # No consume retry is issued and no workload is launched.
+        assert all(not session.in_transaction() for session in sessions)
     finally:
         for session in sessions:
             session.close()

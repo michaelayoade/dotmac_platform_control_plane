@@ -75,6 +75,12 @@ jobs:
             --dest /tmp/private-wheels \
             "dotmac-deployment-control==0.1.0a17" "dotmac-kernel==0.1.0a100"
 
+          # Source-only approval conformance uses the already pinned release.
+          /tmp/rehearsal-issuer-venv/bin/pip download --no-deps \
+            --index-url "https://pypi.org/simple" \
+            --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+            --dest /tmp/private-wheels "dotmac-approvals==0.1.0a8"
+
           # A CI-level sanity check only -- defense in depth. The harness's
           # own verify_wheels/verify_installed re-checks this again, from
           # first principles, at test collection time regardless.
@@ -88,6 +94,12 @@ jobs:
               pathlib.Path("rehearsal_issuer_harness/artifacts.json").read_text()
           )
           wheels = {p.name: p for p in pathlib.Path("/tmp/private-wheels").glob("*.whl")}
+          import tomllib
+          approvals = next(p for p in tomllib.loads(pathlib.Path("poetry.lock").read_text())["package"] if p["name"] == "dotmac-approvals")
+          assert approvals["version"] == "0.1.0a8"
+          approval_wheel = wheels["dotmac_approvals-0.1.0a8-py3-none-any.whl"]
+          expected = next(f["hash"] for f in approvals["files"] if f["file"] == approval_wheel.name)
+          assert "sha256:" + hashlib.sha256(approval_wheel.read_bytes()).hexdigest() == expected
           for name, spec in lock["artifacts"].items():
               path = wheels.get(spec["filename"])
               if path is None:
@@ -112,6 +124,8 @@ jobs:
           /tmp/rehearsal-issuer-venv/bin/pip install --no-deps \
             /tmp/private-wheels/dotmac_deployment_control-*.whl \
             /tmp/private-wheels/dotmac_kernel-*.whl
+          /tmp/rehearsal-issuer-venv/bin/pip install --no-deps \
+            /tmp/private-wheels/dotmac_approvals-*.whl
 
       # The README's own documented recipe, verbatim.
       - name: Build the public wheelhouse from public-requirements.lock
@@ -171,6 +185,8 @@ jobs:
         env:
           REHEARSAL_ISSUER_MIGRATION_DATABASE_URL: "postgresql+psycopg://app_admin@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
           CONFORMANCE_DATABASE_URL: "postgresql+psycopg://platform_api@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
+          CONFORMANCE_PRIVATE_WHEELHOUSE: /tmp/private-wheels
+          CONFORMANCE_PUBLIC_WHEELHOUSE: /tmp/public-wheelhouse
         run: |
           set -euo pipefail
           /tmp/rehearsal-issuer-venv/bin/python - <<'PY'
@@ -181,6 +197,7 @@ jobs:
           from alembic.config import Config
           from alembic.script import ScriptDirectory
           from dotmac_deployment_control import versions_dir
+          from dotmac_approvals.migrations import versions_dir as approvals_versions_dir
           from dotmac_kernel.migrations import versions_dir as kernel_versions_dir
           import dotmac_deployment_control as control
           import dotmac_deployment_foundation as foundation
@@ -188,6 +205,7 @@ jobs:
           for distribution, expected in (
               ("dotmac-deployment-control", "0.1.0a17"),
               ("dotmac-kernel", "0.1.0a100"),
+              ("dotmac-approvals", "0.1.0a8"),
               ("dotmac-deployment-foundation", "0.4.0a1"),
           ):
               assert version(distribution) == expected, distribution
@@ -197,9 +215,9 @@ jobs:
               assert origin.is_relative_to(installed), (module.__name__, str(origin))
               print(module.__name__, origin)
           cfg = Config("rehearsal_issuer_harness/alembic.ini")
-          cfg.set_main_option("version_locations", os.pathsep.join(map(str, (kernel_versions_dir(), versions_dir()))))
+          cfg.set_main_option("version_locations", os.pathsep.join(map(str, (kernel_versions_dir(), versions_dir(), approvals_versions_dir()))))
           assert set(ScriptDirectory.from_config(cfg).get_heads()) == {
-              "0028_machine_attribution", "dc_0016_controller_key_nonreuse"
+              "0028_machine_attribution", "dc_0016_controller_key_nonreuse", "ap_0003_withdrawals"
           }
           command.upgrade(cfg, "heads")
           PY
@@ -210,9 +228,31 @@ jobs:
           import sys
           from xml.etree import ElementTree
           cases = ElementTree.parse(sys.argv[1]).getroot().findall(".//testcase")
-          assert len(cases) == 11, f"expected eleven host-admission cases, collected {len(cases)}"
+          expected = {
+              "test_valid_signed_attestations_complete_the_full_flow",
+              "test_a_trust_policy_genuinely_derived_from_resolved_context_completes_the_full_flow",
+              "test_an_invalid_signature_stops_inside_real_foundation_code",
+              "test_a_sentinel_foundation_failure_has_no_fallback",
+              "test_an_altered_evidence_digest_is_refused",
+              "test_a_substituted_verified_host_identity_is_refused",
+              "test_a_substituted_verified_candidate_root_field_is_refused",
+              "test_a_state_change_between_resolve_and_admission_consumes_nothing",
+              "test_expiry_between_foundation_verification_and_final_admission_is_refused",
+              "test_component_observer_runs_only_after_the_admission_transaction_commits",
+              "test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization",
+          } | {
+              f"test_real_approved_cp_v3_lifecycle[{scenario}]"
+              for scenario in (
+                  "positive", "withdrawn", "replay", "finalize_failure", "expired",
+                  "revoked", "changed_target", "changed_observation", "changed_host",
+                  "ambiguous_commit", "swapped_request", "session_reuse",
+                  "finalization_withdrawal",
+              )
+          }
+          assert len(cases) == len(expected) == 24
+          assert {case.attrib["name"] for case in cases} == expected
           assert all(not any(case.find(outcome) is not None for outcome in ("skipped", "failure", "error")) for case in cases)
-          print("host-admission conformance: ten component cases and one CP V3 refusal passed, zero skipped")
+          print("host-admission conformance: ten component cases, default refusal and thirteen real-approval source cases passed, zero skipped")
           PY
 
       - name: Stop Postgres

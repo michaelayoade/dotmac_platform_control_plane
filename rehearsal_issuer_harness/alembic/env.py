@@ -1,12 +1,19 @@
-"""Compose only installed Kernel a100 and Control a17 migrations."""
+"""Hosted noncandidate fixture: Kernel, Control and real Approvals migrations."""
 
 from __future__ import annotations
 
 import os
 
 from alembic import context
+from dotmac_kernel.planes import (
+    ModulePlane,
+    ModulePlaneSelection,
+    install_module_plane_selections,
+)
 from dotmac_kernel.prerequisites import (
     IDEMPOTENCY_LEDGER_V1,
+    MODULE_DATABASE_ROLES_V1,
+    OUTBOX_RELAY_V1,
     PLATFORM_AUDIT_LOG_V1,
     PrerequisiteBinding,
     install_prerequisite_bindings,
@@ -21,7 +28,14 @@ install_prerequisite_bindings(
         PrerequisiteBinding(
             PLATFORM_AUDIT_LOG_V1.name, "0026_platform_audit_log", "kernel"
         ),
+        PrerequisiteBinding(OUTBOX_RELAY_V1.name, "0012_platform_outbox", "kernel"),
+        PrerequisiteBinding(
+            MODULE_DATABASE_ROLES_V1.name, "0001_initial_tenant_schema", "kernel"
+        ),
     )
+)
+install_module_plane_selections(
+    (ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,)),)
 )
 
 
