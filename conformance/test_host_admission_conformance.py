@@ -43,6 +43,8 @@ import pytest
 from dotmac_deployment_control import (
     ApprovalEvidence,
     ApprovePlanCommand,
+    AuthorizationEnvelopeRefusalCode,
+    AuthorizationEnvelopeRefusedError,
     AuthorizationSignature,
     AuthorizationSignerIdentity,
     BindTargetHostCommand,
@@ -1831,6 +1833,10 @@ def test_real_approved_cp_v3_lifecycle(db: Session, monkeypatch, scenario: str) 
 
         if scenario in {"positive", "replay", "finalization_withdrawal"}:
             providers.execution_authority.consume_dispatch(request=request)
+        elif scenario == "expired":
+            with pytest.raises(AuthorizationEnvelopeRefusedError) as refused:
+                providers.execution_authority.consume_dispatch(request=request)
+            assert refused.value.code is AuthorizationEnvelopeRefusalCode.EXPIRED
         else:
             # Owner exceptions vary by refusing boundary; every case below
             # independently proves the durable marker remains absent.
