@@ -213,17 +213,31 @@ def build_execution_bindings(
     )
 
 
-def _platform_sessions() -> Callable[[], Session]:
-    """The kernel's raw platform session factory (D1: its single engine).
+#: The kernel runtime built from startup materials, held for the life of
+#: the process: its engines back the session factory the adapter uses.
+_RUNTIME: Any = None
 
-    `PlatformSessionLocal` is the kernel runtime's sessionmaker; calling
-    it yields the fresh raw Session the adapter contract requires (the
-    adapter commits each phase and closes it itself — never the
-    commit-on-exit `platform_session` wrapper).
+
+def _platform_sessions(env: Mapping[str, str]) -> Callable[[], Session]:
+    """The kernel runtime's raw platform session factory (D1).
+
+    Engines are constructed only inside `DatabaseRuntime` — vendor code
+    never builds one — and the kernel's legacy db module is a retiring
+    surface no new code may import. `platform_session_factory` yields the fresh
+    raw Session the adapter contract requires (the adapter commits
+    each phase and closes it itself — never the commit-on-exit
+    `platform_session` wrapper). Engine construction is lazy; no
+    connection opens here.
     """
-    from dotmac_kernel.db import PlatformSessionLocal
+    global _RUNTIME
+    if _RUNTIME is None:
+        from dotmac_kernel.session_runtime import DatabaseRuntime
 
-    return PlatformSessionLocal
+        _RUNTIME = DatabaseRuntime.from_urls(
+            database_url=env["DATABASE_URL"],
+            platform_database_url=env["PLATFORM_DATABASE_URL"],
+        )
+    return _RUNTIME.platform_session_factory
 
 
 def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
@@ -245,10 +259,10 @@ def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
         name for name in SESSION_MATERIAL_ENVS if not env.get(name, "").strip()
     ]
     if not missing:
-        # Resolving the kernel factory proves the runtime composes at
+        # Building the kernel runtime proves the materials compose at
         # startup (engines are lazy; no connection is opened), so the
         # refusal below names only what is genuinely absent.
-        _platform_sessions()
+        _platform_sessions(env)
     missing.extend(
         [
             "host_admission observer (no production source in this assembly)",
