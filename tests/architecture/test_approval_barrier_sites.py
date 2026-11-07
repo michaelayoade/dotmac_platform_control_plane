@@ -9,13 +9,11 @@ to one of Control's approval-dependent transitions (`approve_plan`,
 and requires it to be lexically inside a function passed as `held_transition`'s
 `transition=` argument, or inside `approval_barrier.py` itself.
 
-`host_admission_adapter.py`'s `finalize` call is allowlisted explicitly,
-because it dispatches a `FOUNDATION_EXECUTION` plan that has no Approvals
-subject at all. Michael decided C2-D1 on 2026-09-26: dispatch FAILS CLOSED for
-an approval-requiring Foundation plan until Gate 3 defines its subject, and
-`test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check` below
-enforces that premise structurally. An exemption states an enforceable premise
-(AGENTS.md), not a bare pass.
+The raw leaf composition retains its C2-D1 refusal. Its sole unheld finalizer
+is permitted ONLY in the default branch after that refusal. The new outer CP
+factory binds the genuine held owner through one private startup seam; exact
+caller, binding and branch premises below replace the former subject-absent
+exemption. No arbitrary callback is exempted from the transition scan.
 
 `authorize_deployment`/`propose_deployment_plan` (`deployment/adapter.py`) are
 asserted to still raise `PlanInputDerivationUnavailable` before reaching any
@@ -27,11 +25,14 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "vendor_cp"
 APPROVAL_BARRIER = SRC / "deployment" / "approval_barrier.py"
 PROTECTED_REHEARSAL_ISSUER = SRC / "deployment" / "protected_rehearsal_issuer.py"
 HOST_ADMISSION_ADAPTER = SRC / "deployment" / "host_admission_adapter.py"
+FOUNDATION_APPROVAL = SRC / "deployment" / "foundation_execution_approval.py"
 DEPLOYMENT_ADAPTER = SRC / "deployment" / "adapter.py"
 CONTRACTS_ADAPTER = SRC / "contracts" / "adapter.py"
 
@@ -72,12 +73,8 @@ _CA_EVIDENCE_COMMANDS = frozenset({"approve", "activate", "reinstate"})
 #: name in the function.
 ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
     {
-        # FOUNDATION_EXECUTION plans have no Approvals subject to hold. C2-D1
-        # (Michael, 2026-09-26): dispatch fails closed instead —
-        # `_refuse_an_approval_requiring_plan` runs before this finalize and
-        # refuses any plan without an explicit requires_approval=False
-        # (proved in tests/unit/test_foundation_v3_provider.py and ordered by
-        # `test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check`).
+        # Default raw branch ONLY, structurally checked below: no guarded
+        # finalizer is installed and approval-requiring plans refuse first.
         ("deployment/host_admission_adapter.py", "consume_dispatch", "finalize"),
         # Startup composition only checks that the bound callable IS callable;
         # it never calls it.
@@ -346,10 +343,9 @@ def test_the_allowlisted_finalize_call_still_exists_at_its_named_site() -> None:
     )
 
 
-def test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check() -> None:
-    """The allowlist premise, enforced: inside `consume_dispatch`, the C2-D1
-    refusal is called on an earlier line than `finalize`, in the same block."""
-    tree = ast.parse(HOST_ADMISSION_ADAPTER.read_text())
+def _assert_raw_finalizer_is_refusing(source: str) -> None:
+    """The raw-finalizer exception applies only to the exact refusing branch."""
+    tree = ast.parse(source)
     (consume,) = (
         node
         for node in ast.walk(tree)
@@ -363,6 +359,141 @@ def test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check() -> None
     }
     assert set(lines) == {"finalize", "_refuse_an_approval_requiring_plan"}, lines
     assert lines["_refuse_an_approval_requiring_plan"] < lines["finalize"]
+    branches = [
+        node
+        for node in ast.walk(consume)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "self._held_finalizer is None"
+    ]
+    assert len(branches) == 1
+    branch = branches[0]
+    assert [_call_name(node.value) for node in branch.body] == [
+        "_refuse_an_approval_requiring_plan",
+        "finalize",
+    ]
+    assert [_call_name(node.value) for node in branch.orelse] == ["_held_finalizer"]
+
+
+def test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check() -> None:
+    _assert_raw_finalizer_is_refusing(HOST_ADMISSION_ADAPTER.read_text())
+
+
+@pytest.mark.parametrize("plant", ["removed_refusal", "branch_bypass"])
+def test_raw_finalizer_guard_rejects_a_planted_bypass(plant: str) -> None:
+    source = HOST_ADMISSION_ADAPTER.read_text()
+    if plant == "removed_refusal":
+        source = source.replace(
+            "self._refuse_an_approval_requiring_plan(", "self._not_a_refusal("
+        )
+    else:
+        source = source.replace("if self._held_finalizer is None:", "if True:")
+    with pytest.raises(AssertionError):
+        _assert_raw_finalizer_is_refusing(source)
+
+
+def _assert_private_finalizer_ownership(sources: dict[Path, str]) -> None:
+    references: list[tuple[str, str]] = []
+    assignments: list[tuple[str, str]] = []
+    for path, source in sources.items():
+        tree = ast.parse(source)
+        parents = _parents(tree)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and _call_name(node) == "_compose_approval_guarded_providers"
+            ):
+                references.append(
+                    (
+                        path.relative_to(SRC).as_posix(),
+                        _enclosing_functions(node, parents)[0].name,
+                    )
+                )
+                bound = {
+                    keyword.arg: ast.unparse(keyword.value) for keyword in node.keywords
+                }
+                assert bound["held_finalizer"] == "finalize_foundation_dispatch"
+                assert bound["control"].startswith("ControlFoundationV3Bindings(")
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "_held_finalizer"
+                and isinstance(node.ctx, ast.Store)
+            ):
+                assignments.append(
+                    (
+                        path.relative_to(SRC).as_posix(),
+                        _enclosing_functions(node, parents)[0].name,
+                    )
+                )
+    assert references == [
+        (
+            "deployment/foundation_execution_approval.py",
+            "compose_approved_foundation_v3_providers",
+        )
+    ]
+    assert sorted(assignments) == [
+        ("deployment/host_admission_adapter.py", "__init__"),
+        ("deployment/host_admission_adapter.py", "_compose_approval_guarded_providers"),
+    ]
+    factory_tree = ast.parse(sources[FOUNDATION_APPROVAL])
+    factory = next(
+        node
+        for node in factory_tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "compose_approved_foundation_v3_providers"
+    )
+    assert [arg.arg for arg in factory.args.kwonlyargs] == ["foundation", "sources"]
+    (bindings,) = (
+        node
+        for node in ast.walk(factory)
+        if isinstance(node, ast.Call)
+        and _call_name(node) == "ControlFoundationV3Bindings"
+    )
+    assert {kw.arg: ast.unparse(kw.value) for kw in bindings.keywords} == {
+        "resolve_context": "control.resolve_host_admission_context",
+        "finalize": "finalize_foundation_dispatch",
+        "attest_pair": "control.attest_foundation_execution_pair",
+        "lookup_committed": "control.lookup_foundation_execution_consumption",
+        "get_plan": "control.get_plan",
+        "foreign_root_type": "control.HostAdmissionForeignRootV1",
+        "foreign_evidence_type": "control.HostAdmissionForeignVerificationEvidenceV1",
+        "execution_context_type": "control.FoundationExecutionContextV1",
+        "consumption_request_type": "control.FoundationDispatchConsumptionV1",
+    }
+    assert any(
+        isinstance(node, ast.Call)
+        and _call_name(node) == "import_module"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "dotmac_deployment_control"
+        for node in ast.walk(factory)
+    )
+
+
+def test_only_the_real_cp_factory_binds_the_private_held_finalizer() -> None:
+    _assert_private_finalizer_ownership(
+        {path: path.read_text() for path in _iter_source_files()}
+    )
+
+
+@pytest.mark.parametrize("plant", ["wrong_owner", "extra_caller", "extra_assignment"])
+def test_private_finalizer_guard_detects_planted_bypasses(plant: str) -> None:
+    sources = {path: path.read_text() for path in _iter_source_files()}
+    if plant == "wrong_owner":
+        sources[FOUNDATION_APPROVAL] = sources[FOUNDATION_APPROVAL].replace(
+            "held_finalizer=finalize_foundation_dispatch", "held_finalizer=raw_finalize"
+        )
+    elif plant == "extra_caller":
+        sources[HOST_ADMISSION_ADAPTER] += (
+            "\ndef unguarded_startup():\n"
+            "    return _compose_approval_guarded_providers()\n"
+        )
+    else:
+        sources[HOST_ADMISSION_ADAPTER] += (
+            "\ndef unguarded_startup(pair):\n"
+            "    pair.execution_authority._held_finalizer = raw_finalize\n"
+        )
+    with pytest.raises((AssertionError, KeyError)):
+        _assert_private_finalizer_ownership(sources)
 
 
 def test_authorize_deployment_and_propose_plan_still_raise_before_any_call() -> None:

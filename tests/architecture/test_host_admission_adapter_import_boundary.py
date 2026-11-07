@@ -76,11 +76,17 @@ def test_v3_provider_has_no_request_selected_trust_or_legacy_finalizer() -> None
 
     signature = inspect.signature(compose_foundation_v3_providers)
     assert tuple(signature.parameters) == ("control", "foundation", "sources")
+    # Approval composition is an outer CP startup decision. Neither this
+    # public/default factory nor a Foundation request may select a callback.
+    assert "held_finalizer" not in signature.parameters
     source = LEAF_MODULE.read_text()
     assert "def consume_dispatch(self, *, request: object)" in source
     assert "self._control.finalize(" in source
     assert _provider_calls(source, function="admit_and_launch_host_source") == []
     assert _provider_calls(source, function="finalize") == ["_FoundationV3Provider"]
+    assert _provider_calls(source, function="_held_finalizer") == [
+        "_FoundationV3Provider"
+    ]
 
 
 def test_the_v3_provider_call_scan_detects_a_planted_legacy_path() -> None:

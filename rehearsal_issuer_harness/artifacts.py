@@ -82,13 +82,18 @@ def read_public_lock(path: Path = PUBLIC_LOCK) -> dict[str, PublicWheelPin]:
     return pins
 
 
-def verify_wheels(control_wheel: Path, kernel_wheel: Path) -> None:
+def verify_wheels(
+    control_wheel: Path, kernel_wheel: Path, *, approvals_wheel: Path | None = None
+) -> None:
     """Only wheel paths are accepted; no branch, checkout or mutable locator."""
     lock = read_lock()["artifacts"]
-    for name, path in (
+    wheels = [
         ("dotmac-deployment-control", control_wheel),
         ("dotmac-kernel", kernel_wheel),
-    ):
+    ]
+    if approvals_wheel is not None:
+        wheels.append(("dotmac-approvals", approvals_wheel))
+    for name, path in wheels:
         spec = lock[name]
         if not isinstance(path, Path) or not path.is_file() or path.suffix != ".whl":
             raise ValueError(f"{name} requires an existing wheel path")
@@ -159,14 +164,21 @@ def verify_public_wheelhouse(wheelhouse: Path) -> dict[str, Path]:
 
 
 def verify_installed(
-    control_wheel: Path, kernel_wheel: Path, public_wheelhouse: Path
+    control_wheel: Path,
+    kernel_wheel: Path,
+    public_wheelhouse: Path,
+    *,
+    approvals_wheel: Path | None = None,
 ) -> None:
     """Runtime imports must resolve to the named installed distributions."""
     lock = read_lock()
-    for name, wheel_path in (
+    wheels = [
         ("dotmac-deployment-control", control_wheel),
         ("dotmac-kernel", kernel_wheel),
-    ):
+    ]
+    if approvals_wheel is not None:
+        wheels.append(("dotmac-approvals", approvals_wheel))
+    for name, wheel_path in wheels:
         spec = lock["artifacts"][name]
         dist = metadata.distribution(name)
         if dist.version != spec["version"]:

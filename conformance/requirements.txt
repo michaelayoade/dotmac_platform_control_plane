@@ -1,20 +1,28 @@
 # Runtime dependencies the conformance SUITE itself needs (real Postgres
-# access, the deterministic signing doubles, pytest), on top of THREE real
-# wheels installed separately per conformance/README.md:
+# access, the deterministic signing doubles, pytest), on top of the real
+# wheels installed separately by the workflow per conformance/README.md:
 #
-#   - dotmac_deployment_control    (exact merge commit)
-#   - dotmac_deployment_foundation (exact merge commit)
-#   - the CP host-admission adapter wheel, built from
-#     src/vendor_cp/deployment/host_admission_adapter.py ONLY and installed
-#     with `pip install --no-deps` -- that leaf module needs nothing beyond
-#     stdlib + sqlalchemy (see its own docstring and
-#     tests/architecture/test_host_admission_adapter_import_boundary.py), so
-#     `--no-deps` is correct, not a shortcut: a real dependency resolution
-#     for it would pull in nothing this file doesn't already list.
+#   - released dotmac_deployment_control (exact verified artifact)
+#   - test-only dotmac_deployment_foundation (exact Starter source)
+#   - the normal CP wheel built from the whole repository revision under test
+#     and installed with `pip install --no-deps`
+#   - released dotmac_approvals for genuine policy/request/decision coverage
+#
+# The raw host_admission_adapter leaf remains import-light (stdlib +
+# sqlalchemy; see its architecture guard). The new guarded CP source path
+# additionally imports the existing CP approvals adapter closure. The workflow
+# owns that closed dependency bundle; `--no-deps` does not mean this file alone
+# supplies the whole CP runtime. Source conformance and its installed-import
+# proofs remain pending hosted validation, not a candidate/release claim.
+# Database conformance also requires CONFORMANCE_PRIVATE_WHEELHOUSE and
+# CONFORMANCE_PUBLIC_WHEELHOUSE alongside CONFORMANCE_DATABASE_URL. Its
+# in-process guard verifies the locked Control, Kernel and Approvals wheels
+# plus installed/public dependencies; see rehearsal_issuer_harness/artifacts.json.
+# Only the explicit single-file D16 source-verifier invocation is exempt.
 #
 # `dotmac-kernel` is also required directly (PlatformIdempotencyRecord, for
 # the conformance suite's own idempotency-marker assertions) -- installed
-# from the private Forgejo registry alongside the three wheels above, NOT
+# from the private Forgejo registry alongside the wheels above, NOT
 # derived from this repository's own .venv (an earlier version of this file
 # assumed that, incorrectly -- a fresh disposable venv has nothing to derive
 # it from).
