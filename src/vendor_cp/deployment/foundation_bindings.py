@@ -51,6 +51,7 @@ from vendor_cp.deployment.host_admission_adapter import (
 
 if TYPE_CHECKING:  # pragma: no cover - checker-only; runtime stays lazy
     from dotmac_deployment_foundation.execution_bindings import ExecutionBindings
+    from dotmac_kernel.session_runtime import DatabaseRuntime
 
 __all__ = [
     "ENTRY_POINT_NAME",
@@ -215,7 +216,7 @@ def build_execution_bindings(
 
 #: The kernel runtime built from startup materials, held for the life of
 #: the process: its engines back the session factory the adapter uses.
-_RUNTIME: Any = None
+_RUNTIME: DatabaseRuntime | None = None
 
 
 def _platform_sessions(env: Mapping[str, str]) -> Callable[[], Session]:
