@@ -28,10 +28,14 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.deployment.foundation_bindings import (
     ENTRY_POINT_NAME,
+    EXECUTION_CONTEXT_MATERIALS_ENV,
+    HOST_ADMISSION_MATERIALS_ENV,
     Ed25519AttestationVerifier,
     FoundationBindingsUnavailable,
     bindings,
     build_execution_bindings,
+    execution_context_source,
+    host_admission_source,
     trust_policy_from_resolved_context,
 )
 from vendor_cp.deployment.host_admission_adapter import (
@@ -216,6 +220,122 @@ def test_factory_with_session_materials_refuses_on_observers_only() -> None:
     assert "host_admission observer" in message
     # DSN values themselves are never echoed.
     assert "127.0.0.1" not in message
+
+
+# ── observer startup materials ──────────────────────────────────────────────
+
+
+def _stub_envelope(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    seen: list[Any] = []
+
+    class _Envelope:
+        def __init__(self, document: Any) -> None:
+            self.document = document
+
+        @classmethod
+        def from_mapping(cls, value: object) -> _Envelope:
+            seen.append(value)
+            return cls(value)
+
+    package = ModuleType("dotmac_deployment_foundation")
+    package.AttestationEnvelopeV2 = _Envelope  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "dotmac_deployment_foundation", package)
+    return seen
+
+
+def _admission_document(attempt_id: object) -> dict[str, Any]:
+    return {
+        "attempt_id": str(attempt_id),
+        "presentation": "control-presentation",
+        "candidate": {"schema": "candidate-envelope"},
+        "installed": {"schema": "installed-envelope"},
+    }
+
+
+def test_host_admission_source_reads_materials_fresh_and_typed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import json
+
+    seen = _stub_envelope(monkeypatch)
+    path = tmp_path / "admission.json"
+    first, second = uuid4(), uuid4()
+    path.write_text(json.dumps(_admission_document(first)), encoding="utf-8")
+    source = host_admission_source(str(path))
+
+    observed = source()
+    assert isinstance(observed, HostAdmissionObservation)
+    assert observed.attempt_id == first
+    assert observed.presentation == "control-presentation"
+    assert observed.candidate.document == {"schema": "candidate-envelope"}  # type: ignore[attr-defined]
+    assert seen == [{"schema": "candidate-envelope"}, {"schema": "installed-envelope"}]
+
+    path.write_text(json.dumps(_admission_document(second)), encoding="utf-8")
+    assert source().attempt_id == second
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {**_admission_document(uuid4()), "extra": "SECRET-MARKER"},
+        {**_admission_document(uuid4()), "attempt_id": "not-a-uuid"},
+        {**_admission_document(uuid4()), "presentation": "  "},
+        {"attempt_id": str(uuid4())},
+    ],
+)
+def test_host_admission_source_refuses_closed_without_echoing_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, document: dict[str, Any]
+) -> None:
+    import json
+
+    _stub_envelope(monkeypatch)
+    path = tmp_path / "admission.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        host_admission_source(str(path))()
+    assert "SECRET-MARKER" not in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_execution_context_source_constructs_exact_type_and_refuses_extra_keys(
+    tmp_path: Path,
+) -> None:
+    import dataclasses
+    import json
+
+    @dataclasses.dataclass(frozen=True)
+    class _Context:
+        target_id: str
+        target_ref: str
+        host_id: str
+
+    path = tmp_path / "context.json"
+    document = {"target_id": "7", "target_ref": "lane3-target", "host_id": "host-1"}
+    path.write_text(json.dumps(document), encoding="utf-8")
+    source = execution_context_source(str(path), _Context)
+    assert source() == _Context(**document)
+
+    path.write_text(json.dumps({**document, "surprise": "x"}), encoding="utf-8")
+    with pytest.raises(FoundationBindingsUnavailable):
+        source()
+
+
+def test_factory_names_observer_material_envs_without_echoing_paths(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        bindings(
+            environ={
+                "DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:1/cp",
+                "PLATFORM_DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:1/cp",
+                HOST_ADMISSION_MATERIALS_ENV: str(tmp_path / "absent-a.json"),
+                EXECUTION_CONTEXT_MATERIALS_ENV: str(tmp_path / "absent-c.json"),
+            }
+        )
+    message = str(caught.value)
+    assert HOST_ADMISSION_MATERIALS_ENV in message
+    assert "host_admission observer" in message
+    assert str(tmp_path) not in message
 
 
 def test_entry_point_declared_exactly_once_with_matching_name() -> None:
