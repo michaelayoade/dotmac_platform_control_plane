@@ -402,14 +402,17 @@ def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
             "Foundation execution bindings cannot be composed at startup; "
             "missing: " + "; ".join(missing)
         )
-    foundation = foundation_host_bindings()
+    # Prove the supplied materials parse into the exact typed values at
+    # startup; admission re-reads them fresh on every observation. The
+    # host-admission proof runs first: its document read names the
+    # missing materials input even in an environment where Foundation
+    # itself is not installed yet.
     host_admission = host_admission_source(admission_path)
+    host_admission()
+    foundation = foundation_host_bindings()
     execution_context = execution_context_source(
         context_path, foundation.execution_context_type
     )
-    # Prove the supplied materials parse into the exact typed values at
-    # startup; admission re-reads them fresh on every observation.
-    host_admission()
     execution_context()
     return build_execution_bindings(
         sessions=sessions,
