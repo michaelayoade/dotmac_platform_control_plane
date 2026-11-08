@@ -13,15 +13,17 @@ material. The Control half is bound exclusively through
 so the held-approval barrier (#261) is in the execution path; this
 module never calls a guarded finalizer or the private guarded composer.
 
-What is NOT here yet, deliberately: production `host_admission` and
-`execution_context` observers. Those observe the rehearsal target and
-candidate from the runner side; no production source for them exists in
-this assembly. Until the runner lane supplies them under a startup
-materials contract, :func:`bindings` refuses closed and names the
-missing inputs — Foundation discovery turns that into a loud
-factory-raised refusal, and the publication gate stays shut. The
-composition function :func:`build_execution_bindings` is complete and
-tested with injected sources; only the observer materials are absent.
+The production `host_admission` and `execution_context` observers read
+runner-side startup materials: `HOST_ADMISSION_MATERIALS` and
+`EXECUTION_CONTEXT_MATERIALS` each name a JSON document the lane's
+launcher deposits before startup (Control/Gate-0-issued evidence for
+the rehearsal target and candidate). The sources re-read those
+documents on every observation, parse them through Foundation's own
+types, and refuse closed — naming the missing or malformed input,
+never its value — so until genuine materials exist, :func:`bindings`
+refuses at startup and the publication gate stays shut. That refusal
+IS the gate working: discovery surfaces it loudly on execute paths
+instead of admitting on partial trust.
 
 `dotmac_deployment_foundation` is deliberately not a dependency of this
 assembly (pyproject). Every Foundation import below is lazy, inside the
@@ -33,10 +35,14 @@ with the sanitized refusal, not an ImportError traceback.
 from __future__ import annotations
 
 import base64
+import dataclasses
+import json
 import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -55,11 +61,15 @@ if TYPE_CHECKING:  # pragma: no cover - checker-only; runtime stays lazy
 
 __all__ = [
     "ENTRY_POINT_NAME",
+    "EXECUTION_CONTEXT_MATERIALS_ENV",
+    "HOST_ADMISSION_MATERIALS_ENV",
     "Ed25519AttestationVerifier",
     "FoundationBindingsUnavailable",
     "bindings",
     "build_execution_bindings",
+    "execution_context_source",
     "foundation_host_bindings",
+    "host_admission_source",
     "trust_policy_from_resolved_context",
 ]
 
@@ -71,6 +81,12 @@ ENTRY_POINT_NAME: Final = "dotmac-control-plane"
 #: kernel owns the single engine (D1): this assembly never constructs
 #: one. Values are deployment facts, never echoed.
 SESSION_MATERIAL_ENVS: Final = ("DATABASE_URL", "PLATFORM_DATABASE_URL")
+
+#: Observer startup materials. Each names a JSON document the runner
+#: lane's launcher deposits before startup; the values are paths to
+#: deployment facts, and the documents' contents are never echoed.
+HOST_ADMISSION_MATERIALS_ENV: Final = "HOST_ADMISSION_MATERIALS"
+EXECUTION_CONTEXT_MATERIALS_ENV: Final = "EXECUTION_CONTEXT_MATERIALS"
 
 
 class FoundationBindingsUnavailable(RuntimeError):
@@ -241,36 +257,166 @@ def _platform_sessions(env: Mapping[str, str]) -> Callable[[], Session]:
     return _RUNTIME.platform_session_factory
 
 
+def _read_materials_document(path: str, *, what: str) -> dict[str, Any]:
+    """One startup-materials JSON object, or a sanitized refusal."""
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise FoundationBindingsUnavailable(f"{what} materials cannot be read") from exc
+    if not isinstance(document, dict):
+        raise FoundationBindingsUnavailable(f"{what} materials are not an object")
+    return document
+
+
+def _require_closed(document: dict[str, Any], *, what: str, fields: set[str]) -> None:
+    if set(document) != fields:
+        raise FoundationBindingsUnavailable(
+            f"{what} materials do not match the closed contract"
+        )
+
+
+def host_admission_source(path: str) -> Callable[[], HostAdmissionObservation]:
+    """The production `host_admission` observer over startup materials.
+
+    The document is closed: `attempt_id` (UUID), `presentation`
+    (Control's own serialization, passed through untouched — Control
+    validates it at resolve), and the `candidate`/`installed`
+    attestation envelope documents, parsed only through Foundation's
+    `AttestationEnvelopeV2.from_mapping`. Re-read on every observation
+    so refreshed evidence is what admission verifies; every defect
+    refuses closed without echoing a value.
+    """
+    what = f"host_admission observer ({HOST_ADMISSION_MATERIALS_ENV})"
+
+    def _observe() -> HostAdmissionObservation:
+        document = _read_materials_document(path, what=what)
+        _require_closed(
+            document,
+            what=what,
+            fields={"attempt_id", "presentation", "candidate", "installed"},
+        )
+        try:
+            attempt_id = UUID(str(document["attempt_id"]))
+        except Exception as exc:
+            raise FoundationBindingsUnavailable(
+                f"{what} materials carry no attempt id"
+            ) from exc
+        presentation = document["presentation"]
+        if not isinstance(presentation, str) or not presentation.strip():
+            raise FoundationBindingsUnavailable(
+                f"{what} materials carry no presentation"
+            )
+        try:
+            from dotmac_deployment_foundation import AttestationEnvelopeV2
+        except ImportError as exc:
+            raise FoundationBindingsUnavailable(
+                "dotmac-deployment-foundation is not installed in this "
+                "environment; execution bindings cannot be composed"
+            ) from exc
+        try:
+            candidate = AttestationEnvelopeV2.from_mapping(document["candidate"])
+            installed = AttestationEnvelopeV2.from_mapping(document["installed"])
+        except Exception as exc:
+            raise FoundationBindingsUnavailable(
+                f"{what} materials carry an unparsable attestation envelope"
+            ) from exc
+        return HostAdmissionObservation(
+            attempt_id=attempt_id,
+            presentation=presentation,
+            candidate=candidate,
+            installed=installed,
+        )
+
+    return _observe
+
+
+def execution_context_source(
+    path: str, context_type: type[Any]
+) -> Callable[[], object]:
+    """The production `execution_context` observer over startup materials.
+
+    The document's closed key set is exactly the installed Foundation
+    execution-context type's fields, and the value returned is that
+    exact type — the adapter refuses anything else by identity, so a
+    look-alike mapping can never stand in for observed facts.
+    """
+    what = f"execution_context observer ({EXECUTION_CONTEXT_MATERIALS_ENV})"
+
+    def _observe() -> object:
+        document = _read_materials_document(path, what=what)
+        if not dataclasses.is_dataclass(context_type):
+            raise FoundationBindingsUnavailable(
+                f"{what} has no typed execution context to construct"
+            )
+        _require_closed(
+            document,
+            what=what,
+            fields={field.name for field in dataclasses.fields(context_type)},
+        )
+        try:
+            return context_type(**document)
+        except Exception as exc:
+            raise FoundationBindingsUnavailable(
+                f"{what} materials do not construct the execution context"
+            ) from exc
+
+    return _observe
+
+
 def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
     """The declared entry-point factory. Zero-argument by contract.
 
     Startup materials contract (deployment facts, values never echoed):
     kernel `DATABASE_URL`/`PLATFORM_DATABASE_URL` build the kernel's
     single runtime, whose platform session factory supplies approval/
-    dispatch sessions. The `host_admission` and `execution_context`
-    observers have no production source in this assembly yet — they
-    belong to the runner composition that observes the rehearsal
-    target — so this factory currently refuses closed naming every
-    missing input. That refusal IS the gate working: discovery
-    surfaces it loudly on execute paths instead of admitting on
-    partial trust.
+    dispatch sessions; `HOST_ADMISSION_MATERIALS` and
+    `EXECUTION_CONTEXT_MATERIALS` name the observer documents the
+    runner lane deposited. Every missing input is named in one
+    refusal, and supplied observer materials are exercised once here
+    so a malformed document refuses at startup rather than at
+    admission. That refusal IS the gate working: discovery surfaces
+    it loudly on execute paths instead of admitting on partial trust.
     """
     env = os.environ if environ is None else environ
     missing: list[str] = [
         name for name in SESSION_MATERIAL_ENVS if not env.get(name, "").strip()
     ]
+    sessions: Callable[[], Session] | None = None
     if not missing:
         # Building the kernel runtime proves the materials compose at
         # startup (engines are lazy; no connection is opened), so the
         # refusal below names only what is genuinely absent.
-        _platform_sessions(env)
-    missing.extend(
-        [
-            "host_admission observer (no production source in this assembly)",
-            "execution_context observer (no production source in this assembly)",
-        ]
+        sessions = _platform_sessions(env)
+    admission_path = env.get(HOST_ADMISSION_MATERIALS_ENV, "").strip()
+    if not admission_path:
+        missing.append(
+            f"host_admission observer ({HOST_ADMISSION_MATERIALS_ENV} unset)"
+        )
+    context_path = env.get(EXECUTION_CONTEXT_MATERIALS_ENV, "").strip()
+    if not context_path:
+        missing.append(
+            f"execution_context observer ({EXECUTION_CONTEXT_MATERIALS_ENV} unset)"
+        )
+    if missing or sessions is None:
+        raise FoundationBindingsUnavailable(
+            "Foundation execution bindings cannot be composed at startup; "
+            "missing: " + "; ".join(missing)
+        )
+    # Prove the supplied materials parse into the exact typed values at
+    # startup; admission re-reads them fresh on every observation. The
+    # host-admission proof runs first: its document read names the
+    # missing materials input even in an environment where Foundation
+    # itself is not installed yet.
+    host_admission = host_admission_source(admission_path)
+    host_admission()
+    foundation = foundation_host_bindings()
+    execution_context = execution_context_source(
+        context_path, foundation.execution_context_type
     )
-    raise FoundationBindingsUnavailable(
-        "Foundation execution bindings cannot be composed at startup; "
-        "missing: " + "; ".join(missing)
+    execution_context()
+    return build_execution_bindings(
+        sessions=sessions,
+        host_admission=host_admission,
+        execution_context=execution_context,
+        foundation=foundation,
     )
