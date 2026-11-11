@@ -279,8 +279,8 @@ def host_admission_source(path: str) -> Callable[[], HostAdmissionObservation]:
     """The production `host_admission` observer over startup materials.
 
     The document is closed: `attempt_id` (UUID), `presentation`
-    (Control's own serialization, passed through untouched — Control
-    validates it at resolve), and the `candidate`/`installed`
+    (Control's own JSON mapping, parsed through its public presentation
+    type before resolve), and the `candidate`/`installed`
     attestation envelope documents, parsed only through Foundation's
     `AttestationEnvelopeV2.from_mapping`. Re-read on every observation
     so refreshed evidence is what admission verifies; every defect
@@ -301,11 +301,24 @@ def host_admission_source(path: str) -> Callable[[], HostAdmissionObservation]:
             raise FoundationBindingsUnavailable(
                 f"{what} materials carry no attempt id"
             ) from exc
-        presentation = document["presentation"]
-        if not isinstance(presentation, str) or not presentation.strip():
+        # Control resolves its own concrete presentation type. A text token or
+        # stringified JSON document is not that type and cannot be forwarded as
+        # if it had crossed the owner's schema boundary. Parsing is not signature
+        # verification; the genuine resolver retains that responsibility.
+        try:
+            from dotmac_deployment_control import HostAdmissionPresentationV1
+        except ImportError:
             raise FoundationBindingsUnavailable(
-                f"{what} materials carry no presentation"
-            )
+                "Control presentation parser is unavailable"
+            ) from None
+        try:
+            presentation = HostAdmissionPresentationV1.parse(document["presentation"])
+        except Exception:
+            # Control diagnostics may include supplied private fields. Neither
+            # the message nor an exception chain belongs in the startup refusal.
+            raise FoundationBindingsUnavailable(
+                f"{what} materials carry an unparsable presentation"
+            ) from None
         try:
             from dotmac_deployment_foundation import AttestationEnvelopeV2
         except ImportError as exc:

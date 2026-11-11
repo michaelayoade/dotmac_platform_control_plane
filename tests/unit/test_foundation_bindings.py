@@ -13,6 +13,7 @@ Foundation's own validation, which hosted conformance/Gate 3 owns.
 from __future__ import annotations
 
 import base64
+import json
 import sys
 import tomllib
 from datetime import UTC, datetime
@@ -24,6 +25,10 @@ from uuid import uuid4
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from dotmac_deployment_control import (
+    HostAdmissionPresentationStatementV1,
+    HostAdmissionPresentationV1,
+)
 from sqlalchemy.orm import Session
 
 from vendor_cp.deployment.foundation_bindings import (
@@ -38,8 +43,12 @@ from vendor_cp.deployment.foundation_bindings import (
     host_admission_source,
     trust_policy_from_resolved_context,
 )
+from vendor_cp.deployment.foundation_execution_approval import (
+    compose_approved_foundation_v3_providers,
+)
 from vendor_cp.deployment.host_admission_adapter import (
     FoundationHostV3Bindings,
+    FoundationV3Sources,
     HostAdmissionObservation,
 )
 
@@ -243,10 +252,26 @@ def _stub_envelope(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     return seen
 
 
+def _presentation_document(presentation_id: str = "synthetic-first") -> dict[str, Any]:
+    # Encoded synthetic bytes satisfy the wire shape only, never authenticity.
+    return HostAdmissionPresentationV1(
+        statement=HostAdmissionPresentationStatementV1(
+            presentation_id=presentation_id,
+            key_id="synthetic-key",
+            dispatch_id="synthetic-dispatch",
+            candidate_attestation_envelope_digest="sha256:" + "a" * 64,
+            installed_attestation_envelope_digest="sha256:" + "b" * 64,
+            issued_at=datetime(2026, 11, 7, tzinfo=UTC),
+            expires_at=datetime(2026, 11, 7, 0, 5, tzinfo=UTC),
+        ),
+        signature=base64.urlsafe_b64encode(bytes(64)).decode("ascii").rstrip("="),
+    ).as_mapping()
+
+
 def _admission_document(attempt_id: object) -> dict[str, Any]:
     return {
         "attempt_id": str(attempt_id),
-        "presentation": "control-presentation",
+        "presentation": _presentation_document(),
         "candidate": {"schema": "candidate-envelope"},
         "installed": {"schema": "installed-envelope"},
     }
@@ -255,8 +280,6 @@ def _admission_document(attempt_id: object) -> dict[str, Any]:
 def test_host_admission_source_reads_materials_fresh_and_typed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import json
-
     seen = _stub_envelope(monkeypatch)
     path = tmp_path / "admission.json"
     first, second = uuid4(), uuid4()
@@ -266,12 +289,131 @@ def test_host_admission_source_reads_materials_fresh_and_typed(
     observed = source()
     assert isinstance(observed, HostAdmissionObservation)
     assert observed.attempt_id == first
-    assert observed.presentation == "control-presentation"
+    assert type(observed.presentation) is HostAdmissionPresentationV1
+    assert observed.presentation.as_mapping() == _presentation_document()
     assert observed.candidate.document == {"schema": "candidate-envelope"}  # type: ignore[attr-defined]
     assert seen == [{"schema": "candidate-envelope"}, {"schema": "installed-envelope"}]
 
-    path.write_text(json.dumps(_admission_document(second)), encoding="utf-8")
-    assert source().attempt_id == second
+    refreshed = _admission_document(second)
+    refreshed["presentation"] = _presentation_document("synthetic-second")
+    refreshed["presentation"]["signature"] = (
+        base64.urlsafe_b64encode(bytes([1]) * 64).decode("ascii").rstrip("=")
+    )
+    path.write_text(json.dumps(refreshed), encoding="utf-8")
+    next_observed = source()
+    assert next_observed.attempt_id == second
+    assert type(next_observed.presentation) is HostAdmissionPresentationV1
+    assert next_observed.presentation.as_mapping() == refreshed["presentation"]
+    assert next_observed.presentation != observed.presentation
+
+
+def test_materials_observer_passes_real_control_type_to_fixed_resolver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import dotmac_deployment_control as control
+
+    _stub_envelope(monkeypatch)
+    attempt_id = uuid4()
+    path = tmp_path / "admission.json"
+    path.write_text(json.dumps(_admission_document(attempt_id)), encoding="utf-8")
+    observed: list[HostAdmissionPresentationV1] = []
+
+    class _ResolvedBoundaryReached(Exception):
+        pass
+
+    def resolve(_db: Session, *, attempt_id: object, presentation: object) -> object:
+        assert attempt_id == expected_attempt
+        assert type(presentation) is HostAdmissionPresentationV1
+        assert presentation.as_mapping() == _presentation_document()
+        observed.append(presentation)
+        # Stop at the resolver boundary: this does not certify admission.
+        raise _ResolvedBoundaryReached
+
+    expected_attempt = attempt_id
+    monkeypatch.setattr(control, "resolve_host_admission_context", resolve)
+    providers = compose_approved_foundation_v3_providers(
+        foundation=_fake_foundation(),
+        sources=FoundationV3Sources(
+            sessions=lambda: Session(),
+            host_admission=host_admission_source(str(path)),
+            execution_context=lambda: object(),
+            clock=lambda: datetime(2026, 11, 7, tzinfo=UTC),
+        ),
+    )
+    with pytest.raises(_ResolvedBoundaryReached):
+        providers.host_source.admit_host_source()
+    assert len(observed) == 1
+
+
+@pytest.mark.parametrize(
+    "presentation",
+    [
+        "SECRET-MARKER",
+        json.dumps(_presentation_document()),
+        None,
+        [],
+        42,
+        {},
+        {"statement": _presentation_document()["statement"]},
+        {**_presentation_document(), "extra": "SECRET-MARKER"},
+        {**_presentation_document(), "statement": "SECRET-MARKER"},
+        {**_presentation_document(), "signature": "SECRET-MARKER=="},
+        {**_presentation_document(), "signature": {"secret": "SECRET-MARKER"}},
+    ],
+)
+def test_host_admission_source_refuses_malformed_presentation_without_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, presentation: object
+) -> None:
+    import traceback
+
+    seen = _stub_envelope(monkeypatch)
+    document = {**_admission_document(uuid4()), "presentation": presentation}
+    path = tmp_path / "admission.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(FoundationBindingsUnavailable, match="presentation") as caught:
+        host_admission_source(str(path))()
+    assert "SECRET-MARKER" not in "".join(traceback.format_exception(caught.value))
+    assert str(tmp_path) not in str(caught.value)
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("extra", "SECRET-MARKER"),
+        ("schema", "SECRET-MARKER"),
+        ("version", True),
+        ("purpose", "SECRET-MARKER"),
+        ("audience", "SECRET-MARKER"),
+        ("presentation_id", {"secret": "SECRET-MARKER"}),
+        ("candidate_attestation_envelope_digest", "SECRET-MARKER"),
+        ("issued_at", "SECRET-MARKER"),
+        ("expires_at", None),
+    ],
+)
+def test_host_admission_source_delegates_nested_schema_refusals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, field: str, value: object
+) -> None:
+    _stub_envelope(monkeypatch)
+    document = _admission_document(uuid4())
+    document["presentation"]["statement"][field] = value
+    path = tmp_path / "admission.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(FoundationBindingsUnavailable, match="presentation") as caught:
+        host_admission_source(str(path))()
+    assert "SECRET-MARKER" not in str(caught.value)
+
+
+def test_host_admission_source_refuses_missing_nested_statement_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_envelope(monkeypatch)
+    document = _admission_document(uuid4())
+    del document["presentation"]["statement"]["key_id"]
+    path = tmp_path / "admission.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(FoundationBindingsUnavailable, match="presentation"):
+        host_admission_source(str(path))()
 
 
 @pytest.mark.parametrize(
