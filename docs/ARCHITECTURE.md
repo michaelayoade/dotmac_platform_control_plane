@@ -683,6 +683,31 @@ subjects. This source contract does not revive the stopped issuer programme
 or authorize allocation, freeze, candidate build/publication or governed
 execution (ADR-0013, 2026-11-07 amendment).
 
+## Foundation startup presentation boundary — 2026-11-11
+
+`vendor_cp.deployment.foundation_bindings.host_admission_source` reads a closed
+private document with `attempt_id`, `presentation`, `candidate` and `installed`.
+The presentation member is Control's JSON mapping, not a text token or a
+stringified document. CP parses it through the public
+`dotmac_deployment_control.HostAdmissionPresentationV1.parse` owner before
+constructing `HostAdmissionObservation`. The resolver receives that typed object;
+a parsed presentation still needs Control's real signature, standing and context
+checks. CP adds no signing, canonicalization or independent authorization rule.
+
+String presentations and malformed mappings refuse with a fixed diagnostic
+that contains no supplied value. Candidate and installed envelopes continue
+through Foundation's public parser. The source rereads the complete material
+document on every observation, so this conversion cannot cache an earlier
+presentation. Execution-context fields and the fixed binding factory are
+unchanged. Hosted source conformance must use Control's actual published type,
+not only an object double that would also accept the original text.
+
+This corrects a source interface mismatch. No production material depositor,
+genuine presentation, attester or custody setup is supplied. The two material
+paths and accepted binding must still be installed in the same environment as
+the exact Foundation candidate. No Foundation dependency/pin, release, image
+publication, installed runtime activation or operational approval follows.
+
 ## The installed operator CLI
 
 The operator surface is a console script on an installed wheel:
