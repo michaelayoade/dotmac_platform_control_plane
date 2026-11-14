@@ -31,6 +31,7 @@ from dotmac_deployment_control import (
 )
 from sqlalchemy.orm import Session
 
+from vendor_cp.deployment import foundation_bindings as bindings_module
 from vendor_cp.deployment.foundation_bindings import (
     ENTRY_POINT_NAME,
     EXECUTION_CONTEXT_MATERIALS_ENV,
@@ -51,6 +52,7 @@ from vendor_cp.deployment.host_admission_adapter import (
     FoundationV3Sources,
     HostAdmissionObservation,
 )
+from vendor_cp.deployment.target_refusals import TargetRefusal
 
 
 def _raw_public(key: Ed25519PrivateKey) -> bytes:
@@ -206,29 +208,51 @@ def test_build_execution_bindings_wires_the_approved_pair(
     )
 
 
-def test_factory_refuses_closed_naming_missing_startup_inputs() -> None:
+_SCOPED_DSN = "postgresql+psycopg://run_consume:pw@db.example.test:5432/cp"
+_ALL_INPUTS = {
+    "DISPATCH_CONSUMPTION_DATABASE_URL": _SCOPED_DSN,
+    HOST_ADMISSION_MATERIALS_ENV: "/nonexistent/admission.json",
+    EXECUTION_CONTEXT_MATERIALS_ENV: "/nonexistent/context.json",
+    "AUTHORIZATION_VERIFICATION_IDENTITY": "/nonexistent/authorization.json",
+    "DISPATCH_VERIFICATION_IDENTITY": "/nonexistent/dispatch.json",
+    "RELEASE_EVIDENCE_VERIFICATION_IDENTITY": "/nonexistent/evidence.json",
+    "RELEASE_EVIDENCE_REPOSITORY": "example-org/example-repo",
+}
+
+
+def test_factory_without_the_scoped_dsn_refuses_typed() -> None:
     with pytest.raises(FoundationBindingsUnavailable) as caught:
         bindings(environ={})
-    message = str(caught.value)
-    assert "DATABASE_URL" in message
-    assert "PLATFORM_DATABASE_URL" in message
-    assert "host_admission observer" in message
-    assert "execution_context observer" in message
+    assert caught.value.code is TargetRefusal.CONSUMPTION_DSN_MISSING
+    assert "DISPATCH_CONSUMPTION_DATABASE_URL" in str(caught.value)
 
 
-def test_factory_with_session_materials_refuses_on_observers_only() -> None:
+@pytest.mark.parametrize("general", ["DATABASE_URL", "PLATFORM_DATABASE_URL"])
+def test_factory_refuses_a_host_carrying_a_general_platform_dsn(general: str) -> None:
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        bindings(environ={**_ALL_INPUTS, general: _SCOPED_DSN})
+    assert caught.value.code is TargetRefusal.GENERAL_DSN_PRESENT
+    assert "db.example.test" not in str(caught.value)
+
+
+def test_factory_with_the_scoped_dsn_names_every_other_missing_input() -> None:
     with pytest.raises(FoundationBindingsUnavailable) as caught:
         bindings(
-            environ={
-                "DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:1/cp",
-                "PLATFORM_DATABASE_URL": ("postgresql+psycopg://u:p@127.0.0.1:1/cp"),
-            }
+            environ={"DISPATCH_CONSUMPTION_DATABASE_URL": _SCOPED_DSN},
         )
     message = str(caught.value)
+    for name in (
+        HOST_ADMISSION_MATERIALS_ENV,
+        EXECUTION_CONTEXT_MATERIALS_ENV,
+        "AUTHORIZATION_VERIFICATION_IDENTITY",
+        "DISPATCH_VERIFICATION_IDENTITY",
+        "RELEASE_EVIDENCE_VERIFICATION_IDENTITY",
+        "RELEASE_EVIDENCE_REPOSITORY",
+    ):
+        assert name in message
     assert "DATABASE_URL" not in message
-    assert "host_admission observer" in message
     # DSN values themselves are never echoed.
-    assert "127.0.0.1" not in message
+    assert "db.example.test" not in message
 
 
 # ── observer startup materials ──────────────────────────────────────────────
@@ -468,16 +492,149 @@ def test_factory_names_observer_material_envs_without_echoing_paths(
     with pytest.raises(FoundationBindingsUnavailable) as caught:
         bindings(
             environ={
-                "DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:1/cp",
-                "PLATFORM_DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:1/cp",
+                **_ALL_INPUTS,
                 HOST_ADMISSION_MATERIALS_ENV: str(tmp_path / "absent-a.json"),
                 EXECUTION_CONTEXT_MATERIALS_ENV: str(tmp_path / "absent-c.json"),
             }
         )
     message = str(caught.value)
-    assert HOST_ADMISSION_MATERIALS_ENV in message
-    assert "host_admission observer" in message
     assert str(tmp_path) not in message
+
+
+# ── target-side composition order and wiring ────────────────────────────────
+
+
+def _stub_execution_bindings(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    recorded: dict[str, Any] = {}
+
+    class _Bindings:
+        def __init__(self, **kwargs: Any) -> None:
+            recorded.update(kwargs)
+
+    package = ModuleType("dotmac_deployment_foundation")
+    submodule = ModuleType("dotmac_deployment_foundation.execution_bindings")
+    submodule.ExecutionBindings = _Bindings  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "dotmac_deployment_foundation", package)
+    monkeypatch.setitem(
+        sys.modules, "dotmac_deployment_foundation.execution_bindings", submodule
+    )
+    return recorded
+
+
+def _compose(
+    monkeypatch: pytest.MonkeyPatch, *, refuse: str | None = None
+) -> tuple[list[str], dict[str, Any]]:
+    """Patch every collaborator of `bindings()`; record the call order."""
+    recorded = _stub_execution_bindings(monkeypatch)
+    calls: list[str] = []
+    marker = object()
+    sessions = lambda: Session()  # noqa: E731
+
+    def step(name: str, result: Any = None) -> Any:
+        def run(*_a: Any, **_k: Any) -> Any:
+            calls.append(name)
+            if refuse == name:
+                raise FoundationBindingsUnavailable(
+                    name, code=TargetRefusal.UNSPECIFIED
+                )
+            return result
+
+        return run
+
+    monkeypatch.setattr(
+        bindings_module, "consumption_sessions", step("sessions", sessions)
+    )
+    monkeypatch.setattr(bindings_module, "prove_scoped_role", step("prove_role"))
+    monkeypatch.setattr(
+        bindings_module, "require_clock_skew_within", step("skew", None)
+    )
+    monkeypatch.setattr(
+        bindings_module, "install_control_verification", step("install_control")
+    )
+    monkeypatch.setattr(
+        bindings_module,
+        "release_evidence_trust",
+        step("evidence", ("policy", "verifier")),
+    )
+    monkeypatch.setattr(
+        bindings_module,
+        "host_admission_source",
+        lambda _p: lambda: calls.append("admission_materials") or marker,
+    )
+    monkeypatch.setattr(
+        bindings_module,
+        "execution_context_source",
+        lambda _p, _t: lambda: calls.append("context_materials") or marker,
+    )
+    monkeypatch.setattr(bindings_module, "foundation_host_bindings", _fake_foundation)
+    return calls, recorded
+
+
+def test_bindings_composes_target_side_in_a_fail_closed_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls, recorded = _compose(monkeypatch)
+    result = bindings(environ=_ALL_INPUTS)
+    assert result.provider == ENTRY_POINT_NAME  # type: ignore[attr-defined]
+    # Static proofs first, then the first database connection, role proof
+    # before the clock check, and Control security only on the proven clock.
+    assert calls == [
+        "evidence",
+        "admission_materials",
+        "context_materials",
+        "sessions",
+        "prove_role",
+        "skew",
+        "install_control",
+    ]
+    from vendor_cp.deployment.target_effects import (
+        build_target_effects,
+        build_target_exposure_effects,
+    )
+
+    assert recorded["build_effects"] is build_target_effects
+    assert recorded["build_exposure_effects"] is build_target_exposure_effects
+    assert recorded["evidence_policy"] == "policy"
+    assert recorded["evidence_verifier"] == "verifier"
+    assert recorded["deployment_admission_provider"] is not None
+    assert recorded["authorization_v3_provider"] is not None
+
+
+@pytest.mark.parametrize(
+    ("refusing", "never_reached"),
+    [
+        ("evidence", {"sessions", "prove_role", "skew", "install_control"}),
+        ("prove_role", {"skew", "install_control"}),
+        ("skew", {"install_control"}),
+        ("install_control", set()),
+    ],
+)
+def test_a_refusing_stage_stops_composition_before_later_stages(
+    monkeypatch: pytest.MonkeyPatch, refusing: str, never_reached: set[str]
+) -> None:
+    calls, recorded = _compose(monkeypatch, refuse=refusing)
+    with pytest.raises(FoundationBindingsUnavailable):
+        bindings(environ=_ALL_INPUTS)
+    assert not never_reached & set(calls)
+    assert recorded == {}
+
+
+def test_the_freshness_clock_handed_to_the_providers_is_database_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vendor_cp.deployment.database_clock import DatabaseClock
+
+    _compose(monkeypatch)
+    captured: dict[str, Any] = {}
+    real = bindings_module.build_execution_bindings
+
+    def spy(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(bindings_module, "build_execution_bindings", spy)
+    bindings(environ=_ALL_INPUTS)
+    assert isinstance(captured["clock"], DatabaseClock)
 
 
 def test_entry_point_declared_exactly_once_with_matching_name() -> None:

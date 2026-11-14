@@ -25,6 +25,16 @@ refuses at startup and the publication gate stays shut. That refusal
 IS the gate working: discovery surfaces it loudly on execute paths
 instead of admitting on partial trust.
 
+Placement (Gate 2 a2, Michael's Q2 ruling and E3 audit): the bindings run ON
+the target, with Foundation's own host effects (`target_effects`), Control's
+verification security installed at startup (`control_security`), a release-
+evidence trust policy (`release_evidence_policy`), CP database time as the
+freshness clock (`database_clock`) and a SEPARATE scoped dispatch-consumption
+credential (`consumption_scope`; grants in
+`docs/design/scoped-consumption-role.md`). A host that carries a general CP
+platform database credential refuses. The launcher-side materials
+producer/depositor is not part of this module.
+
 `dotmac_deployment_foundation` is deliberately not a dependency of this
 assembly (pyproject). Every Foundation import below is lazy, inside the
 function that needs it, so importing this module without Foundation
@@ -46,6 +56,22 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from vendor_cp.deployment.consumption_scope import (
+    consumption_sessions,
+    prove_scoped_role,
+    scoped_consumption_dsn,
+)
+from vendor_cp.deployment.control_security import (
+    AUTHORIZATION_IDENTITY_ENV,
+    DISPATCH_IDENTITY_ENV,
+    install_control_verification,
+)
+from vendor_cp.deployment.database_clock import (
+    SKEW_LIMIT_ENV,
+    DatabaseClock,
+    parse_skew_limit,
+    require_clock_skew_within,
+)
 from vendor_cp.deployment.foundation_execution_approval import (
     compose_approved_foundation_v3_providers,
 )
@@ -54,10 +80,22 @@ from vendor_cp.deployment.host_admission_adapter import (
     FoundationV3Sources,
     HostAdmissionObservation,
 )
+from vendor_cp.deployment.release_evidence_policy import (
+    RELEASE_EVIDENCE_IDENTITY_ENV,
+    RELEASE_EVIDENCE_REPOSITORY_ENV,
+    release_evidence_trust,
+)
+from vendor_cp.deployment.target_effects import (
+    build_target_effects,
+    build_target_exposure_effects,
+)
+from vendor_cp.deployment.target_refusals import (
+    FoundationBindingsUnavailable,
+    TargetRefusal,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - checker-only; runtime stays lazy
     from dotmac_deployment_foundation.execution_bindings import ExecutionBindings
-    from dotmac_kernel.session_runtime import DatabaseRuntime
 
 __all__ = [
     "ENTRY_POINT_NAME",
@@ -77,20 +115,11 @@ __all__ = [
 #: Foundation reserves `compose-host` for its in-package provider.
 ENTRY_POINT_NAME: Final = "dotmac-control-plane"
 
-#: Kernel settings materials the platform sessions are built from. The
-#: kernel owns the single engine (D1): this assembly never constructs
-#: one. Values are deployment facts, never echoed.
-SESSION_MATERIAL_ENVS: Final = ("DATABASE_URL", "PLATFORM_DATABASE_URL")
-
 #: Observer startup materials. Each names a JSON document the runner
 #: lane's launcher deposits before startup; the values are paths to
 #: deployment facts, and the documents' contents are never echoed.
 HOST_ADMISSION_MATERIALS_ENV: Final = "HOST_ADMISSION_MATERIALS"
 EXECUTION_CONTEXT_MATERIALS_ENV: Final = "EXECUTION_CONTEXT_MATERIALS"
-
-
-class FoundationBindingsUnavailable(RuntimeError):
-    """Startup composition cannot be completed. Sanitized: names only."""
 
 
 class Ed25519AttestationVerifier:
@@ -197,6 +226,10 @@ def build_execution_bindings(
     execution_context: Callable[[], object],
     clock: Callable[[], datetime] | None = None,
     foundation: FoundationHostV3Bindings | None = None,
+    build_effects: Callable[..., Any] | None = None,
+    build_exposure_effects: Callable[..., Any] | None = None,
+    evidence_policy: Any = None,
+    evidence_verifier: Any = None,
 ) -> ExecutionBindings:
     """Compose the approved provider pair into Foundation bindings.
 
@@ -227,34 +260,11 @@ def build_execution_bindings(
         provider=ENTRY_POINT_NAME,
         deployment_admission_provider=pair.host_source,
         authorization_v3_provider=pair.execution_authority,
+        build_effects=build_effects,
+        build_exposure_effects=build_exposure_effects,
+        evidence_policy=evidence_policy,
+        evidence_verifier=evidence_verifier,
     )
-
-
-#: The kernel runtime built from startup materials, held for the life of
-#: the process: its engines back the session factory the adapter uses.
-_RUNTIME: DatabaseRuntime | None = None
-
-
-def _platform_sessions(env: Mapping[str, str]) -> Callable[[], Session]:
-    """The kernel runtime's raw platform session factory (D1).
-
-    Engines are constructed only inside `DatabaseRuntime` — vendor code
-    never builds one — and the kernel's legacy db module is a retiring
-    surface no new code may import. `platform_session_factory` yields the fresh
-    raw Session the adapter contract requires (the adapter commits
-    each phase and closes it itself — never the commit-on-exit
-    `platform_session` wrapper). Engine construction is lazy; no
-    connection opens here.
-    """
-    global _RUNTIME
-    if _RUNTIME is None:
-        from dotmac_kernel.session_runtime import DatabaseRuntime
-
-        _RUNTIME = DatabaseRuntime.from_urls(
-            database_url=env["DATABASE_URL"],
-            platform_database_url=env["PLATFORM_DATABASE_URL"],
-        )
-    return _RUNTIME.platform_session_factory
 
 
 def _read_materials_document(path: str, *, what: str) -> dict[str, Any]:
@@ -379,27 +389,31 @@ def execution_context_source(
 def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
     """The declared entry-point factory. Zero-argument by contract.
 
-    Startup materials contract (deployment facts, values never echoed):
-    kernel `DATABASE_URL`/`PLATFORM_DATABASE_URL` build the kernel's
-    single runtime, whose platform session factory supplies approval/
-    dispatch sessions; `HOST_ADMISSION_MATERIALS` and
-    `EXECUTION_CONTEXT_MATERIALS` name the observer documents the
-    runner lane deposited. Every missing input is named in one
-    refusal, and supplied observer materials are exercised once here
-    so a malformed document refuses at startup rather than at
-    admission. That refusal IS the gate working: discovery surfaces
-    it loudly on execute paths instead of admitting on partial trust.
+    TARGET-SIDE composition (Gate 2 a2, Michael's Q2/E3 rulings): Foundation and
+    these bindings run on the host being mutated. Startup materials (values
+    never echoed):
+
+    * `DISPATCH_CONSUMPTION_DATABASE_URL`: the short-lived, scoped consumption
+      role. A host carrying `DATABASE_URL` or `PLATFORM_DATABASE_URL` refuses;
+    * `HOST_ADMISSION_MATERIALS` / `EXECUTION_CONTEXT_MATERIALS`: the observer
+      documents the launcher deposited;
+    * `AUTHORIZATION_VERIFICATION_IDENTITY` / `DISPATCH_VERIFICATION_IDENTITY`:
+      the pinned public identities Control's verification is installed with;
+    * `RELEASE_EVIDENCE_VERIFICATION_IDENTITY` / `RELEASE_EVIDENCE_REPOSITORY`:
+      the release-evidence trust policy;
+    * optional `DISPATCH_CLOCK_SKEW_LIMIT_SECONDS`.
+
+    Every missing name is listed in one refusal. Then, in order: the role is
+    PROVEN narrow by the catalogue, this host's clock is checked against CP
+    database time, Control's verification security is installed on that same
+    database clock, and the observers are exercised once so a malformed
+    document refuses at startup rather than at admission. That refusal IS the
+    gate working: discovery surfaces it loudly instead of admitting on partial
+    trust.
     """
     env = os.environ if environ is None else environ
-    missing: list[str] = [
-        name for name in SESSION_MATERIAL_ENVS if not env.get(name, "").strip()
-    ]
-    sessions: Callable[[], Session] | None = None
-    if not missing:
-        # Building the kernel runtime proves the materials compose at
-        # startup (engines are lazy; no connection is opened), so the
-        # refusal below names only what is genuinely absent.
-        sessions = _platform_sessions(env)
+    dsn = scoped_consumption_dsn(env)
+    missing: list[str] = []
     admission_path = env.get(HOST_ADMISSION_MATERIALS_ENV, "").strip()
     if not admission_path:
         missing.append(
@@ -410,16 +424,23 @@ def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
         missing.append(
             f"execution_context observer ({EXECUTION_CONTEXT_MATERIALS_ENV} unset)"
         )
-    if missing or sessions is None:
+    for name in (
+        AUTHORIZATION_IDENTITY_ENV,
+        DISPATCH_IDENTITY_ENV,
+        RELEASE_EVIDENCE_IDENTITY_ENV,
+        RELEASE_EVIDENCE_REPOSITORY_ENV,
+    ):
+        if not env.get(name, "").strip():
+            missing.append(f"verification input ({name} unset)")
+    if missing:
         raise FoundationBindingsUnavailable(
             "Foundation execution bindings cannot be composed at startup; "
-            "missing: " + "; ".join(missing)
+            "missing: " + "; ".join(missing),
+            code=TargetRefusal.UNSPECIFIED,
         )
-    # Prove the supplied materials parse into the exact typed values at
-    # startup; admission re-reads them fresh on every observation. The
-    # host-admission proof runs first: its document read names the
-    # missing materials input even in an environment where Foundation
-    # itself is not installed yet.
+    limit = parse_skew_limit(env.get(SKEW_LIMIT_ENV))
+    # Everything that needs no connection is proved before the first one.
+    evidence_policy, evidence_verifier = release_evidence_trust(env)
     host_admission = host_admission_source(admission_path)
     host_admission()
     foundation = foundation_host_bindings()
@@ -427,9 +448,20 @@ def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
         context_path, foundation.execution_context_type
     )
     execution_context()
+
+    sessions = consumption_sessions(dsn)
+    prove_scoped_role(sessions)
+    clock = DatabaseClock(sessions)
+    require_clock_skew_within(clock, limit=limit)
+    install_control_verification(env, clock=clock)
     return build_execution_bindings(
         sessions=sessions,
         host_admission=host_admission,
         execution_context=execution_context,
+        clock=clock,
         foundation=foundation,
+        build_effects=build_target_effects,
+        build_exposure_effects=build_target_exposure_effects,
+        evidence_policy=evidence_policy,
+        evidence_verifier=evidence_verifier,
     )
