@@ -575,7 +575,8 @@ def test_bindings_composes_target_side_in_a_fail_closed_order(
 ) -> None:
     calls, recorded = _compose(monkeypatch)
     result = bindings(environ=_ALL_INPUTS)
-    assert result.provider == ENTRY_POINT_NAME  # type: ignore[attr-defined]
+    assert result is not None
+    assert recorded["provider"] == ENTRY_POINT_NAME
     # Static proofs first, then the first database connection, role proof
     # before the clock check, and Control security only on the proven clock.
     assert calls == [
