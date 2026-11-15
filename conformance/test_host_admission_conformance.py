@@ -18,17 +18,26 @@ verification logic and reject tampering, but are NOT Ed25519, signer-custody,
 OIDC, live host authentication, deployment or end-to-end authorization proof.
 """
 
+# ruff: noqa: E501  (the scoped-role and transit cases carry long literal SQL/URL tables)
+
 from __future__ import annotations
 
 import base64
+import contextlib
 import dataclasses
 import hashlib
 import hmac
+import io
 import json
 import os
+import secrets
+import tempfile
 import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -100,6 +109,7 @@ from dotmac_deployment_control.attestation_trust_registry import (
 from dotmac_deployment_control.digests import PublicKeyFingerprintV1
 from dotmac_deployment_control.models import (
     AttestationEnrolment,
+    DeploymentPlan,
     Rollout,
     RolloutAttempt,
 )
@@ -131,9 +141,17 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from conformance.openbao_support import OpenBao, UnixRelay
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.approvals_authority import bare_content_hash
-from vendor_cp.deployment import consumption_role_spec, consumption_scope
+from vendor_cp.deployment import (
+    consumption_role_spec,
+    consumption_scope,
+    consumption_watchdog,
+    materials_producer,
+    transit_custody,
+)
+from vendor_cp.deployment import foundation_bindings as bindings_module
 from vendor_cp.deployment import foundation_execution_approval as foundation_approval
 
 # The LEAF module only -- see its own docstring and
@@ -149,6 +167,11 @@ from vendor_cp.deployment.host_admission_adapter import (
     HostAdmissionAdapterUsageError,
     HostAdmissionObservation,
     compose_foundation_v3_providers,
+)
+from vendor_cp.deployment.verification_identities import (
+    AuthorizationEd25519Verifier,
+    DispatchEd25519Verifier,
+    PinnedVerificationIdentity,
 )
 
 # No pytestmark skipif here. `conformance/conftest.py`'s `pytest_configure`
@@ -632,6 +655,7 @@ def _build_admission_coordinate(
     *,
     now: datetime,
     genuine_approval: bool = False,
+    external: Any = None,
 ) -> _AdmissionCoordinate:
     # Every identity below is suffixed with a fresh per-call token. The
     # commands this function calls (register_target, enrol_host_admission_
@@ -649,14 +673,23 @@ def _build_admission_coordinate(
     target = _register_target(db)
     _set_desired(db, target.id)
     db.commit()
-    plan = (
-        _genuine_approved_plan(db, target.id)
-        if genuine_approval
-        else _approved_plan(db, target.id)
-    )
+    if external is not None:
+        # The real operator path: propose, open, a real Approvals decision and
+        # approve through the producer commands (E6 B1).
+        plan = external.prepare(db, target)
+    else:
+        plan = (
+            _genuine_approved_plan(db, target.id)
+            if genuine_approval
+            else _approved_plan(db, target.id)
+        )
     db.commit()
     authorization_signer = _AuthorizationSigner()
-    if genuine_approval:
+    if external is not None:
+        # Rollout and dispatch are issued by `materials_producer issue` with
+        # transit-signed envelopes; the doubles below are not used.
+        rollout = SimpleNamespace(id=external.issue(db, plan))
+    elif genuine_approval:
         rollout = foundation_approval.request_foundation_rollout(
             db,
             command_id=_cmd(),
@@ -674,13 +707,14 @@ def _build_admission_coordinate(
         if genuine_approval
         else dispatch_attempt
     )
-    dispatch_owner(
-        db,
-        command_id=_cmd(),
-        rollout_id=rollout.id,
-        verifier=_AuthorizationVerifier(authorization_signer),
-        dispatch_signer=dispatch_signer,
-    )
+    if external is None:
+        dispatch_owner(
+            db,
+            command_id=_cmd(),
+            rollout_id=rollout.id,
+            verifier=_AuthorizationVerifier(authorization_signer),
+            dispatch_signer=dispatch_signer,
+        )
     db.commit()
     stored_dispatch = control_service._stored_dispatch_coordinate(
         db, _latest_attempt_id(db, rollout.id)
@@ -882,8 +916,16 @@ def _build_admission_coordinate(
 
     clock = _AdmissionClock(now)
     install_foundation_consumption_security(
-        authorization_verifier=_AuthorizationVerifier(authorization_signer),
-        dispatch_verifier=_DispatchVerifier(dispatch_signer),
+        authorization_verifier=(
+            external.authorization_verifier
+            if external is not None
+            else _AuthorizationVerifier(authorization_signer)
+        ),
+        dispatch_verifier=(
+            external.dispatch_verifier
+            if external is not None
+            else _DispatchVerifier(dispatch_signer)
+        ),
         clock=clock,
     )
     # Expected business facts come from Control's owning rows, not from the
@@ -1904,13 +1946,16 @@ def test_real_approved_cp_v3_lifecycle(db: Session, monkeypatch, scenario: str) 
 
 # ── The scoped consumption role, proven against a real database ─────────────
 #
-# E6 review R1/R2/R3/R4/R11. The role is created from the EXACT statements
-# `consumption_role_spec` renders (the same text the grants document embeds), in
-# this job's disposable database only. Control's real consumption path then runs
-# AS that role, so a missing or surplus grant fails here rather than in the one
-# granted image's first real run.
+# E6 review R1-R5, R11 and the transit/RLS design. The role, its limits and its
+# ledger policies are created from the EXACT statements `consumption_role_spec`
+# renders (the same text the grants document embeds), in this job's disposable
+# database only. Control's real consumption path then runs AS that role under the
+# per-run row level security, so a missing or surplus grant, or a policy that
+# refuses the legitimate insert, fails here rather than in the one granted image's
+# first real run.
 
 CONFORMANCE_ADMIN_DATABASE_URL = os.environ.get("CONFORMANCE_ADMIN_DATABASE_URL")
+_LEDGER_RELATION = "public.platform_idempotency_records"
 
 
 def _admin_engine() -> Any:
@@ -1921,28 +1966,309 @@ def _admin_engine() -> Any:
     return create_engine(CONFORMANCE_ADMIN_DATABASE_URL, isolation_level="AUTOCOMMIT")
 
 
-def _create_run_role(admin: Any) -> str:
-    role = f"cp_run_{uuid.uuid4().hex[:10]}"
+def _run_statements(admin: Any, statements: Any) -> None:
+    """Run rendered SQL as written. A failure inside the rendered transaction is
+    rolled back before it is re-raised, so the connection is never left aborted."""
     with admin.connect() as connection:
-        for statement in consumption_role_spec.creation_sql(
+        try:
+            for statement in statements:
+                connection.exec_driver_sql(statement)
+        except Exception:
+            connection.exec_driver_sql("ROLLBACK")
+            raise
+
+
+def _guard_reset(admin: Any) -> None:
+    """Leave the ledger exactly as Kernel ships it, whatever an earlier case did."""
+    with admin.connect() as connection:
+        connection.exec_driver_sql(
+            f"DROP POLICY IF EXISTS {consumption_scope.GUARD_POLICY} ON {_LEDGER_RELATION}"
+        )
+        connection.exec_driver_sql(
+            f"ALTER TABLE {_LEDGER_RELATION} DISABLE ROW LEVEL SECURITY"
+        )
+
+
+def _create_run_role(admin: Any, dispatch_id: str) -> tuple[str, str]:
+    """Guard on, then the role: returns `(role, scram verifier)`."""
+    role = f"cp_run_{uuid.uuid4().hex[:10]}"
+    verifier = consumption_role_spec.scram_verifier(secrets.token_urlsafe(32))
+    _run_statements(admin, consumption_role_spec.guard_enable_sql())
+    _run_statements(
+        admin,
+        consumption_role_spec.creation_sql(
             role,
-            password="disposable-test-only",  # noqa: S106 - disposable CI role
+            dispatch_id=dispatch_id,
+            scram_verifier=verifier,
             valid_until=datetime.now(UTC) + timedelta(hours=1),
-        ):
-            connection.execute(text(statement))
-    return role
+        ),
+    )
+    return role, verifier
+
+
+def _teardown_run_role(admin: Any, role: str) -> None:
+    """Best-effort full teardown (every step attempted), then the guard off."""
+    for statement in consumption_role_spec.revocation_sql(role):
+        with contextlib.suppress(Exception):
+            with admin.connect() as connection:
+                connection.exec_driver_sql(statement)
+    _guard_reset(admin)
 
 
 def _role_url(role: str) -> Any:
     return make_url(CONFORMANCE_DATABASE_URL).set(username=role, password=None)
 
 
-def _sqlstate(error: DBAPIError) -> str | None:
-    return getattr(error.orig, "sqlstate", None)
+def _sqlstate(error: BaseException) -> str | None:
+    return getattr(getattr(error, "orig", error), "sqlstate", None)
+
+
+def _consume_as(
+    db: Session, coordinate: _AdmissionCoordinate, engine: Any, sessions: list[Session]
+) -> Any:
+    """Control's real approved consumption, every session connected as the role."""
+
+    def session_factory() -> Session:
+        session = Session(bind=engine)
+        sessions.append(session)
+        return session
+
+    providers = foundation_approval.compose_approved_foundation_v3_providers(
+        foundation=FoundationHostV3Bindings(
+            admit_host_source=admit_host_source,
+            trust_policy_from_context=_build_trust_policy_from_resolved_context,
+            verifier=coordinate.foundation_verifier,
+            trace_type=HostSourceAdmissionTrace,
+            pair_result_type=AttestationPairVerificationResultV1,
+            consumption_request_type=ControlConsumptionRequestV3,
+            execution_context_type=ExecutionContextV3,
+        ),
+        sources=FoundationV3Sources(
+            sessions=session_factory,
+            host_admission=lambda: HostAdmissionObservation(
+                coordinate.attempt_id,
+                coordinate.presentation,
+                coordinate.candidate_envelope,
+                coordinate.installed_envelope,
+            ),
+            execution_context=lambda: coordinate.facts,
+            clock=coordinate.clock.now,
+        ),
+    )
+    _, trace = providers.host_source.admit_host_source()
+    request = ControlConsumptionRequestV3(
+        authorization_material_json=coordinate.execution.authorization_material_json,
+        dispatch_material_json=coordinate.execution.dispatch_material_json,
+        host_source_trace=trace,
+        expected_execution_plan_digest=_EXECUTION_PLAN,
+        control_consumption_ref=coordinate.execution.control_consumption_ref,
+    )
+    providers.execution_authority.consume_dispatch(request=request)
+    return providers, request
+
+
+def _prove_consumed_and_out_of_scope_refused(
+    db: Session,
+    admin: Any,
+    engine: Any,
+    role: str,
+    verifier: str,
+    coordinate: _AdmissionCoordinate,
+    sessions: list[Session],
+) -> None:
+    dispatch_id = str(coordinate.attempt_id)
+    with admin.connect() as connection:
+        stored = connection.execute(
+            text("SELECT rolpassword FROM pg_authid WHERE rolname = :role"),
+            {"role": role},
+        ).scalar_one()
+    # The server stored the client-computed verifier AS GIVEN: no plaintext ever
+    # reached it, and a logged verifier cannot log in.
+    assert stored == verifier and stored.startswith("SCRAM-SHA-256$")
+
+    # The proof, as the role itself and from the ceremony's admin connection.
+    consumption_scope.prove_scoped_role(
+        lambda: Session(bind=engine), dispatch_id=dispatch_id
+    )
+    consumption_scope.prove_scoped_role(
+        lambda: Session(bind=admin), role=role, dispatch_id=dispatch_id
+    )
+    # ... and a role bound to a DIFFERENT dispatch fails the same proof.
+    with pytest.raises(consumption_scope.FoundationBindingsUnavailable):
+        consumption_scope.prove_scoped_role(
+            lambda: Session(bind=admin), role=role, dispatch_id=str(uuid.uuid4())
+        )
+
+    providers, request = _consume_as(db, coordinate, engine, sessions)
+    db.rollback()
+    assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+    assert (
+        providers.execution_authority.lookup_committed(
+            control_consumption_ref=coordinate.execution.control_consumption_ref
+        )
+        is not None
+    )
+    # Replay is refused under the guard.
+    with pytest.raises(
+        (
+            HostAdmissionRefusedError,
+            FoundationConsumptionRefusedError,
+            TransitionRefusedError,
+        )
+    ):
+        providers.execution_authority.consume_dispatch(request=request)
+    db.rollback()
+    assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+    # The legitimate path trips nothing: millisecond transactions, no advisory lock.
+    with Session(bind=admin) as watcher:
+        assert consumption_watchdog.tick(watcher, role) == []
+
+    with admin.connect() as connection:
+        ledger_column = connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'platform_idempotency_records' "
+                "ORDER BY ordinal_position LIMIT 1"
+            )
+        ).scalar_one()
+    refused = {
+        "verification key column": "UPDATE mod_deploy.target_credentials "
+        "SET public_key_b64 = public_key_b64 WHERE false",
+        "lock table business column": "UPDATE mod_deploy.deployment_targets "
+        "SET status = status WHERE false",
+        "ledger update": "UPDATE public.platform_idempotency_records "  # noqa: S608
+        f"SET {ledger_column} = {ledger_column} WHERE false",
+        "ledger delete": "DELETE FROM public.platform_idempotency_records WHERE false",
+        "ledger truncate": "TRUNCATE public.platform_idempotency_records",
+        "rollout insert": "INSERT INTO mod_deploy.rollouts DEFAULT VALUES",
+        "read-only table write": "UPDATE mod_deploy.attestation_enrolments "
+        "SET updated_at = updated_at WHERE false",
+        "non-contract Control table": (
+            "SELECT 1 FROM mod_deploy.recovery_grants LIMIT 1"
+        ),
+        "schema create": "CREATE TABLE public.cp_run_scratch (a integer)",
+        "role switch": "SET ROLE postgres",
+        "clear the statement log": "SET log_statement = 'none'",
+        "raise the temp file limit": "SET temp_file_limit = -1",
+    }
+    for name, statement in refused.items():
+        with Session(bind=engine) as probe:
+            with pytest.raises(DBAPIError) as caught:
+                probe.execute(text(statement))
+            assert _sqlstate(caught.value) == "42501", name
+    # The grants that ARE given work: the lock column.
+    with Session(bind=engine) as probe:
+        probe.execute(
+            text(
+                "UPDATE mod_deploy.deployment_targets SET updated_at = updated_at WHERE false"
+            )
+        )
+        probe.rollback()
+
+    # ── the ledger guard: RLS refuses out-of-scope INSERT and hides other rows ──
+    decoy = f"decoy-{uuid.uuid4().hex[:8]}"
+    insert = (
+        "INSERT INTO public.platform_idempotency_records "
+        '(id, scope, "key", operation, status, fingerprint) '
+        "VALUES (gen_random_uuid(), :scope, :key, :scope, 'executed', :fp)"
+    )
+    own_scope = consumption_scope.LEDGER_SCOPE
+    fp = "a" * 64
+    with admin.connect() as connection:
+        connection.execute(
+            text(insert), {"scope": "decoy.scope", "key": decoy, "fp": fp}
+        )
+    try:
+        attempts = {
+            "other scope": {"scope": "decoy.scope", "key": dispatch_id, "fp": fp},
+            "other key, own scope": {"scope": own_scope, "key": decoy, "fp": fp},
+            "bad fingerprint": {"scope": own_scope, "key": dispatch_id, "fp": "zz"},
+        }
+        for name, params in attempts.items():
+            with Session(bind=engine) as probe:
+                with pytest.raises(DBAPIError) as caught:
+                    probe.execute(text(insert), params)
+                assert _sqlstate(caught.value) == "42501", name
+        with Session(bind=engine) as probe:
+            with pytest.raises(DBAPIError) as caught:
+                probe.execute(
+                    text(
+                        "INSERT INTO public.platform_idempotency_records "
+                        '(id, scope, "key", operation, status, fingerprint, created_at) '
+                        "VALUES (gen_random_uuid(), :scope, :key, :scope, 'executed', "
+                        ":fp, now() - interval '1 day')"
+                    ),
+                    {"scope": own_scope, "key": dispatch_id, "fp": fp},
+                )
+            assert _sqlstate(caught.value) == "42501", "backdated created_at"
+        # A row that satisfies the policy gets PAST it (the unique constraint,
+        # not RLS, then stops it): the policy admits exactly the one coordinate.
+        with Session(bind=engine) as probe:
+            with pytest.raises(DBAPIError) as caught:
+                probe.execute(
+                    text(insert), {"scope": own_scope, "key": dispatch_id, "fp": fp}
+                )
+            assert _sqlstate(caught.value) == "23505", "policy-satisfying insert"
+        # SELECT is bound to the run's own (scope, key).
+        with Session(bind=engine) as probe:
+            rows = probe.execute(
+                text('SELECT scope, "key" FROM public.platform_idempotency_records')
+            ).all()
+            assert [tuple(row) for row in rows] == [(own_scope, dispatch_id)]
+        with admin.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM public.platform_idempotency_records "
+                        'WHERE "key" = :key'
+                    ),
+                    {"key": decoy},
+                ).scalar_one()
+                == 1
+            )
+        # COPY FROM is refused for a role RLS applies to (SQLSTATE 0A000).
+        raw = engine.raw_connection()
+        try:
+            with pytest.raises(Exception) as copy_refused:
+                with raw.cursor() as cursor:
+                    with cursor.copy(
+                        "COPY public.platform_idempotency_records "
+                        '(id, scope, "key", operation, status) FROM STDIN'
+                    ) as copy:
+                        copy.write_row(
+                            (str(uuid.uuid4()), own_scope, "k", "o", "executed")
+                        )
+            assert _sqlstate(copy_refused.value) == "0A000"
+        finally:
+            raw.close()
+        # Inert for everyone else: platform_api still reads every row.
+        with Session(bind=db.get_bind()) as peer:
+            assert (
+                peer.execute(
+                    text(
+                        "SELECT count(*) FROM public.platform_idempotency_records "
+                        'WHERE "key" = :key'
+                    ),
+                    {"key": decoy},
+                ).scalar_one()
+                == 1
+            )
+    finally:
+        with admin.connect() as connection:
+            connection.execute(
+                text(
+                    'DELETE FROM public.platform_idempotency_records WHERE "key" = :key'
+                ),
+                {"key": decoy},
+            )
+    # The guard cannot be torn down while a restrictive policy remains.
+    with pytest.raises(DBAPIError):
+        _run_statements(admin, consumption_role_spec.guard_disable_sql())
 
 
 def test_scoped_role_runs_real_consumption_and_refuses_out_of_scope(
-    db: Session, monkeypatch
+    db: Session,
 ) -> None:
     coordinate = _build_admission_coordinate(db, now=_NOW, genuine_approval=True)
     install_host_admission_security(
@@ -1950,149 +2276,583 @@ def test_scoped_role_runs_real_consumption_and_refuses_out_of_scope(
     )
     db.commit()
     admin = _admin_engine()
-    role = _create_run_role(admin)
+    _guard_reset(admin)
+    role, verifier = _create_run_role(admin, str(coordinate.attempt_id))
     engine = create_engine(_role_url(role), future=True)
     sessions: list[Session] = []
     try:
-        # The proof, as the role itself, on the real catalogue.
-        consumption_scope.prove_scoped_role(lambda: Session(bind=engine))
-        # ... and the same proof from the administrative connection, by name,
-        # which is the ceremony's independent read-back (R5).
-        consumption_scope.prove_scoped_role(lambda: Session(bind=admin), role=role)
-
-        def session_factory() -> Session:
-            session = Session(bind=engine)
-            sessions.append(session)
-            return session
-
-        providers = foundation_approval.compose_approved_foundation_v3_providers(
-            foundation=FoundationHostV3Bindings(
-                admit_host_source=admit_host_source,
-                trust_policy_from_context=_build_trust_policy_from_resolved_context,
-                verifier=coordinate.foundation_verifier,
-                trace_type=HostSourceAdmissionTrace,
-                pair_result_type=AttestationPairVerificationResultV1,
-                consumption_request_type=ControlConsumptionRequestV3,
-                execution_context_type=ExecutionContextV3,
-            ),
-            sources=FoundationV3Sources(
-                sessions=session_factory,
-                host_admission=lambda: HostAdmissionObservation(
-                    coordinate.attempt_id,
-                    coordinate.presentation,
-                    coordinate.candidate_envelope,
-                    coordinate.installed_envelope,
-                ),
-                execution_context=lambda: coordinate.facts,
-                clock=coordinate.clock.now,
-            ),
+        _prove_consumed_and_out_of_scope_refused(
+            db, admin, engine, role, verifier, coordinate, sessions
         )
-        _, trace = providers.host_source.admit_host_source()
-        providers.execution_authority.consume_dispatch(
-            request=ControlConsumptionRequestV3(
-                authorization_material_json=coordinate.execution.authorization_material_json,
-                dispatch_material_json=coordinate.execution.dispatch_material_json,
-                host_source_trace=trace,
-                expected_execution_plan_digest=_EXECUTION_PLAN,
-                control_consumption_ref=coordinate.execution.control_consumption_ref,
-            )
-        )
-        db.rollback()
-        assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
-        assert (
-            providers.execution_authority.lookup_committed(
-                control_consumption_ref=coordinate.execution.control_consumption_ref
-            )
-            is not None
-        )
-
-        # Out of scope, as the role. The privilege check precedes row access, so
-        # `WHERE false` statements refuse or succeed on the grant alone.
-        with admin.connect() as connection:
-            ledger_column = connection.execute(
-                text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_schema = 'public' "
-                    "AND table_name = 'platform_idempotency_records' "
-                    "ORDER BY ordinal_position LIMIT 1"
-                )
-            ).scalar_one()
-        refused = {
-            "verification key column": "UPDATE mod_deploy.target_credentials "
-            "SET public_key_b64 = public_key_b64 WHERE false",
-            "lock table business column": "UPDATE mod_deploy.deployment_targets "
-            "SET status = status WHERE false",
-            "ledger update": "UPDATE public.platform_idempotency_records "  # noqa: S608
-            f"SET {ledger_column} = {ledger_column} WHERE false",
-            "ledger delete": "DELETE FROM public.platform_idempotency_records "
-            "WHERE false",
-            "ledger truncate": "TRUNCATE public.platform_idempotency_records",
-            "rollout insert": "INSERT INTO mod_deploy.rollouts DEFAULT VALUES",
-            "read-only table write": "UPDATE mod_deploy.attestation_enrolments "
-            "SET updated_at = updated_at WHERE false",
-            "non-contract Control table": (
-                "SELECT 1 FROM mod_deploy.recovery_grants LIMIT 1"
-            ),
-            "schema create": "CREATE TABLE public.cp_run_scratch (a integer)",
-            "role switch": "SET ROLE postgres",
-        }
-        for name, statement in refused.items():
-            with Session(bind=engine) as probe:
-                with pytest.raises(DBAPIError) as caught:
-                    probe.execute(text(statement))
-                assert _sqlstate(caught.value) == "42501", name
-        # The grants that ARE given work: the lock column, and the ledger insert
-        # shape (permission only; a DEFAULT VALUES insert would violate NOT NULL).
-        with Session(bind=engine) as probe:
-            probe.execute(
-                text(
-                    "UPDATE mod_deploy.deployment_targets "
-                    "SET updated_at = updated_at WHERE false"
-                )
-            )
-            probe.rollback()
-        # The four limits are real role settings, not just proof inputs.
-        with Session(bind=engine) as probe:
-            assert probe.execute(text("SHOW statement_timeout")).scalar() == "30s"
-            assert probe.execute(text("SHOW lock_timeout")).scalar() == "5s"
-            assert probe.execute(text("SHOW log_statement")).scalar() == "all"
     finally:
         for session in sessions:
             session.close()
         engine.dispose()
-        with admin.connect() as connection:
-            for statement in consumption_role_spec.revocation_sql(role):
-                connection.execute(text(statement))
+        _teardown_run_role(admin, role)
         admin.dispose()
 
 
-def test_scoped_consumption_role_revocation_leaves_nothing() -> None:
+def test_scoped_role_revocation_leaves_nothing() -> None:
     admin = _admin_engine()
-    role = _create_run_role(admin)
+    _guard_reset(admin)
+    role, _ = _create_run_role(admin, str(uuid.uuid4()))
     engine = create_engine(_role_url(role), future=True)
     try:
         live = engine.connect()
         assert live.execute(text("SELECT current_user")).scalar() == role
         with admin.connect() as connection:
-            before = connection.execute(
-                text(consumption_role_spec.verification_sql(role))
+            before = connection.exec_driver_sql(
+                consumption_role_spec.verification_sql(role)
             ).one()
-            assert tuple(before) == (1, 1)
-            for statement in consumption_role_spec.revocation_sql(role):
-                connection.execute(text(statement))
-            after = connection.execute(
-                text(consumption_role_spec.verification_sql(role))
+            assert tuple(before) == (1, 1, 2)
+        for statement in consumption_role_spec.revocation_sql(role):
+            with admin.connect() as connection:
+                connection.exec_driver_sql(statement)
+        with admin.connect() as connection:
+            after = connection.exec_driver_sql(
+                consumption_role_spec.verification_sql(role)
             ).one()
-        assert tuple(after) == (0, 0)
+        assert tuple(after) == (0, 0, 0)
         # The pooled session the role still held was terminated, not left to
-        # outlive its VALID UNTIL.
+        # outlive its VALID UNTIL, and the role cannot reconnect.
         with pytest.raises(DBAPIError):
             live.execute(text("SELECT 1"))
         with pytest.raises(DBAPIError):
             create_engine(_role_url(role), future=True).connect()
+        # With the policies gone the guard comes off cleanly.
+        _run_statements(admin, consumption_role_spec.guard_disable_sql())
+        with admin.connect() as connection:
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT relrowsecurity FROM pg_class "
+                    "WHERE oid = 'public.platform_idempotency_records'::regclass"
+                ).scalar_one()
+                is False
+            )
     finally:
         engine.dispose()
+        _teardown_run_role(admin, role)
         admin.dispose()
+
+
+def _watchdog_case(scenario: str) -> None:
+    admin = _admin_engine()
+    _guard_reset(admin)
+    role, _ = _create_run_role(admin, str(uuid.uuid4()))
+    engine = create_engine(_role_url(role), future=True)
+    holder: Any = None
+    errors: list[BaseException] = []
+    try:
+        if scenario == "advisory_lock":
+            holder = engine.connect()
+            holder.exec_driver_sql("SELECT pg_advisory_lock(424242)")
+        else:
+
+            def sleeper() -> None:
+                try:
+                    with engine.connect() as connection:
+                        connection.exec_driver_sql("SELECT pg_sleep(25)")
+                except BaseException as error:  # terminated by the watchdog
+                    errors.append(error)
+
+            threading.Thread(target=sleeper, daemon=True).start()
+            time.sleep(0.5)
+        output: list[str] = []
+        code = consumption_watchdog.run(
+            lambda: Session(bind=admin),
+            role,
+            deadline_seconds=40,
+            interval=0.5,
+            out=output.append,
+        )
+        assert code == consumption_watchdog.EXIT_TRIPPED, output
+        assert any(scenario in line for line in output), output
+        with admin.connect() as connection:
+            after = connection.exec_driver_sql(
+                consumption_role_spec.verification_sql(role)
+            ).one()
+        assert tuple(after) == (0, 0, 0)
+        if holder is not None:
+            with pytest.raises(DBAPIError):
+                holder.exec_driver_sql("SELECT 1")
+        with pytest.raises(DBAPIError):
+            create_engine(_role_url(role), future=True).connect()
+    finally:
+        engine.dispose()
+        _teardown_run_role(admin, role)
+        admin.dispose()
+
+
+def test_scoped_role_watchdog_revokes_on_an_advisory_lock() -> None:
+    _watchdog_case("advisory_lock")
+
+
+def test_scoped_role_watchdog_revokes_on_a_long_statement() -> None:
+    _watchdog_case("long_statement")
+
+
+# ── OpenBao transit custody, against a real OpenBao 2.5.3 dev server ────────
+
+
+class _TransitKit:
+    """One mount, two keys, the rendered policy and a relay, for one test."""
+
+    def __init__(self, tmp_path: Any) -> None:
+        self.bao = OpenBao.from_env()
+        assert self.bao.version() == "2.5.3"
+        self.kit = self.bao.provision()
+        self.directory = tmp_path / "custody"
+        self.directory.mkdir(mode=0o700)
+        self.socket_dir = tempfile.mkdtemp(prefix="cp", dir="/tmp")
+        self.relay = UnixRelay(os.path.join(self.socket_dir, "r"), self.bao.address)
+        self.identity_paths: dict[str, Path] = {}
+        self.uid = os.getuid()
+
+    def identity(
+        self, key_name: str, purpose: str, key_id: str, *, file: str
+    ) -> PinnedVerificationIdentity:
+        document = transit_custody.identity_document(
+            self.kit.key_description(key_name), purpose=purpose, key_id=key_id
+        )
+        path = self.directory / file
+        path.write_text(json.dumps(document))
+        path.chmod(0o644)
+        self.identity_paths[file] = path
+        return PinnedVerificationIdentity.read(
+            str(path), purpose=purpose, what="identity", owner_uid=self.uid
+        )
+
+    def config(
+        self,
+        *,
+        authorization_key: str | None = None,
+        dispatch_key: str | None = None,
+        authorization_identity: str = "authorization.json",
+        dispatch_identity: str = "dispatch.json",
+        file: str = "config.json",
+    ) -> str:
+        document = {
+            "mount": self.kit.mount,
+            "authorization_key": authorization_key or self.kit.authorization_key,
+            "dispatch_key": dispatch_key or self.kit.dispatch_key,
+            "key_version": 1,
+            "authorization_identity": str(self.identity_paths[authorization_identity]),
+            "dispatch_identity": str(self.identity_paths[dispatch_identity]),
+            "socket": self.relay.path,
+        }
+        path = self.directory / file
+        path.write_text(json.dumps(document))
+        return str(path)
+
+    def pin_both(self) -> transit_custody.TransitCustodyConfig:
+        self.identity(
+            self.kit.authorization_key,
+            "deployment_authorization",
+            "platform-cp-a2-authorization-v1",
+            file="authorization.json",
+        )
+        self.identity(
+            self.kit.dispatch_key,
+            "deployment_dispatch",
+            "platform-cp-a2-dispatch-v1",
+            file="dispatch.json",
+        )
+        config = transit_custody.load_config(self.config())
+        self.kit.install_policy_and_role(transit_custody.render_policy(config))
+        return config
+
+    def close(self) -> None:
+        self.relay.close()
+        self.kit.teardown()
+        if os.path.isdir(self.socket_dir):
+            os.rmdir(self.socket_dir)
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    harness = _TransitKit(tmp_path)
+    kit = harness.kit
+    try:
+        config = harness.pin_both()
+        auth_identity = PinnedVerificationIdentity.read(
+            str(harness.identity_paths["authorization.json"]),
+            purpose="deployment_authorization",
+            what="i",
+            owner_uid=harness.uid,
+        )
+        disp_identity = PinnedVerificationIdentity.read(
+            str(harness.identity_paths["dispatch.json"]),
+            purpose="deployment_dispatch",
+            what="i",
+            owner_uid=harness.uid,
+        )
+        assert (
+            auth_identity.public_key_fingerprint != disp_identity.public_key_fingerprint
+        )
+
+        # Proof of possession, and pure Ed25519 (not Ed25519ph), for both keys.
+        for name, identity, other, purpose in (
+            (
+                kit.authorization_key,
+                auth_identity,
+                disp_identity,
+                "deployment_authorization",
+            ),
+            (kit.dispatch_key, disp_identity, auth_identity, "deployment_dispatch"),
+        ):
+            nonce = os.urandom(32)
+            message = transit_custody.pop_message(purpose, nonce)
+            raw = transit_custody.parse_signature(kit.root_sign(name, message))
+            Ed25519PublicKey.from_public_bytes(identity.public_key).verify(raw, message)
+            signature = "vault:v1:" + base64.b64encode(raw).decode()
+            assert transit_custody.pop_verify(
+                identity, purpose=purpose, nonce=nonce, signature=signature
+            )
+            assert not other.verify_signature(message, _b64url(raw))
+
+        # The adapter end to end through the relay: strict parse, then verified
+        # against the pinned identity; the single-issuance token allows two signs.
+        token, accessor = kit.mint(uses=2)
+        custody = transit_custody.build_custody(
+            config, token.encode(), owner_uid=harness.uid
+        )
+        message = b"canonical bytes"
+        raw = custody.authorization_sign(message)
+        assert auth_identity.verify_signature(message, _b64url(raw))
+        assert disp_identity.verify_signature(
+            message, _b64url(custody.dispatch_sign(message))
+        )
+        with pytest.raises(transit_custody.FoundationBindingsUnavailable):
+            custody.authorization_sign(message)
+        kit.revoke_accessor(accessor)
+        assert kit.accessor_is_gone(accessor)
+
+        # Server-side use limit: the third use of a 2-use token is refused.
+        limited, _ = kit.mint(uses=2)
+        body = {"input": base64.b64encode(b"x").decode(), "key_version": 1}
+        path = f"{kit.mount}/sign/{kit.authorization_key}"
+        assert [
+            harness.bao.call("POST", path, body, token=limited)[0] for _ in range(3)
+        ] == [
+            200,
+            200,
+            403,
+        ]
+
+        # Every refusal the policy exists for, with an unlimited token so a refusal
+        # is the policy's and not the use limit's.
+        free, _ = kit.mint(uses=0)
+        b64 = base64.b64encode(b"x").decode()
+        sign = f"{kit.mount}/sign/{kit.authorization_key}"
+        attempts = {
+            "batch_input": ("POST", sign, {"batch_input": [{"input": b64}]}),
+            "batch_input beside input": ("POST", sign, {"input": b64, "batch_input": [{"input": b64}]}),
+            "context": ("POST", sign, {"input": b64, "context": b64}),
+            "prehashed": ("POST", sign, {"input": b64, "prehashed": True}),
+            "hash_algorithm": ("POST", sign, {"input": b64, "hash_algorithm": "sha2-256"}),
+            "signature_algorithm": ("POST", sign, {"input": b64, "signature_algorithm": "pss"}),
+            "marshaling_algorithm": ("POST", sign, {"input": b64, "marshaling_algorithm": "jws"}),
+            "hash path": ("POST", sign + "/sha2-256", {"input": b64}),
+            "read key": ("GET", f"{kit.mount}/keys/{kit.authorization_key}", None),
+            "export": ("GET", f"{kit.mount}/export/signing-key/{kit.authorization_key}", None),
+            "rotate": ("POST", f"{kit.mount}/keys/{kit.authorization_key}/rotate", {}),
+            "config": ("POST", f"{kit.mount}/keys/{kit.authorization_key}/config", {"deletion_allowed": True}),
+            "another key": ("POST", f"{kit.mount}/sign/not-configured", {"input": b64}),
+            "mounts": ("GET", "sys/mounts", None),
+        }  # fmt: skip
+        for name, (method, route, payload) in attempts.items():
+            status, _ = harness.bao.call(method, route, payload, token=free)
+            assert status == 403, (name, status)
+        assert (
+            harness.bao.call(
+                "POST", sign, {"input": b64, "key_version": 1}, token=free
+            )[0]
+            == 200
+        )
+
+        # key_version pinning: after a root-side rotate the adapter still signs
+        # with v1 and verifies; a request that omits key_version signs with v2,
+        # which the pinned identity refuses.
+        harness.bao.must("POST", f"{kit.mount}/keys/{kit.authorization_key}/rotate")
+        rotated_token, _ = kit.mint(uses=2)
+        rotated = transit_custody.build_custody(
+            config, rotated_token.encode(), owner_uid=harness.uid
+        )
+        assert auth_identity.verify_signature(
+            message, _b64url(rotated.authorization_sign(message))
+        )
+        v2 = transit_custody.parse_signature(
+            kit.root_sign(kit.authorization_key, message), key_version=2
+        )
+        assert not auth_identity.verify_signature(message, _b64url(v2))
+    finally:
+        harness.close()
+
+
+def _issue_request(plan_id: uuid.UUID, ref: str) -> Any:
+    return materials_producer.IssueDispatchRequest(
+        plan_id=plan_id,
+        rollout_ref=ref,
+        rollout_command_id=_cmd(),
+        dispatch_command_id=_cmd(),
+        authorization_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        controller_ssh_fingerprint="SHA256:conformance-launch-key",
+        host_id="conformance-host-placeholder",
+        host_incarnation="conformance-incarnation",
+        host_enrolment_ref="conformance-enrolment",
+    )
+
+
+@pytest.mark.parametrize("fault", ["wrong_key", "swapped_keys"])
+def test_transit_custody_refuses_wrong_and_swapped_keys_before_control_signs(
+    db: Session, tmp_path: Any, fault: str
+) -> None:
+    harness = _TransitKit(tmp_path)
+    kit = harness.kit
+    try:
+        harness.pin_both()
+        if fault == "wrong_key":
+            # The pinned authorization identity is a DIFFERENT key than the one
+            # transit signs authorizations with.
+            other = f"{kit.authorization_key}-other"
+            harness.bao.must(
+                "POST",
+                f"{kit.mount}/keys/{other}",
+                {"type": "ed25519", "exportable": False, "derived": False},
+            )
+            harness.identity(
+                other,
+                "deployment_authorization",
+                "platform-cp-a2-authorization-v1",
+                file="wrong-authorization.json",
+            )
+            path = harness.config(authorization_identity="wrong-authorization.json")
+        else:
+            path = harness.config(
+                authorization_key=kit.dispatch_key, dispatch_key=kit.authorization_key
+            )
+        config = transit_custody.load_config(path)
+        token, accessor = kit.mint(uses=2)
+        custody = transit_custody.build_custody(
+            config, token.encode(), owner_uid=harness.uid
+        )
+
+        target = _register_target(db)
+        _set_desired(db, target.id)
+        db.commit()
+        plan = _genuine_approved_plan(db, target.id)
+        db.commit()
+        ref = f"rol-{uuid.uuid4().hex[:8]}"
+        with pytest.raises(Exception) as refused:
+            materials_producer.issue_dispatch_materials(
+                db,
+                _issue_request(plan.id, ref),
+                custody=custody,
+            )
+        assert (
+            "custody" in repr(refused.value).lower()
+            or "verif" in repr(refused.value).lower()
+        )
+        db.rollback()
+        # Nothing was persisted as signed: no rollout exists for the plan.
+        assert (
+            db.execute(select(Rollout.id).where(Rollout.plan_id == plan.id)).first()
+            is None
+        )
+        kit.revoke_accessor(accessor)
+        assert kit.accessor_is_gone(accessor)
+    finally:
+        harness.close()
+
+
+class _KeepOpen:
+    """The test's `db` session behind the CLI's session seam (never closed)."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def close(self) -> None:
+        return None
+
+
+class _TransitExternal:
+    """Drives the real operator commands for `_build_admission_coordinate`."""
+
+    def __init__(self, harness: _TransitKit, monkeypatch: Any, tmp_path: Any) -> None:
+        self.harness = harness
+        self.config_path = harness.config()
+        self.out_dir = tmp_path / "materials"
+        self.out_dir.mkdir(mode=0o700)
+        self.monkeypatch = monkeypatch
+        self.authorization_verifier = AuthorizationEd25519Verifier(
+            PinnedVerificationIdentity.read(
+                str(harness.identity_paths["authorization.json"]),
+                purpose="deployment_authorization",
+                what="i",
+                owner_uid=harness.uid,
+            )
+        )
+        self.dispatch_verifier = DispatchEd25519Verifier(
+            PinnedVerificationIdentity.read(
+                str(harness.identity_paths["dispatch.json"]),
+                purpose="deployment_dispatch",
+                what="i",
+                owner_uid=harness.uid,
+            )
+        )
+        self.accessor: str | None = None
+
+    def _cli(self, db: Session, argv: list[str], stdin: bytes | None = None) -> str:
+        self.monkeypatch.setattr(
+            materials_producer, "_controller_session", lambda env: _KeepOpen(db)
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = materials_producer.main(
+                argv,
+                {},
+                stdin=io.BytesIO(stdin) if stdin is not None else None,
+                owner_uid=self.harness.uid,
+            )
+        assert code == 0, out.getvalue()
+        return out.getvalue()
+
+    def prepare(self, db: Session, target: Any) -> Any:
+        policy = f"foundation-{uuid.uuid4().hex}"
+        approvals.publish_policy_version(
+            db, approvals.PublishPolicyCommand(_cmd(), policy, 1, 1, False)
+        )
+        db.commit()
+        proposed = self._cli(
+            db,
+            [
+                "propose", "--command-id", _cmd(), "--target-id", str(target.id),
+                "--operation", "deploy", "--descriptor-digest", _DESCRIPTOR,
+                "--execution-plan-digest", _EXECUTION_PLAN,
+                "--approval-policy-code", policy, "--approval-policy-version", "1",
+            ],
+        )  # fmt: skip
+        plan_id = uuid.UUID(proposed.strip().split(": ")[1])
+        opened = self._cli(
+            db,
+            ["open-approval", "--command-id", _cmd(), "--plan-id", str(plan_id),
+             "--requested-by", str(uuid.uuid4())],
+        )  # fmt: skip
+        request_id = uuid.UUID(opened.strip().split(": ")[1])
+        plan = db.get(DeploymentPlan, plan_id)
+        approvals.record_decision(
+            db,
+            approvals.RecordDecisionCommand(
+                command_id=_cmd(),
+                request_id=request_id,
+                approver_id=uuid.uuid4(),
+                content_hash=bare_content_hash(plan.plan_digest),
+            ),
+        )
+        db.commit()
+        self._cli(
+            db,
+            ["approve", "--command-id", _cmd(), "--plan-id", str(plan_id),
+             "--approval-request-id", str(request_id)],
+        )  # fmt: skip
+        db.expire_all()
+        return db.get(DeploymentPlan, plan_id)
+
+    def issue(self, db: Session, plan: Any) -> uuid.UUID:
+        token, self.accessor = self.harness.kit.mint(uses=2)
+        self._cli(
+            db,
+            [
+                "issue", "--plan-id", str(plan.id), "--rollout-ref",
+                f"rol-{uuid.uuid4().hex[:8]}", "--rollout-command-id", _cmd(),
+                "--dispatch-command-id", _cmd(), "--authorization-expires-at",
+                (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                "--controller-ssh-fingerprint", "SHA256:conformance-launch-key",
+                "--host-id", "conformance-host-placeholder",
+                "--host-incarnation", "conformance-incarnation",
+                "--host-enrolment-ref", "conformance-enrolment",
+                "--out-dir", str(self.out_dir), "--custody", "transit",
+                "--custody-config", self.config_path,
+            ],
+            stdin=token.encode() + b"\n",
+        )  # fmt: skip
+        # Revoke the issuance token and read back that it is gone.
+        self.harness.kit.revoke_accessor(self.accessor)
+        assert self.harness.kit.accessor_is_gone(self.accessor)
+        db.expire_all()
+        return db.execute(
+            select(Rollout.id).where(Rollout.plan_id == plan.id)
+        ).scalar_one()
+
+
+def test_end_to_end_propose_approve_issue_transit_and_consume_as_scoped_role(
+    db: Session, monkeypatch: Any, tmp_path: Any
+) -> None:
+    harness = _TransitKit(tmp_path)
+    try:
+        harness.pin_both()
+        external = _TransitExternal(harness, monkeypatch, tmp_path)
+        coordinate = _build_admission_coordinate(
+            db, now=_NOW, genuine_approval=True, external=external
+        )
+        install_host_admission_security(
+            verifier=coordinate.presentation_verifier, clock=coordinate.clock
+        )
+        db.commit()
+
+        # The target-side reader accepts the issued documents, and every Control
+        # fact in them is exactly what Control stored.
+        context_path = external.out_dir / materials_producer.CONTEXT_FILE
+        dispatch_path = external.out_dir / materials_producer.DISPATCH_FILE
+        issued = bindings_module.execution_context_source(
+            str(context_path), ExecutionContextV3
+        )()
+        assert isinstance(issued, ExecutionContextV3)
+        for name in materials_producer.CONTEXT_KEYS[:12]:
+            assert getattr(issued, name) == getattr(coordinate.facts, name), name
+        dispatch_document = json.loads(dispatch_path.read_text())
+        assert dispatch_document["attempt_id"] == str(coordinate.attempt_id)
+        assert dispatch_document["authorization_envelope"] == json.loads(
+            coordinate.execution.authorization_material_json
+        )
+        assert dispatch_document["dispatch_envelope"] == json.loads(
+            coordinate.execution.dispatch_material_json
+        )
+        assert (
+            oct(
+                (external.out_dir / materials_producer.CONTEXT_FILE).stat().st_mode
+                & 0o777
+            )
+            == "0o600"
+        )
+
+        # Consume as the scoped role under the per-run ledger guard, with Control
+        # verifying the TRANSIT-signed envelopes through CP's pinned verifiers.
+        admin = _admin_engine()
+        _guard_reset(admin)
+        role, verifier = _create_run_role(admin, str(coordinate.attempt_id))
+        engine = create_engine(_role_url(role), future=True)
+        sessions: list[Session] = []
+        try:
+            _prove_consumed_and_out_of_scope_refused(
+                db, admin, engine, role, verifier, coordinate, sessions
+            )
+        finally:
+            for session in sessions:
+                session.close()
+            engine.dispose()
+            _teardown_run_role(admin, role)
+            admin.dispose()
+    finally:
+        harness.close()
 
 
 # ── small helpers used above ────────────────────────────────────────────────
