@@ -38,6 +38,8 @@ class TargetRefusal(StrEnum):
     VERIFICATION_IDENTITY_REFUSED = "verification_identity_refused"
     EVIDENCE_POLICY_INCOMPLETE = "release_evidence_policy_incomplete"
     CONTROL_SECURITY_REFUSED = "control_security_install_refused"
+    CUSTODY_NOT_CONFIGURED = "custody_not_configured"
+    MATERIALS_REFUSED = "materials_refused"
 
 
 class FoundationBindingsUnavailable(RuntimeError):
