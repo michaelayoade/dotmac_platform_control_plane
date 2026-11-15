@@ -284,6 +284,16 @@ def issue_dispatch_materials(
         request.rollout_ref,
     ):
         _text(name, what="request field")
+    # Foundation's execution context demands the enrolment ref as a canonical UUID
+    # (Control's enrolment id); refuse here, before anything is signed.
+    try:
+        if str(UUID(request.host_enrolment_ref)) != request.host_enrolment_ref:
+            raise ValueError("not canonical")
+    except ValueError:
+        raise _refuse(
+            "the host enrolment ref must be a canonical UUID",
+            TargetRefusal.MATERIALS_REFUSED,
+        ) from None
     approval = import_module("vendor_cp.deployment.foundation_execution_approval")
     rollout = approval.request_foundation_rollout(
         db,

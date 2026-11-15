@@ -163,7 +163,7 @@ def _request(plan_id: Any) -> producer.IssueDispatchRequest:
         controller_ssh_fingerprint="SHA256:launchkey",
         host_id="host-1",
         host_incarnation="incarnation-1",
-        host_enrolment_ref="enrol-1",
+        host_enrolment_ref="6f1d1c1e-0000-4000-8000-000000000001",
     )
 
 
@@ -359,7 +359,7 @@ def _issue_argv(tmp_path: Path, **overrides: str) -> list[str]:
         "--controller-ssh-fingerprint": "f",
         "--host-id": "h",
         "--host-incarnation": "i",
-        "--host-enrolment-ref": "e",
+        "--host-enrolment-ref": "6f1d1c1e-0000-4000-8000-000000000001",
         "--out-dir": str(tmp_path),
         "--custody": "transit",
         "--custody-config": str(tmp_path / "absent.json"),
@@ -487,3 +487,25 @@ def test_the_module_holds_no_key_material_and_generates_none() -> None:
         "Ed25519PrivateKey",
     ):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "enrol-1",
+        "",
+        "6F1D1C1E-0000-4000-8000-000000000001",
+        "6f1d1c1e00004000800000000000001",
+    ],
+)
+def test_a_non_uuid_enrolment_ref_refuses_before_any_signing(
+    monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    seen = _fixture(monkeypatch)
+    keys = _Keys()
+    request = dataclasses.replace(_request(seen["plan_id"]), host_enrolment_ref=ref)
+    db = _Db()
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        producer.issue_dispatch_materials(db, request, custody=keys.custody())
+    assert caught.value.code is TargetRefusal.MATERIALS_REFUSED
+    assert db.order == [] and keys.signed == []

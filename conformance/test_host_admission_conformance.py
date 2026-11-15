@@ -2593,10 +2593,16 @@ def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
         assert auth_identity.verify_signature(
             message, _b64url(rotated.authorization_sign(message))
         )
-        v2 = transit_custody.parse_signature(
-            kit.root_sign(kit.authorization_key, message), key_version=2
+        unpinned = kit.root_sign(kit.authorization_key, message)
+        # The adapter accepts only the vault:v1: prefix, so a v2 signature is
+        # refused outright ...
+        with pytest.raises(transit_custody.FoundationBindingsUnavailable):
+            transit_custody.parse_signature(unpinned)
+        # ... and, decoded by hand, it does not verify under the pinned v1 key.
+        v2_raw = base64.b64decode(
+            json.loads(unpinned)["data"]["signature"].split(":")[2]
         )
-        assert not auth_identity.verify_signature(message, _b64url(v2))
+        assert not auth_identity.verify_signature(message, _b64url(v2_raw))
     finally:
         harness.close()
 
@@ -2611,7 +2617,7 @@ def _issue_request(plan_id: uuid.UUID, ref: str) -> Any:
         controller_ssh_fingerprint="SHA256:conformance-launch-key",
         host_id="conformance-host-placeholder",
         host_incarnation="conformance-incarnation",
-        host_enrolment_ref="conformance-enrolment",
+        host_enrolment_ref=str(uuid.uuid4()),
     )
 
 
@@ -2785,7 +2791,7 @@ class _TransitExternal:
                 "--controller-ssh-fingerprint", "SHA256:conformance-launch-key",
                 "--host-id", "conformance-host-placeholder",
                 "--host-incarnation", "conformance-incarnation",
-                "--host-enrolment-ref", "conformance-enrolment",
+                "--host-enrolment-ref", str(uuid.uuid4()),
                 "--out-dir", str(self.out_dir), "--custody", "transit",
                 "--custody-config", self.config_path,
             ],
