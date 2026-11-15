@@ -565,7 +565,12 @@ def _compose(
     monkeypatch.setattr(
         bindings_module,
         "host_admission_source",
-        lambda _p: lambda: calls.append("admission_materials") or marker,
+        lambda _p: (
+            lambda: (
+                calls.append("admission_materials")
+                or SimpleNamespace(attempt_id=uuid4())
+            )
+        ),
     )
     monkeypatch.setattr(
         bindings_module,

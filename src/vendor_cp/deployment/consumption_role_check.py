@@ -9,11 +9,12 @@ value.
 
     # about the credential itself (the DSN the target will receive):
     DISPATCH_CONSUMPTION_DATABASE_URL=... \\
-        python -m vendor_cp.deployment.consumption_role_check
+        python -m vendor_cp.deployment.consumption_role_check --dispatch-id UUID
 
     # about a named role, over an administrative read-only connection:
     CONSUMPTION_ROLE_CHECK_DATABASE_URL=... \\
-        python -m vendor_cp.deployment.consumption_role_check --role NAME
+        python -m vendor_cp.deployment.consumption_role_check --role NAME \\
+        --dispatch-id UUID
 
 Exit 0 only when the role is proven; 2 on any refusal.
 """
@@ -44,6 +45,9 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", default=None)
+    # The dispatch the role is bound to, read from the target's own
+    # dispatch-materials.json by the ceremony.
+    parser.add_argument("--dispatch-id", required=True)
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     try:
@@ -56,7 +60,9 @@ def main(
                     f"{ADMIN_DSN_ENV} is not supplied",
                     code=TargetRefusal.CONSUMPTION_DSN_MISSING,
                 )
-        prove_scoped_role(consumption_sessions(dsn), role=args.role)
+        prove_scoped_role(
+            consumption_sessions(dsn), role=args.role, dispatch_id=args.dispatch_id
+        )
     except FoundationBindingsUnavailable as refusal:
         print(
             f"consumption role check refused: {refusal.code}: {refusal}",

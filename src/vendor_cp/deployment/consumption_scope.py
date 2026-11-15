@@ -53,6 +53,7 @@ import re
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -71,7 +72,10 @@ __all__ = [
     "CONSUMPTION_DSN_ENV",
     "GENERAL_DSN_ENVS",
     "IDLE_IN_TRANSACTION_TIMEOUT",
+    "GUARD_POLICY",
+    "LEDGER_SCOPE",
     "LEDGER_TABLES",
+    "TEMP_FILE_LIMIT",
     "LOCK_COLUMN",
     "LOCK_TABLES",
     "LOCK_TIMEOUT",
@@ -101,6 +105,10 @@ CONNECTION_LIMIT: Final = 4
 STATEMENT_TIMEOUT: Final = "30s"
 LOCK_TIMEOUT: Final = "5s"
 IDLE_IN_TRANSACTION_TIMEOUT: Final = "30s"
+#: `temp_file_limit` is a superuser-only GUC, so unlike the timeouts the role
+#: cannot raise it: it bounds temp-disk abuse for real.
+TEMP_FILE_LIMIT: Final = "256MB"
+_MAX_TEMP_FILE_KB: Final = 256 * 1024
 _MAX_TIMEOUT_MS: Final = {
     "statement_timeout": 60_000,
     "lock_timeout": 10_000,
@@ -112,6 +120,11 @@ _FORBIDDEN_NAME_PARTS: Final = ("owner", "admin", "superuser", "migrat", "root")
 _FORBIDDEN_NAMES: Final = frozenset({"postgres", "app", "vendor_cp"})
 
 Table = tuple[str, str]
+
+#: The scope Control's consumption writes and the per-run RLS binds the role to.
+LEDGER_SCOPE: Final = "deployment.consume_dispatch_challenge.v1"
+LEDGER_TABLE_NAME: Final = "platform_idempotency_records"
+GUARD_POLICY: Final = "dotmac_ledger_unrestricted"
 
 #: SELECT only. What Control's resolve/admit path reads to verify the pair and
 #: the standing it consumes (Control `ad95f4e1`, Approvals a8), as
@@ -242,6 +255,17 @@ _FUNCTIONS_SQL: Final = (
     + " AND has_function_privilege(:role, p.oid, 'EXECUTE')"
 )
 
+_RLS_SQL: Final = (
+    "SELECT c.relrowsecurity, c.relforcerowsecurity FROM pg_class c "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'public' AND c.relname = 'platform_idempotency_records'"
+)
+_POLICIES_SQL: Final = (
+    "SELECT policyname, permissive, roles, cmd, qual, with_check "
+    "FROM pg_policies WHERE schemaname = 'public' "
+    "AND tablename = 'platform_idempotency_records'"
+)
+_SIZE: Final = re.compile(r"^(\d{1,9})(kB|MB|GB)?$")
 _DURATION: Final = re.compile(r"^(\d{1,9})(ms|s|min)?$")
 _PG_ENV_PREFIX: Final = "PG"
 
@@ -356,8 +380,78 @@ def _timeout_ms(value: str) -> int | None:
     return number * {"ms": 1, "s": 1_000, "min": 60_000}[unit]
 
 
+def _names(value: Any) -> list[str] | None:
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    if isinstance(value, str) and value.startswith("{") and value.endswith("}"):
+        return [item for item in value[1:-1].split(",") if item]
+    return None
+
+
+def _prove_ledger_scope(role: str, dispatch_id: str, rls: Any, policies: Any) -> None:
+    """RLS on, one permissive TO PUBLIC (true), and exactly this run's two
+    restrictive policies binding scope and the dispatch id being consumed.
+
+    Policies are ignored by PostgreSQL when RLS is off, so `relrowsecurity` is
+    part of the proof. FORCE must be off (the owner is not subject)."""
+    over = TargetRefusal.CONSUMPTION_ROLE_OVERBROAD
+    if rls is None or rls[0] is not True or rls[1] is not False:
+        raise _refuse(
+            "row level security is not enabled (without FORCE) on the ledger", over
+        )
+    scope_literal = f"'{LEDGER_SCOPE}'"
+    dispatch_literal = f"'{dispatch_id}'"
+    permissive: list[tuple] = []
+    own: list[tuple] = []
+    for row in policies:
+        name, kind, roles, command, qual, check = row
+        named = _names(roles)
+        if named is None:
+            raise _refuse("a ledger policy's roles cannot be read", over)
+        if "public" in named:
+            permissive.append((name, kind, named, command, qual, check))
+        elif role in named:
+            own.append((name, kind, named, command, qual, check))
+    if len(permissive) != 1:
+        raise _refuse("the ledger needs exactly one policy for PUBLIC", over)
+    _name, kind, named, command, qual, check = permissive[0]
+    if (
+        kind != "PERMISSIVE"
+        or named != ["public"]
+        or command != "ALL"
+        or str(qual).strip("() ") != "true"
+        or str(check).strip("() ") != "true"
+    ):
+        raise _refuse("the ledger PUBLIC policy is not the unrestricted one", over)
+    commands = sorted(str(item[3]) for item in own)
+    if commands != ["INSERT", "SELECT"] or any(
+        item[1] != "RESTRICTIVE" or item[2] != [role] for item in own
+    ):
+        raise _refuse(
+            "the role needs exactly one restrictive INSERT and one restrictive "
+            "SELECT ledger policy, naming only itself",
+            over,
+        )
+    for _n, _k, _r, command, qual, check in own:
+        text_ = str(qual if command == "SELECT" else check)
+        if scope_literal not in text_ or dispatch_literal not in text_:
+            raise _refuse(
+                "a ledger policy is not bound to the consumption scope and this "
+                "dispatch id",
+                over,
+            )
+        flat = text_.replace("(", "").replace(")", "")
+        if command == "INSERT" and "created_at = now" not in flat:
+            raise _refuse(
+                "the ledger INSERT policy does not bind created_at to now()", over
+            )
+
+
 def prove_scoped_role(
-    session_factory: Callable[[], Session], *, role: str | None = None
+    session_factory: Callable[[], Session],
+    *,
+    dispatch_id: str,
+    role: str | None = None,
 ) -> None:
     """Refuse unless the role is the narrow consumption role.
 
@@ -369,6 +463,13 @@ def prove_scoped_role(
     A database that cannot answer refuses: unprovable is over-broad, never
     "assumed fine".
     """
+    try:
+        bound_dispatch = str(UUID(dispatch_id))
+    except (TypeError, ValueError, AttributeError):
+        raise _refuse(
+            "the dispatch id the ledger scope is proven against is not a UUID",
+            TargetRefusal.CONSUMPTION_ROLE_UNVERIFIABLE,
+        ) from None
     session = session_factory()
     try:
         current = session.execute(text(_CURRENT_SQL)).one_or_none()
@@ -394,6 +495,8 @@ def prove_scoped_role(
         columns = ask(_COLUMNS_SQL).all()
         sequences = ask(_SEQUENCES_SQL).all()
         definers = ask(_FUNCTIONS_SQL).scalar()
+        rls = ask(_RLS_SQL).one_or_none()
+        policies = ask(_POLICIES_SQL).all()
     except FoundationBindingsUnavailable:
         raise
     except Exception:
@@ -464,6 +567,16 @@ def prove_scoped_role(
         parsed = _timeout_ms(settings.get(name, "").strip("'\" "))
         if parsed is None or not 0 < parsed <= limit_ms:
             raise _refuse(f"the consumption role has no bounded {name}", over)
+    temp = _SIZE.match(settings.get("temp_file_limit", "").strip("'\" "))
+    temp_kb = (
+        int(temp.group(1))
+        * {None: 1, "kB": 1, "MB": 1024, "GB": 1024 * 1024}[temp.group(2)]
+        if temp
+        else None
+    )
+    if temp_kb is None or not 0 < temp_kb <= _MAX_TEMP_FILE_KB:
+        raise _refuse("the consumption role has no bounded temp_file_limit", over)
+    _prove_ledger_scope(subject, bound_dispatch, rls, policies)
     if database_create is not False:
         raise _refuse("the consumption role can create objects in the database", over)
     if create_schemas != 0:

@@ -134,7 +134,30 @@ _GOOD_CONFIG = [
     "statement_timeout=30s",
     "lock_timeout=5s",
     "idle_in_transaction_session_timeout=30s",
+    "temp_file_limit=256MB",
     "log_statement=all",
+]
+_DISPATCH = "3f2b8c1e-1111-4222-8333-444455556666"
+_SCOPE = f"'{scope.LEDGER_SCOPE}'"
+_GOOD_POLICIES = [
+    ("dotmac_ledger_unrestricted", "PERMISSIVE", ["public"], "ALL", "true", "true"),
+    (
+        "run_consume_insert",
+        "RESTRICTIVE",
+        ["run_consume"],
+        "INSERT",
+        None,
+        f"((scope)::text = {_SCOPE}::text) AND ((\"key\")::text = '{_DISPATCH}'::text) "
+        "AND (created_at = now()) AND (updated_at = now())",
+    ),
+    (
+        "run_consume_select",
+        "RESTRICTIVE",
+        ["run_consume"],
+        "SELECT",
+        f"((scope)::text = {_SCOPE}::text) AND ((\"key\")::text = '{_DISPATCH}'::text)",
+        None,
+    ),
 ]
 _GOOD_ROLE = (False,) * 6 + (True, 4, "t", 3600.0, _GOOD_CONFIG)
 
@@ -168,6 +191,8 @@ class _CatalogueSession:
             scope._COLUMNS_SQL: [],
             scope._SEQUENCES_SQL: [],
             scope._FUNCTIONS_SQL: 0,
+            scope._RLS_SQL: (True, False),
+            scope._POLICIES_SQL: list(_GOOD_POLICIES),
         }
         self.answers.update({getattr(scope, f"_{k}"): v for k, v in answers.items()})
         self.params: list[Any] = []
@@ -206,11 +231,13 @@ def _column(
 
 
 def _proven(session: _CatalogueSession, **kwargs: Any) -> None:
+    kwargs.setdefault("dispatch_id", _DISPATCH)
     scope.prove_scoped_role(lambda: session, **kwargs)  # type: ignore[arg-type,return-value]
     assert session.rolled_back and session.closed
 
 
 def _code(session: _CatalogueSession, **kwargs: Any) -> TargetRefusal:
+    kwargs.setdefault("dispatch_id", _DISPATCH)
     with pytest.raises(FoundationBindingsUnavailable) as caught:
         scope.prove_scoped_role(lambda: session, **kwargs)  # type: ignore[arg-type,return-value]
     assert session.rolled_back and session.closed
@@ -251,8 +278,8 @@ def test_a_role_exactly_as_the_contract_is_proven() -> None:
 
 def test_a_named_role_is_proven_from_any_connection() -> None:
     session = _CatalogueSession(CURRENT_SQL=("admin_reader", "admin_reader"))
-    _proven(session, role="the_run_role")
-    assert all(p == {"role": "the_run_role"} for p in session.params[1:])
+    _proven(session, role="run_consume")
+    assert all(p == {"role": "run_consume"} for p in session.params[1:])
 
 
 def test_a_switched_session_role_refuses() -> None:
@@ -303,7 +330,16 @@ def test_the_connection_limit_must_be_bounded(limit: object) -> None:
         None,
         [],
         [c for c in _GOOD_CONFIG if not c.startswith("log_statement")],
-        [*_GOOD_CONFIG[:3], "log_statement=ddl"],
+        [c for c in _GOOD_CONFIG if not c.startswith("temp_file_limit")],
+        [
+            "temp_file_limit=257MB" if c.startswith("temp_file") else c
+            for c in _GOOD_CONFIG
+        ],
+        [
+            "temp_file_limit=-1" if c.startswith("temp_file") else c
+            for c in _GOOD_CONFIG
+        ],
+        ["log_statement=ddl" if c.startswith("log_") else c for c in _GOOD_CONFIG],
         [c for c in _GOOD_CONFIG if not c.startswith("statement_timeout")],
         ["statement_timeout=0", *_GOOD_CONFIG[1:]],
         ["statement_timeout=61s", *_GOOD_CONFIG[1:]],
@@ -326,6 +362,7 @@ def test_tighter_limits_and_other_duration_spellings_are_accepted() -> None:
         "statement_timeout=45000",
         "lock_timeout=1500ms",
         "idle_in_transaction_session_timeout=1min",
+        "temp_file_limit=100000",
         "log_statement=all",
     ]
     _proven(_CatalogueSession(ROLE_SQL=(*_GOOD_ROLE[:10], config)))
@@ -431,7 +468,7 @@ def test_refusal_does_not_chain_the_database_error() -> None:
             raise RuntimeError("SECRET-MARKER")
 
     with pytest.raises(FoundationBindingsUnavailable) as caught:
-        scope.prove_scoped_role(lambda: _Broken())  # type: ignore[arg-type,return-value]
+        scope.prove_scoped_role(lambda: _Broken(), dispatch_id=_DISPATCH)  # type: ignore[arg-type,return-value]
     assert caught.value.__cause__ is None
     assert "SECRET-MARKER" not in str(caught.value)
 
@@ -462,6 +499,8 @@ def test_the_document_embeds_the_rendered_sql_verbatim() -> None:
     statements = (
         *spec.creation_sql(spec.ROLE_PLACEHOLDER),
         *spec.revocation_sql(spec.ROLE_PLACEHOLDER),
+        *spec.guard_enable_sql(),
+        *spec.guard_disable_sql(),
         spec.verification_sql(spec.ROLE_PLACEHOLDER),
     )
     for statement in statements:
@@ -489,3 +528,89 @@ def test_the_rendered_sql_grants_exactly_the_contract_and_nothing_wider() -> Non
         "GRANT ALL",
     ):
         assert forbidden not in sql
+
+
+# ── ledger row level security (the per-run guard) ───────────────────────────
+
+
+def _policies(**changes: Any) -> list[tuple]:
+    rows = [list(row) for row in _GOOD_POLICIES]
+    for index, value in changes.items():
+        row_index, column = index.split("_", 1)
+        rows[int(row_index)][int(column)] = value
+    return [tuple(row) for row in rows]
+
+
+@pytest.mark.parametrize("rls", [None, (False, False), (True, True), (None, False)])
+def test_rls_must_be_enabled_without_force(rls: Any) -> None:
+    assert _code(_CatalogueSession(RLS_SQL=rls)) is _OVER
+
+
+@pytest.mark.parametrize(
+    "policies",
+    [
+        [],
+        _GOOD_POLICIES[1:],
+        [_GOOD_POLICIES[0], _GOOD_POLICIES[1]],
+        [_GOOD_POLICIES[0], _GOOD_POLICIES[2]],
+        [
+            *_GOOD_POLICIES,
+            ("extra_public", "PERMISSIVE", ["public"], "ALL", "true", "true"),
+        ],
+        _policies(**{"0_1": "RESTRICTIVE"}),
+        _policies(**{"0_4": "(scope IS NOT NULL)"}),
+        _policies(**{"0_5": "false"}),
+        _policies(**{"0_3": "SELECT"}),
+        _policies(**{"1_1": "PERMISSIVE"}),
+        _policies(**{"1_2": ["run_consume", "other_role"]}),
+        _policies(**{"2_1": "PERMISSIVE"}),
+        [
+            *_GOOD_POLICIES,
+            ("another", "PERMISSIVE", ["run_consume"], "UPDATE", "true", "true"),
+        ],
+        _policies(**{"2_2": "nonsense"}),
+    ],
+)
+def test_the_ledger_policies_must_be_exactly_the_contract(
+    policies: list[tuple],
+) -> None:
+    assert _code(_CatalogueSession(POLICIES_SQL=policies)) is _OVER
+
+
+def test_policies_are_bound_to_the_scope_and_the_dispatch_being_consumed() -> None:
+    other = "99999999-9999-4999-8999-999999999999"
+    assert _code(_CatalogueSession(), dispatch_id=other) is _OVER
+    wrong_scope = _policies(
+        **{
+            "2_4": "(scope = 'something.else') AND "
+            f"((\"key\")::text = '{_DISPATCH}'::text)"
+        }
+    )
+    assert _code(_CatalogueSession(POLICIES_SQL=wrong_scope)) is _OVER
+    backdatable = _policies(
+        **{
+            "1_5": f"((scope)::text = {_SCOPE}::text) AND "
+            f"((\"key\")::text = '{_DISPATCH}'::text)"
+        }
+    )
+    assert _code(_CatalogueSession(POLICIES_SQL=backdatable)) is _OVER
+
+
+def test_other_roles_restrictive_policies_do_not_disturb_this_roles_proof() -> None:
+    others = [
+        ("o_insert", "RESTRICTIVE", ["other_run"], "INSERT", None, "(false)"),
+        ("o_select", "RESTRICTIVE", ["other_run"], "SELECT", "(false)", None),
+    ]
+    _proven(_CatalogueSession(POLICIES_SQL=[*_GOOD_POLICIES, *others]))
+
+
+def test_array_literal_roles_are_understood_and_a_non_uuid_dispatch_is_unprovable() -> (
+    None
+):
+    as_text = [
+        (n, k, "{" + ",".join(r) + "}", c, q, w) for n, k, r, c, q, w in _GOOD_POLICIES
+    ]
+    _proven(_CatalogueSession(POLICIES_SQL=as_text))
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        scope.prove_scoped_role(lambda: _CatalogueSession(), dispatch_id="not-a-uuid")
+    assert caught.value.code is TargetRefusal.CONSUMPTION_ROLE_UNVERIFIABLE

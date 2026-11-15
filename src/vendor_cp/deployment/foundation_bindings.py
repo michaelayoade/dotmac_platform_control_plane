@@ -444,7 +444,7 @@ def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
     evidence_policy, evidence_verifier = release_evidence_trust(env)
     control_identities = load_control_identities(env)
     host_admission = host_admission_source(admission_path)
-    host_admission()
+    observed_admission = host_admission()
     foundation = foundation_host_bindings()
     execution_context = execution_context_source(
         context_path, foundation.execution_context_type
@@ -452,7 +452,7 @@ def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
     execution_context()
 
     sessions = consumption_sessions(dsn)
-    prove_scoped_role(sessions)
+    prove_scoped_role(sessions, dispatch_id=str(observed_admission.attempt_id))
     clock = DatabaseClock(sessions)
     require_clock_skew_within(clock, limit=limit)
     install_control_verification(env, clock=clock, identities=control_identities)
