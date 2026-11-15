@@ -36,7 +36,7 @@ import os
 import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from threading import Lock
@@ -60,6 +60,7 @@ __all__ = [
     "IssueDispatchRequest",
     "IssuedMaterials",
     "install_custody",
+    "MAX_AUTHORIZATION_WINDOW",
     "main",
     "issue_dispatch_materials",
     "write_materials",
@@ -247,6 +248,24 @@ def _text(value: object, *, what: str) -> str:
     return value
 
 
+#: The role window; an authorization may not outlive it (hard cap, 4 hours).
+MAX_AUTHORIZATION_WINDOW: Final = timedelta(hours=4)
+
+
+def _check_expiry(expires_at: datetime, *, now: datetime | None = None) -> None:
+    if expires_at.tzinfo is None:
+        raise _refuse(
+            "the authorization expiry must be timezone-aware",
+            TargetRefusal.MATERIALS_REFUSED,
+        )
+    reference = now or datetime.now(UTC)
+    if not reference < expires_at <= reference + MAX_AUTHORIZATION_WINDOW:
+        raise _refuse(
+            "the authorization expiry must fall within the 4 hour role window",
+            TargetRefusal.MATERIALS_REFUSED,
+        )
+
+
 def issue_dispatch_materials(
     db: Any, request: IssueDispatchRequest, *, custody: Custody | None = None
 ) -> IssuedMaterials:
@@ -256,6 +275,7 @@ def issue_dispatch_materials(
     with no custody. Any Control or Approvals refusal propagates unchanged.
     """
     held_custody = custody or _require_custody()
+    _check_expiry(request.authorization_expires_at)
     for name in (
         request.controller_ssh_fingerprint,
         request.host_id,
@@ -377,73 +397,151 @@ def write_materials(
     return written[0], written[1]
 
 
-def main(
-    argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None
-) -> int:
-    """`issue` command: controller-side, on CP's own database. Names only.
+def _controller_session(env: Mapping[str, str]) -> Any:
+    """A raw CP platform session on the CONTROLLER (general credentials belong
+    here, never on a target)."""
+    from dotmac_kernel.session_runtime import DatabaseRuntime
 
-    Runs on the CONTROLLER, where the general CP database credentials belong
-    (never on a target). With no custody installed in the process it refuses
-    before touching the database.
-    """
+    runtime = DatabaseRuntime.from_urls(
+        database_url=env["DATABASE_URL"],
+        platform_database_url=env["PLATFORM_DATABASE_URL"],
+    )
+    return runtime.platform_session_factory()
+
+
+def _build_parser() -> Any:
     import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Plan lifecycle and genuine dispatch materials (operator command)."
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    propose = sub.add_parser("propose")
+    propose.add_argument("--command-id", required=True)
+    propose.add_argument("--target-id", required=True)
+    propose.add_argument("--operation", required=True)
+    propose.add_argument("--descriptor-digest", required=True)
+    propose.add_argument("--execution-plan-digest", required=True)
+    propose.add_argument("--approval-policy-code", required=True)
+    propose.add_argument("--approval-policy-version", type=int, required=True)
+    opened = sub.add_parser("open-approval")
+    opened.add_argument("--command-id", required=True)
+    opened.add_argument("--plan-id", required=True)
+    opened.add_argument("--requested-by", required=True)
+    approve = sub.add_parser("approve")
+    approve.add_argument("--command-id", required=True)
+    approve.add_argument("--plan-id", required=True)
+    approve.add_argument("--approval-request-id", required=True)
+    issue = sub.add_parser("issue")
+    issue.add_argument("--plan-id", required=True)
+    issue.add_argument("--rollout-ref", required=True)
+    issue.add_argument("--rollout-command-id", required=True)
+    issue.add_argument("--dispatch-command-id", required=True)
+    issue.add_argument("--authorization-expires-at", required=True)
+    issue.add_argument("--controller-ssh-fingerprint", required=True)
+    issue.add_argument("--host-id", required=True)
+    issue.add_argument("--host-incarnation", required=True)
+    issue.add_argument("--host-enrolment-ref", required=True)
+    issue.add_argument("--out-dir", required=True)
+    # Required and single-valued: there is no default mode and no other custody.
+    issue.add_argument("--custody", required=True, choices=("transit",))
+    issue.add_argument("--custody-config", required=True)
+    return parser
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+    *,
+    stdin: Any = None,
+    owner_uid: int = 0,
+) -> int:
+    """Operator command: names and ids only, typed refusals, no secret output.
+
+    Runs on the CONTROLLER on CP's own database. `issue` installs transit custody
+    (token on stdin) BEFORE the first database connection; without it nothing is
+    signed and the database is not touched.
+    """
     import sys
 
-    parser = argparse.ArgumentParser(description="Issue genuine dispatch materials.")
-    parser.add_argument("action", choices=("issue",))
-    parser.add_argument("--plan-id", required=True)
-    parser.add_argument("--rollout-ref", required=True)
-    parser.add_argument("--rollout-command-id", required=True)
-    parser.add_argument("--dispatch-command-id", required=True)
-    parser.add_argument("--authorization-expires-at", required=True)
-    parser.add_argument("--controller-ssh-fingerprint", required=True)
-    parser.add_argument("--host-id", required=True)
-    parser.add_argument("--host-incarnation", required=True)
-    parser.add_argument("--host-enrolment-ref", required=True)
-    parser.add_argument("--out-dir", required=True)
+    parser = _build_parser()
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     try:
-        custody = _require_custody()
-        request = IssueDispatchRequest(
-            plan_id=UUID(args.plan_id),
-            rollout_ref=args.rollout_ref,
-            rollout_command_id=args.rollout_command_id,
-            dispatch_command_id=args.dispatch_command_id,
-            authorization_expires_at=datetime.fromisoformat(
-                args.authorization_expires_at
-            ),
-            controller_ssh_fingerprint=args.controller_ssh_fingerprint,
-            host_id=args.host_id,
-            host_incarnation=args.host_incarnation,
-            host_enrolment_ref=args.host_enrolment_ref,
-        )
-        if request.authorization_expires_at.tzinfo is None:
-            raise _refuse(
-                "the authorization expiry must be timezone-aware",
-                TargetRefusal.MATERIALS_REFUSED,
-            )
-        from dotmac_kernel.session_runtime import DatabaseRuntime
+        if args.action == "issue":
+            from vendor_cp.deployment import transit_custody
 
-        runtime = DatabaseRuntime.from_urls(
-            database_url=env["DATABASE_URL"],
-            platform_database_url=env["PLATFORM_DATABASE_URL"],
-        )
-        session = runtime.platform_session_factory()
+            config = transit_custody.load_config(args.custody_config)
+            token = transit_custody.read_token(stdin)
+            install_custody(
+                transit_custody.build_custody(config, token, owner_uid=owner_uid)
+            )
+            request = IssueDispatchRequest(
+                plan_id=UUID(args.plan_id),
+                rollout_ref=args.rollout_ref,
+                rollout_command_id=args.rollout_command_id,
+                dispatch_command_id=args.dispatch_command_id,
+                authorization_expires_at=datetime.fromisoformat(
+                    args.authorization_expires_at
+                ),
+                controller_ssh_fingerprint=args.controller_ssh_fingerprint,
+                host_id=args.host_id,
+                host_incarnation=args.host_incarnation,
+                host_enrolment_ref=args.host_enrolment_ref,
+            )
+            _check_expiry(request.authorization_expires_at)
+            session = _controller_session(env)
+            try:
+                issued = issue_dispatch_materials(session, request)
+            finally:
+                session.close()
+            write_materials(args.out_dir, issued)
+            print("materials issued")
+            return 0
+        approval = import_module("vendor_cp.deployment.foundation_execution_approval")
+        session = _controller_session(env)
         try:
-            issued = issue_dispatch_materials(session, request, custody=custody)
+            if args.action == "propose":
+                plan = approval.propose_foundation_plan(
+                    session,
+                    approval.ProposeFoundationPlan(
+                        command_id=args.command_id,
+                        target_id=UUID(args.target_id),
+                        operation=args.operation,
+                        descriptor_digest=args.descriptor_digest,
+                        execution_plan_digest=args.execution_plan_digest,
+                        approval_policy_code=args.approval_policy_code,
+                        approval_policy_version=args.approval_policy_version,
+                    ),
+                )
+                session.commit()
+                print(f"plan proposed: {plan.id}")
+            elif args.action == "open-approval":
+                opened = approval.open_foundation_approval(
+                    session,
+                    command_id=args.command_id,
+                    plan_id=UUID(args.plan_id),
+                    requested_by=UUID(args.requested_by),
+                )
+                session.commit()
+                print(f"approval opened: {opened.request_id}")
+            else:
+                plan = approval.approve_foundation_plan(
+                    session,
+                    command_id=args.command_id,
+                    plan_id=UUID(args.plan_id),
+                    approval_request_id=UUID(args.approval_request_id),
+                )
+                session.commit()
+                print(f"plan approved: {plan.id}")
         finally:
             session.close()
-        write_materials(args.out_dir, issued)
     except FoundationBindingsUnavailable as refusal:
-        print(f"materials issue refused: {refusal.code}", file=sys.stderr)
+        print(f"{args.action} refused: {refusal.code}", file=sys.stderr)
         return 2
-    except (KeyError, ValueError):
-        print(
-            "materials issue refused: invalid request or environment", file=sys.stderr
-        )
+    except (KeyError, ValueError, TypeError):
+        print(f"{args.action} refused: invalid request or environment", file=sys.stderr)
         return 2
-    print("materials issued")
     return 0
 
 

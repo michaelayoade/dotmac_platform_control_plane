@@ -7,7 +7,7 @@ import json
 import os
 import stat
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -159,7 +159,7 @@ def _request(plan_id: Any) -> producer.IssueDispatchRequest:
         rollout_ref="rollout-1",
         rollout_command_id="cmd-r",
         dispatch_command_id="cmd-d",
-        authorization_expires_at=datetime(2026, 11, 16, tzinfo=UTC),
+        authorization_expires_at=datetime.now(UTC) + timedelta(hours=1),
         controller_ssh_fingerprint="SHA256:launchkey",
         host_id="host-1",
         host_incarnation="incarnation-1",
@@ -325,34 +325,156 @@ def test_write_materials_refuses_a_missing_directory_and_a_symlinked_one(
         producer.write_materials(link, issued)
 
 
-def test_the_cli_refuses_with_no_custody_before_touching_the_database(
+@pytest.mark.parametrize(
+    "delta", [timedelta(hours=4, seconds=5), timedelta(0), timedelta(hours=-1)]
+)
+def test_the_authorization_expiry_is_capped_at_the_role_window(
+    monkeypatch: pytest.MonkeyPatch, delta: timedelta
+) -> None:
+    seen = _fixture(monkeypatch)
+    keys = _Keys()
+    request = dataclasses.replace(
+        _request(seen["plan_id"]),
+        authorization_expires_at=datetime.now(UTC) + delta,
+    )
+    db = _Db()
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        producer.issue_dispatch_materials(db, request, custody=keys.custody())
+    assert caught.value.code is TargetRefusal.MATERIALS_REFUSED
+    assert db.order == [] and keys.signed == []
+    naive = dataclasses.replace(request, authorization_expires_at=datetime(2030, 1, 1))
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer.issue_dispatch_materials(db, naive, custody=keys.custody())
+
+
+def _issue_argv(tmp_path: Path, **overrides: str) -> list[str]:
+    values = {
+        "--plan-id": str(uuid4()),
+        "--rollout-ref": "r",
+        "--rollout-command-id": "c1",
+        "--dispatch-command-id": "c2",
+        "--authorization-expires-at": (
+            datetime.now(UTC) + timedelta(hours=1)
+        ).isoformat(),
+        "--controller-ssh-fingerprint": "f",
+        "--host-id": "h",
+        "--host-incarnation": "i",
+        "--host-enrolment-ref": "e",
+        "--out-dir": str(tmp_path),
+        "--custody": "transit",
+        "--custody-config": str(tmp_path / "absent.json"),
+    }
+    values.update(overrides)
+    return ["issue", *[part for item in values.items() for part in item]]
+
+
+def test_issue_requires_the_transit_custody_flags_and_has_no_default_mode(
+    tmp_path: Path,
+) -> None:
+    argv = _issue_argv(tmp_path)
+    for flag in ("--custody", "--custody-config"):
+        index = argv.index(flag)
+        broken = argv[:index] + argv[index + 2 :]
+        with pytest.raises(SystemExit):
+            producer.main(broken, {})
+    with pytest.raises(SystemExit):
+        producer.main(_issue_argv(tmp_path, **{"--custody": "stdin"}), {})
+
+
+def test_issue_refuses_before_the_database_without_a_valid_config_or_token(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    touched: list[str] = []
+    monkeypatch.setattr(
+        producer, "_controller_session", lambda env: touched.append("db") or None
+    )
+    assert producer.main(_issue_argv(tmp_path), {}) == 2
+    assert "custody_not_configured" in capsys.readouterr().err
+    assert touched == []
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            [
+                "propose", "--command-id", "c", "--target-id", str(uuid4()),
+                "--operation", "deploy", "--descriptor-digest", "d",
+                "--execution-plan-digest", "e", "--approval-policy-code", "p",
+                "--approval-policy-version", "1",
+            ],
+            "plan proposed:",
+        ),
+        (
+            [
+                "open-approval", "--command-id", "c",
+                "--plan-id", str(uuid4()), "--requested-by", str(uuid4()),
+            ],
+            "approval opened:",
+        ),
+        (
+            [
+                "approve", "--command-id", "c",
+                "--plan-id", str(uuid4()), "--approval-request-id", str(uuid4()),
+            ],
+            "plan approved:",
+        ),
+    ],
+)  # fmt: skip
+def test_the_plan_lifecycle_commands_print_ids_only_and_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    expected: str,
+) -> None:
+    calls: list[str] = []
+
+    class _Session:
+        def commit(self) -> None:
+            calls.append("commit")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    approval = ModuleType("vendor_cp.deployment.foundation_execution_approval")
+    approval.ProposeFoundationPlan = lambda **kw: SimpleNamespace(**kw)  # type: ignore[attr-defined]
+    approval.propose_foundation_plan = lambda db, req: SimpleNamespace(id="plan-1")  # type: ignore[attr-defined]
+    approval.open_foundation_approval = lambda db, **kw: SimpleNamespace(
+        request_id="req-1"
+    )  # type: ignore[attr-defined]
+    approval.approve_foundation_plan = lambda db, **kw: SimpleNamespace(id="plan-1")  # type: ignore[attr-defined]
+    monkeypatch.setitem(
+        sys.modules, "vendor_cp.deployment.foundation_execution_approval", approval
+    )
+    monkeypatch.setattr(producer, "_controller_session", lambda env: _Session())
+    assert producer.main(argv, {"DATABASE_URL": "x", "PLATFORM_DATABASE_URL": "y"}) == 0
+    out = capsys.readouterr().out
+    assert expected in out and calls == ["commit", "close"]
+    assert "SECRET" not in out
+
+
+def test_a_lifecycle_command_refuses_on_a_bad_id_without_the_database(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub = ModuleType("x")
+    stub.approve_foundation_plan = lambda db, **kw: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(
+        sys.modules, "vendor_cp.deployment.foundation_execution_approval", stub
+    )
+    monkeypatch.setattr(
+        producer, "_controller_session", lambda env: SimpleNamespace(close=lambda: None)
+    )
     argv = [
-        "issue",
+        "approve",
+        "--command-id",
+        "c",
         "--plan-id",
-        str(uuid4()),
-        "--rollout-ref",
-        "r",
-        "--rollout-command-id",
-        "c1",
-        "--dispatch-command-id",
-        "c2",
-        "--authorization-expires-at",
-        "2026-11-16T00:00:00+00:00",
-        "--controller-ssh-fingerprint",
-        "f",
-        "--host-id",
-        "h",
-        "--host-incarnation",
-        "i",
-        "--host-enrolment-ref",
-        "e",
-        "--out-dir",
-        str(tmp_path),
+        "not-a-uuid",
+        "--approval-request-id",
+        "x",
     ]
     assert producer.main(argv, {}) == 2
-    assert "custody_not_configured" in capsys.readouterr().err
+    assert "invalid request" in capsys.readouterr().err
 
 
 def test_the_module_holds_no_key_material_and_generates_none() -> None:
