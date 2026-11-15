@@ -24,6 +24,7 @@ identities is a no-op and a repeat with different ones refuses.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
 from typing import Any, Final
@@ -42,7 +43,9 @@ from vendor_cp.deployment.verification_identities import (
 __all__ = [
     "AUTHORIZATION_IDENTITY_ENV",
     "DISPATCH_IDENTITY_ENV",
+    "ControlIdentities",
     "install_control_verification",
+    "load_control_identities",
 ]
 
 AUTHORIZATION_IDENTITY_ENV: Final = "AUTHORIZATION_VERIFICATION_IDENTITY"
@@ -70,13 +73,22 @@ def _control_missing() -> FoundationBindingsUnavailable:
     )
 
 
-def install_control_verification(
-    env: Mapping[str, str],
-    *,
-    clock: Callable[[], datetime],
-    owner_uid: int = 0,
-) -> None:
-    """Install both Control security halves, or refuse naming what is missing."""
+@dataclass(frozen=True, slots=True)
+class ControlIdentities:
+    """The two proven public identities Control's verification is installed with."""
+
+    authorization: PinnedVerificationIdentity
+    dispatch: PinnedVerificationIdentity
+
+
+def load_control_identities(
+    env: Mapping[str, str], *, owner_uid: int = 0
+) -> ControlIdentities:
+    """Load and prove both identities. Touches no database and installs nothing.
+
+    Called before the first database connection, so a missing or malformed
+    identity refuses before any credential is used.
+    """
     missing = [
         name
         for name in (AUTHORIZATION_IDENTITY_ENV, DISPATCH_IDENTITY_ENV)
@@ -89,28 +101,43 @@ def install_control_verification(
             code=TargetRefusal.VERIFICATION_IDENTITY_MISSING,
         )
     try:
+        from dotmac_deployment_control import AUTHORIZATION_PURPOSE, DISPATCH_PURPOSE
+    except ImportError:
+        raise _control_missing() from None
+    return ControlIdentities(
+        authorization=PinnedVerificationIdentity.read(
+            env[AUTHORIZATION_IDENTITY_ENV].strip(),
+            purpose=AUTHORIZATION_PURPOSE,
+            what=f"authorization verification identity ({AUTHORIZATION_IDENTITY_ENV})",
+            owner_uid=owner_uid,
+        ),
+        dispatch=PinnedVerificationIdentity.read(
+            env[DISPATCH_IDENTITY_ENV].strip(),
+            purpose=DISPATCH_PURPOSE,
+            what=f"dispatch verification identity ({DISPATCH_IDENTITY_ENV})",
+            owner_uid=owner_uid,
+        ),
+    )
+
+
+def install_control_verification(
+    env: Mapping[str, str],
+    *,
+    clock: Callable[[], datetime],
+    owner_uid: int = 0,
+    identities: ControlIdentities | None = None,
+) -> None:
+    """Install both Control security halves, or refuse naming what is missing."""
+    proven = identities or load_control_identities(env, owner_uid=owner_uid)
+    try:
         from dotmac_deployment_control import (
-            AUTHORIZATION_PURPOSE,
-            DISPATCH_PURPOSE,
             HOST_ADMISSION_PRESENTATION_PURPOSE,
             install_foundation_consumption_security,
             install_host_admission_security,
         )
     except ImportError:
         raise _control_missing() from None
-
-    authorization = PinnedVerificationIdentity.read(
-        env[AUTHORIZATION_IDENTITY_ENV].strip(),
-        purpose=AUTHORIZATION_PURPOSE,
-        what=f"authorization verification identity ({AUTHORIZATION_IDENTITY_ENV})",
-        owner_uid=owner_uid,
-    )
-    dispatch = PinnedVerificationIdentity.read(
-        env[DISPATCH_IDENTITY_ENV].strip(),
-        purpose=DISPATCH_PURPOSE,
-        what=f"dispatch verification identity ({DISPATCH_IDENTITY_ENV})",
-        owner_uid=owner_uid,
-    )
+    authorization, dispatch = proven.authorization, proven.dispatch
     fingerprints = (
         authorization.public_key_fingerprint,
         dispatch.public_key_fingerprint,

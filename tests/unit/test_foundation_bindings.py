@@ -208,7 +208,10 @@ def test_build_execution_bindings_wires_the_approved_pair(
     )
 
 
-_SCOPED_DSN = "postgresql+psycopg://run_consume:pw@db.example.test:5432/cp"
+_SCOPED_DSN = (
+    "postgresql+psycopg://run_consume:pw@db.example.test:5432/cp"
+    "?sslmode=verify-full&sslrootcert=/etc/dotmac/ca.pem"
+)
 _ALL_INPUTS = {
     "DISPATCH_CONSUMPTION_DATABASE_URL": _SCOPED_DSN,
     HOST_ADMISSION_MATERIALS_ENV: "/nonexistent/admission.json",
@@ -549,6 +552,9 @@ def _compose(
         bindings_module, "require_clock_skew_within", step("skew", None)
     )
     monkeypatch.setattr(
+        bindings_module, "load_control_identities", step("load_identities", "ids")
+    )
+    monkeypatch.setattr(
         bindings_module, "install_control_verification", step("install_control")
     )
     monkeypatch.setattr(
@@ -581,6 +587,7 @@ def test_bindings_composes_target_side_in_a_fail_closed_order(
     # before the clock check, and Control security only on the proven clock.
     assert calls == [
         "evidence",
+        "load_identities",
         "admission_materials",
         "context_materials",
         "sessions",
@@ -604,7 +611,8 @@ def test_bindings_composes_target_side_in_a_fail_closed_order(
 @pytest.mark.parametrize(
     ("refusing", "never_reached"),
     [
-        ("evidence", {"sessions", "prove_role", "skew", "install_control"}),
+        ("evidence", {"load_identities", "sessions", "prove_role", "skew"}),
+        ("load_identities", {"sessions", "prove_role", "skew", "install_control"}),
         ("prove_role", {"skew", "install_control"}),
         ("skew", {"install_control"}),
         ("install_control", set()),

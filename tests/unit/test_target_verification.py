@@ -209,7 +209,11 @@ def test_identity_file_conditions_refuse(control: ModuleType, tmp_path: Path) ->
             owner_uid=_UID + 1,
         )
     )
-    assert "owned" in str(refused)
+    assert "owner" in str(refused)
+    # a directory anyone else can write to could swap the file under us
+    tmp_path.chmod(0o770)
+    assert "directory" in str(_refusal(keyed.load))
+    tmp_path.chmod(0o700)
     # group/other writable
     keyed.path.chmod(0o666)
     assert "writable" in str(_refusal(keyed.load))
@@ -497,3 +501,34 @@ def test_control_refusing_the_install_is_a_typed_refusal(
         lambda: install_control_verification(env, clock=lambda: None, owner_uid=_UID)  # type: ignore[arg-type,return-value]
     )
     assert refused.code is TargetRefusal.CONTROL_SECURITY_REFUSED
+
+
+def test_identities_load_without_installing_anything(
+    control: ModuleType, tmp_path: Path
+) -> None:
+    env, authorization, dispatch = _control_env(tmp_path)
+    loaded = control_security.load_control_identities(env, owner_uid=_UID)
+    assert loaded.authorization.key_id == "a-1" and loaded.dispatch.key_id == "d-1"
+    assert control.installed == []  # type: ignore[attr-defined]
+    # And a pre-loaded pair is what gets installed, not a second read.
+    authorization.path.unlink()
+    install_control_verification(
+        env,
+        clock=lambda: None,
+        owner_uid=_UID,
+        identities=loaded,  # type: ignore[arg-type,return-value]
+    )
+    assert [kind for kind, _ in control.installed] == ["admission", "consumption"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("missing", [AUTHORIZATION_IDENTITY_ENV, DISPATCH_IDENTITY_ENV])
+def test_loading_without_an_identity_refuses_naming_it(
+    control: ModuleType, tmp_path: Path, missing: str
+) -> None:
+    env, _, _ = _control_env(tmp_path)
+    del env[missing]
+    refused = _refusal(
+        lambda: control_security.load_control_identities(env, owner_uid=_UID)
+    )
+    assert refused.code is TargetRefusal.VERIFICATION_IDENTITY_MISSING
+    assert missing in str(refused)

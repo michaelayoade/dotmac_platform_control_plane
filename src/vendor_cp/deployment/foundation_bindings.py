@@ -65,6 +65,7 @@ from vendor_cp.deployment.control_security import (
     AUTHORIZATION_IDENTITY_ENV,
     DISPATCH_IDENTITY_ENV,
     install_control_verification,
+    load_control_identities,
 )
 from vendor_cp.deployment.database_clock import (
     SKEW_LIMIT_ENV,
@@ -441,6 +442,7 @@ def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
     limit = parse_skew_limit(env.get(SKEW_LIMIT_ENV))
     # Everything that needs no connection is proved before the first one.
     evidence_policy, evidence_verifier = release_evidence_trust(env)
+    control_identities = load_control_identities(env)
     host_admission = host_admission_source(admission_path)
     host_admission()
     foundation = foundation_host_bindings()
@@ -453,7 +455,7 @@ def bindings(environ: Mapping[str, str] | None = None) -> ExecutionBindings:
     prove_scoped_role(sessions)
     clock = DatabaseClock(sessions)
     require_clock_skew_within(clock, limit=limit)
-    install_control_verification(env, clock=clock)
+    install_control_verification(env, clock=clock, identities=control_identities)
     return build_execution_bindings(
         sessions=sessions,
         host_admission=host_admission,

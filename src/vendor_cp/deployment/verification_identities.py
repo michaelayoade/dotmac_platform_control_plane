@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import json
 import os
 import stat
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Final
 
 from vendor_cp.deployment.target_refusals import (
@@ -104,20 +104,43 @@ class PinnedVerificationIdentity:
     ) -> PinnedVerificationIdentity:
         """Load and prove one identity, or refuse naming `what` only."""
         refused = TargetRefusal.VERIFICATION_IDENTITY_REFUSED
+        # The directory must not be replaceable by anyone but its owner, and the
+        # file is opened without following links and judged on the DESCRIPTOR,
+        # so nothing can be swapped between the check and the read.
+        parent = os.path.dirname(os.path.abspath(path))
         try:
-            info = os.lstat(path)
+            parent_info = os.lstat(parent)
         except OSError:
             raise _refuse(f"{what} cannot be read", refused) from None
-        if not stat.S_ISREG(info.st_mode):
-            raise _refuse(f"{what} is not a regular file", refused)
-        if info.st_uid != owner_uid:
-            raise _refuse(f"{what} is not owned by the required owner", refused)
-        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise _refuse(f"{what} is writable by group or others", refused)
-        if info.st_size > MAX_IDENTITY_BYTES:
-            raise _refuse(f"{what} exceeds the size bound", refused)
+        if (
+            not stat.S_ISDIR(parent_info.st_mode)
+            or parent_info.st_uid != owner_uid
+            or parent_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise _refuse(
+                f"{what} sits in a directory that is not owner-only writable", refused
+            )
         try:
-            document = json.loads(Path(path).read_text(encoding="utf-8"))
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise _refuse(f"{what} is not a regular file", refused) from None
+            raise _refuse(f"{what} cannot be read", refused) from None
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise _refuse(f"{what} is not a regular file", refused)
+            if info.st_uid != owner_uid:
+                raise _refuse(f"{what} is not owned by the required owner", refused)
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise _refuse(f"{what} is writable by group or others", refused)
+            if info.st_size > MAX_IDENTITY_BYTES:
+                raise _refuse(f"{what} exceeds the size bound", refused)
+            raw = os.read(fd, MAX_IDENTITY_BYTES + 1)
+        finally:
+            os.close(fd)
+        try:
+            document = json.loads(raw.decode("utf-8"))
         except Exception:
             raise _refuse(f"{what} is not a JSON document", refused) from None
         if not isinstance(document, dict) or set(document) != _FIELDS:
