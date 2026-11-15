@@ -204,7 +204,10 @@ def test_main_reports_pass_and_refusal_with_codes_only(
 ) -> None:
     from vendor_cp.deployment import consumption_scope
 
-    dsn = "postgresql+psycopg://run_consume:SECRET-MARKER@db.example.test/cp"
+    dsn = (
+        "postgresql+psycopg://run_consume:SECRET-MARKER@db.example.test/cp"
+        "?sslmode=verify-full&sslrootcert=/etc/dotmac/ca.pem"
+    )
     env = {consumption_scope.CONSUMPTION_DSN_ENV: dsn}
     monkeypatch.setattr(
         consumption_scope, "consumption_sessions", lambda _dsn: lambda: None
