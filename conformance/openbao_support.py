@@ -32,9 +32,9 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedire
 
 class OpenBao:
     def __init__(self, address: str, root_token: str) -> None:
-        assert address.startswith(("http://127.0.0.1:", "http://localhost:")), (
-            "the disposable OpenBao must be on loopback"
-        )
+        assert address.startswith(
+            ("http://127.0.0.1:", "http://localhost:")
+        ), "the disposable OpenBao must be on loopback"
         self.address = address.rstrip("/")
         self._root = root_token
 

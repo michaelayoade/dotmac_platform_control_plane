@@ -164,7 +164,7 @@ def load_config(path: str) -> TransitCustodyConfig:
     ):
         if "licen" in name or name.startswith("secret"):
             raise _refuse("the custody configuration names a forbidden key or mount")
-    return TransitCustodyConfig(**{k: document[k] for k in _CONFIG_FIELDS})  # type: ignore[arg-type]
+    return TransitCustodyConfig(**{k: document[k] for k in _CONFIG_FIELDS})
 
 
 # ── token: stdin only ───────────────────────────────────────────────────────

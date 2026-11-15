@@ -381,7 +381,7 @@ def _timeout_ms(value: str) -> int | None:
 
 
 def _names(value: Any) -> list[str] | None:
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [str(item) for item in value]
     if isinstance(value, str) and value.startswith("{") and value.endswith("}"):
         return [item for item in value[1:-1].split(",") if item]
@@ -401,8 +401,8 @@ def _prove_ledger_scope(role: str, dispatch_id: str, rls: Any, policies: Any) ->
         )
     scope_literal = f"'{LEDGER_SCOPE}'"
     dispatch_literal = f"'{dispatch_id}'"
-    permissive: list[tuple] = []
-    own: list[tuple] = []
+    permissive: list[tuple[Any, ...]] = []
+    own: list[tuple[Any, ...]] = []
     for row in policies:
         name, kind, roles, command, qual, check = row
         named = _names(roles)
