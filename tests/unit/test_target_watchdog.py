@@ -36,6 +36,7 @@ class _World:
         self.executed: list[str] = []
         self.leftovers = leftovers
         self.role_present = True
+        self.lock_timeouts = 0
         self.fail_on: str | None = None
 
     def factory(self) -> Any:
@@ -43,6 +44,9 @@ class _World:
 
         class _Conn:
             def exec_driver_sql(self, statement: str) -> Any:
+                if statement.startswith("SET lock_timeout"):
+                    world.lock_timeouts += 1
+                    return _Result(None)
                 world.executed.append(statement)
                 if world.fail_on and world.fail_on in statement:
                     raise RuntimeError("boom")
@@ -109,6 +113,8 @@ def test_any_violation_kills_the_role_and_reads_back_clean(kind: str) -> None:
     assert world.executed[:-1] == list(spec.revocation_sql("run_x"))
     assert world.executed[-1] == spec.verification_sql("run_x")
     assert not world.role_present
+    # Every revocation step is bounded by a lock timeout so it cannot hang.
+    assert world.lock_timeouts == len(spec.revocation_sql("run_x"))
 
 
 def test_a_clean_run_ends_at_the_deadline_still_revoked() -> None:

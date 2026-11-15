@@ -124,7 +124,10 @@ def revoke(session_factory: Callable[[], Any], role: str) -> tuple[int, int, int
     for statement in revocation_sql(role):
         session = session_factory()
         try:
-            session.connection().exec_driver_sql(statement)
+            connection = session.connection()
+            # A blocked DDL must fail and let the next step run, never hang.
+            connection.exec_driver_sql("SET lock_timeout = '5s'")
+            connection.exec_driver_sql(statement)
             session.commit()
         except Exception:
             session.rollback()

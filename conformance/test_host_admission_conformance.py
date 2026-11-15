@@ -1970,6 +1970,8 @@ def _run_statements(admin: Any, statements: Any) -> None:
     """Run rendered SQL as written. A failure inside the rendered transaction is
     rolled back before it is re-raised, so the connection is never left aborted."""
     with admin.connect() as connection:
+        # A blocked DDL must FAIL, never hang the job.
+        connection.exec_driver_sql("SET lock_timeout = '10s'")
         try:
             for statement in statements:
                 connection.exec_driver_sql(statement)
@@ -1981,6 +1983,7 @@ def _run_statements(admin: Any, statements: Any) -> None:
 def _guard_reset(admin: Any) -> None:
     """Leave the ledger exactly as Kernel ships it, whatever an earlier case did."""
     with admin.connect() as connection:
+        connection.exec_driver_sql("SET lock_timeout = '10s'")
         connection.exec_driver_sql(
             f"DROP POLICY IF EXISTS {consumption_scope.GUARD_POLICY} ON {_LEDGER_RELATION}"
         )
@@ -2011,6 +2014,7 @@ def _teardown_run_role(admin: Any, role: str) -> None:
     for statement in consumption_role_spec.revocation_sql(role):
         with contextlib.suppress(Exception):
             with admin.connect() as connection:
+                connection.exec_driver_sql("SET lock_timeout = '10s'")
                 connection.exec_driver_sql(statement)
     _guard_reset(admin)
 
@@ -2263,6 +2267,7 @@ def _prove_consumed_and_out_of_scope_refused(
                 {"key": decoy},
             )
     # The guard cannot be torn down while a restrictive policy remains.
+    db.rollback()
     with pytest.raises(DBAPIError):
         _run_statements(admin, consumption_role_spec.guard_disable_sql())
 
@@ -2276,6 +2281,7 @@ def test_scoped_role_runs_real_consumption_and_refuses_out_of_scope(
     )
     db.commit()
     admin = _admin_engine()
+    db.rollback()  # no open transaction on the ledger while DDL runs
     _guard_reset(admin)
     role, verifier = _create_run_role(admin, str(coordinate.attempt_id))
     engine = create_engine(_role_url(role), future=True)
@@ -2288,6 +2294,7 @@ def test_scoped_role_runs_real_consumption_and_refuses_out_of_scope(
         for session in sessions:
             session.close()
         engine.dispose()
+        db.rollback()  # the marker count above left a transaction on the ledger
         _teardown_run_role(admin, role)
         admin.dispose()
 
@@ -2837,6 +2844,7 @@ def test_end_to_end_propose_approve_issue_transit_and_consume_as_scoped_role(
         # Consume as the scoped role under the per-run ledger guard, with Control
         # verifying the TRANSIT-signed envelopes through CP's pinned verifiers.
         admin = _admin_engine()
+        db.rollback()  # no open transaction on the ledger while DDL runs
         _guard_reset(admin)
         role, verifier = _create_run_role(admin, str(coordinate.attempt_id))
         engine = create_engine(_role_url(role), future=True)
@@ -2849,6 +2857,7 @@ def test_end_to_end_propose_approve_issue_transit_and_consume_as_scoped_role(
             for session in sessions:
                 session.close()
             engine.dispose()
+            db.rollback()  # release the ledger read locks before the DDL teardown
             _teardown_run_role(admin, role)
             admin.dispose()
     finally:
