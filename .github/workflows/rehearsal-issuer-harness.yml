@@ -185,6 +185,9 @@ jobs:
         env:
           REHEARSAL_ISSUER_MIGRATION_DATABASE_URL: "postgresql+psycopg://app_admin@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
           CONFORMANCE_DATABASE_URL: "postgresql+psycopg://platform_api@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
+          # Disposable-database administrator, used only to create and revoke the
+          # scoped consumption role the new cases prove (never a product DSN).
+          CONFORMANCE_ADMIN_DATABASE_URL: "postgresql+psycopg://postgres@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
           CONFORMANCE_PRIVATE_WHEELHOUSE: /tmp/private-wheels
           CONFORMANCE_PUBLIC_WHEELHOUSE: /tmp/public-wheelhouse
         run: |
@@ -240,6 +243,8 @@ jobs:
               "test_expiry_between_foundation_verification_and_final_admission_is_refused",
               "test_component_observer_runs_only_after_the_admission_transaction_commits",
               "test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization",
+              "test_scoped_role_runs_real_consumption_and_refuses_out_of_scope",
+              "test_scoped_consumption_role_revocation_leaves_nothing",
           } | {
               f"test_real_approved_cp_v3_lifecycle[{scenario}]"
               for scenario in (
@@ -249,10 +254,10 @@ jobs:
                   "finalization_withdrawal",
               )
           }
-          assert len(cases) == len(expected) == 24
+          assert len(cases) == len(expected) == 26
           assert {case.attrib["name"] for case in cases} == expected
           assert all(not any(case.find(outcome) is not None for outcome in ("skipped", "failure", "error")) for case in cases)
-          print("host-admission conformance: ten component cases, default refusal and thirteen real-approval source cases passed, zero skipped")
+          print("host-admission conformance: ten component cases, default refusal, two scoped-role cases and thirteen real-approval source cases passed, zero skipped")
           PY
 
       - name: Stop Postgres

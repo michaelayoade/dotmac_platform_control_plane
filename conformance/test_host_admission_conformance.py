@@ -127,11 +127,13 @@ from dotmac_deployment_foundation.host_source import read_installed_artifact
 from dotmac_deployment_foundation.trusted_host_source import candidate_subject_digest
 from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
 from sqlalchemy import create_engine, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.approvals_authority import bare_content_hash
+from vendor_cp.deployment import consumption_role_spec, consumption_scope
 from vendor_cp.deployment import foundation_execution_approval as foundation_approval
 
 # The LEAF module only -- see its own docstring and
@@ -1898,6 +1900,199 @@ def test_real_approved_cp_v3_lifecycle(db: Session, monkeypatch, scenario: str) 
         for session in sessions:
             session.close()
         engine.dispose()
+
+
+# ── The scoped consumption role, proven against a real database ─────────────
+#
+# E6 review R1/R2/R3/R4/R11. The role is created from the EXACT statements
+# `consumption_role_spec` renders (the same text the grants document embeds), in
+# this job's disposable database only. Control's real consumption path then runs
+# AS that role, so a missing or surplus grant fails here rather than in the one
+# granted image's first real run.
+
+CONFORMANCE_ADMIN_DATABASE_URL = os.environ.get("CONFORMANCE_ADMIN_DATABASE_URL")
+
+
+def _admin_engine() -> Any:
+    assert CONFORMANCE_ADMIN_DATABASE_URL, (
+        "CONFORMANCE_ADMIN_DATABASE_URL is required: the scoped-role cases "
+        "create a role in the disposable database. Missing is a failure, not a skip"
+    )
+    return create_engine(CONFORMANCE_ADMIN_DATABASE_URL, isolation_level="AUTOCOMMIT")
+
+
+def _create_run_role(admin: Any) -> str:
+    role = f"cp_run_{uuid.uuid4().hex[:10]}"
+    with admin.connect() as connection:
+        for statement in consumption_role_spec.creation_sql(
+            role,
+            password="disposable-test-only",  # noqa: S106 - disposable CI role
+            valid_until=datetime.now(UTC) + timedelta(hours=1),
+        ):
+            connection.execute(text(statement))
+    return role
+
+
+def _role_url(role: str) -> Any:
+    return make_url(CONFORMANCE_DATABASE_URL).set(username=role, password=None)
+
+
+def _sqlstate(error: DBAPIError) -> str | None:
+    return getattr(error.orig, "sqlstate", None)
+
+
+def test_scoped_role_runs_real_consumption_and_refuses_out_of_scope(
+    db: Session, monkeypatch
+) -> None:
+    coordinate = _build_admission_coordinate(db, now=_NOW, genuine_approval=True)
+    install_host_admission_security(
+        verifier=coordinate.presentation_verifier, clock=coordinate.clock
+    )
+    db.commit()
+    admin = _admin_engine()
+    role = _create_run_role(admin)
+    engine = create_engine(_role_url(role), future=True)
+    sessions: list[Session] = []
+    try:
+        # The proof, as the role itself, on the real catalogue.
+        consumption_scope.prove_scoped_role(lambda: Session(bind=engine))
+        # ... and the same proof from the administrative connection, by name,
+        # which is the ceremony's independent read-back (R5).
+        consumption_scope.prove_scoped_role(lambda: Session(bind=admin), role=role)
+
+        def session_factory() -> Session:
+            session = Session(bind=engine)
+            sessions.append(session)
+            return session
+
+        providers = foundation_approval.compose_approved_foundation_v3_providers(
+            foundation=FoundationHostV3Bindings(
+                admit_host_source=admit_host_source,
+                trust_policy_from_context=_build_trust_policy_from_resolved_context,
+                verifier=coordinate.foundation_verifier,
+                trace_type=HostSourceAdmissionTrace,
+                pair_result_type=AttestationPairVerificationResultV1,
+                consumption_request_type=ControlConsumptionRequestV3,
+                execution_context_type=ExecutionContextV3,
+            ),
+            sources=FoundationV3Sources(
+                sessions=session_factory,
+                host_admission=lambda: HostAdmissionObservation(
+                    coordinate.attempt_id,
+                    coordinate.presentation,
+                    coordinate.candidate_envelope,
+                    coordinate.installed_envelope,
+                ),
+                execution_context=lambda: coordinate.facts,
+                clock=coordinate.clock.now,
+            ),
+        )
+        _, trace = providers.host_source.admit_host_source()
+        providers.execution_authority.consume_dispatch(
+            request=ControlConsumptionRequestV3(
+                authorization_material_json=coordinate.execution.authorization_material_json,
+                dispatch_material_json=coordinate.execution.dispatch_material_json,
+                host_source_trace=trace,
+                expected_execution_plan_digest=_EXECUTION_PLAN,
+                control_consumption_ref=coordinate.execution.control_consumption_ref,
+            )
+        )
+        db.rollback()
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+        assert (
+            providers.execution_authority.lookup_committed(
+                control_consumption_ref=coordinate.execution.control_consumption_ref
+            )
+            is not None
+        )
+
+        # Out of scope, as the role. The privilege check precedes row access, so
+        # `WHERE false` statements refuse or succeed on the grant alone.
+        with admin.connect() as connection:
+            ledger_column = connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'platform_idempotency_records' "
+                    "ORDER BY ordinal_position LIMIT 1"
+                )
+            ).scalar_one()
+        refused = {
+            "verification key column": "UPDATE mod_deploy.target_credentials "
+            "SET public_key_b64 = public_key_b64 WHERE false",
+            "lock table business column": "UPDATE mod_deploy.deployment_targets "
+            "SET status = status WHERE false",
+            "ledger update": "UPDATE public.platform_idempotency_records "  # noqa: S608
+            f"SET {ledger_column} = {ledger_column} WHERE false",
+            "ledger delete": "DELETE FROM public.platform_idempotency_records "
+            "WHERE false",
+            "ledger truncate": "TRUNCATE public.platform_idempotency_records",
+            "rollout insert": "INSERT INTO mod_deploy.rollouts DEFAULT VALUES",
+            "read-only table write": "UPDATE mod_deploy.attestation_enrolments "
+            "SET updated_at = updated_at WHERE false",
+            "non-contract Control table": (
+                "SELECT 1 FROM mod_deploy.recovery_grants LIMIT 1"
+            ),
+            "schema create": "CREATE TABLE public.cp_run_scratch (a integer)",
+            "role switch": "SET ROLE postgres",
+        }
+        for name, statement in refused.items():
+            with Session(bind=engine) as probe:
+                with pytest.raises(DBAPIError) as caught:
+                    probe.execute(text(statement))
+                assert _sqlstate(caught.value) == "42501", name
+        # The grants that ARE given work: the lock column, and the ledger insert
+        # shape (permission only; a DEFAULT VALUES insert would violate NOT NULL).
+        with Session(bind=engine) as probe:
+            probe.execute(
+                text(
+                    "UPDATE mod_deploy.deployment_targets "
+                    "SET updated_at = updated_at WHERE false"
+                )
+            )
+            probe.rollback()
+        # The four limits are real role settings, not just proof inputs.
+        with Session(bind=engine) as probe:
+            assert probe.execute(text("SHOW statement_timeout")).scalar() == "30s"
+            assert probe.execute(text("SHOW lock_timeout")).scalar() == "5s"
+            assert probe.execute(text("SHOW log_statement")).scalar() == "all"
+    finally:
+        for session in sessions:
+            session.close()
+        engine.dispose()
+        with admin.connect() as connection:
+            for statement in consumption_role_spec.revocation_sql(role):
+                connection.execute(text(statement))
+        admin.dispose()
+
+
+def test_scoped_consumption_role_revocation_leaves_nothing() -> None:
+    admin = _admin_engine()
+    role = _create_run_role(admin)
+    engine = create_engine(_role_url(role), future=True)
+    try:
+        live = engine.connect()
+        assert live.execute(text("SELECT current_user")).scalar() == role
+        with admin.connect() as connection:
+            before = connection.execute(
+                text(consumption_role_spec.verification_sql(role))
+            ).one()
+            assert tuple(before) == (1, 1)
+            for statement in consumption_role_spec.revocation_sql(role):
+                connection.execute(text(statement))
+            after = connection.execute(
+                text(consumption_role_spec.verification_sql(role))
+            ).one()
+        assert tuple(after) == (0, 0)
+        # The pooled session the role still held was terminated, not left to
+        # outlive its VALID UNTIL.
+        with pytest.raises(DBAPIError):
+            live.execute(text("SELECT 1"))
+        with pytest.raises(DBAPIError):
+            create_engine(_role_url(role), future=True).connect()
+    finally:
+        engine.dispose()
+        admin.dispose()
 
 
 # ── small helpers used above ────────────────────────────────────────────────
