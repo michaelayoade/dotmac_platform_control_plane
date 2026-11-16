@@ -392,3 +392,142 @@ def test_a_dead_terminal_does_not_end_the_retry() -> None:
     assert watchdog.revoke_until_clean(
         world.factory, "run_x", sleep=lambda _s: None, out=broken
     )
+
+
+# ── exit code and restore order (final check N1, N2, N4) ────────────────────
+
+
+def _default_handlers() -> dict[int, Any]:
+    """The REAL default dispositions, so `previous` is SIG_DFL, not a test stub."""
+    saved = {s: signal.getsignal(s) for s in watchdog.SIGNALS}
+    for signum in watchdog.SIGNALS:
+        signal.signal(signum, signal.SIG_DFL)
+    return saved
+
+
+def _run_with_defaults(world: _World, out: Any) -> int:
+    saved = _default_handlers()
+    try:
+        return watchdog.run(
+            world.factory,
+            "run_x",
+            deadline_seconds=3,
+            sleep=lambda _s: None,
+            clock=iter(range(1000)).__next__,
+            out=out,
+        )
+    finally:
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
+
+
+def test_a_signal_while_the_incomplete_message_is_written_cannot_change_exit_5() -> (
+    None
+):
+    world = _World([["advisory_lock"]])
+    world.verify_script = [RuntimeError("down")] * 100
+    lines: list[str] = []
+
+    def out(line: str) -> None:
+        lines.append(line)
+        if "INCOMPLETE" in line:
+            # With the old handlers already restored this would be SIG_DFL: the
+            # process would die (143). Masked, it is ignored.
+            signal.raise_signal(signal.SIGTERM)
+            signal.raise_signal(signal.SIGHUP)
+
+    assert _run_with_defaults(world, out) == watchdog.EXIT_UNCLEAN
+    assert any("INCOMPLETE" in line for line in lines)
+
+
+def test_a_signal_while_the_failed_message_is_written_cannot_escape_run() -> None:
+    world = _World([RuntimeError("tick failed")])
+
+    def out(line: str) -> None:
+        if "failed" in line:
+            signal.raise_signal(signal.SIGINT)
+
+    code = _run_with_defaults(world, out)
+    assert code == watchdog.EXIT_FAILED
+    assert world.executed[:-1] == list(spec.revocation_sql("run_x"))
+    assert not world.role_present
+
+
+def test_a_failing_writer_never_changes_the_exit_code() -> None:
+    world = _World([["advisory_lock"]])
+
+    def broken(_line: str) -> None:
+        raise ValueError("writer exploded")
+
+    assert _run_with_defaults(world, broken) == watchdog.EXIT_TRIPPED
+
+
+def test_a_role_already_gone_with_an_unclean_readback_is_not_a_zero_exit() -> None:
+    world = _World([])
+    world.role_present = False
+    world.verify_script = [(1, 0, 0)] * 100
+    code, out = _run(world)
+    assert code == watchdog.EXIT_UNCLEAN
+    assert any("already gone" in line for line in out)
+    assert any("INCOMPLETE" in line for line in out)
+
+
+def test_a_role_already_gone_and_clean_is_still_zero() -> None:
+    world = _World([])
+    world.role_present = False
+    code, out = _run(world)
+    assert code == watchdog.EXIT_CLEAN and any("already gone" in line for line in out)
+
+
+def test_the_old_handlers_return_only_after_the_final_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = _quiet_handlers()
+    real = signal.signal
+    events: list[str] = []
+
+    def recording(signum: int, handler: Any) -> Any:
+        if handler is signal.SIG_IGN:
+            events.append("mask")
+        elif not callable(handler) or handler.__name__ != "on_signal":
+            events.append("restore")
+        return real(signum, handler)
+
+    world = _World([[]] * 5)
+    world.verify_script = [RuntimeError("down")] * 100
+    monkeypatch.setattr(signal, "signal", recording)
+    try:
+        watchdog.run(
+            world.factory,
+            "run_x",
+            deadline_seconds=3,
+            sleep=lambda _s: None,
+            clock=iter(range(1000)).__next__,
+            out=lambda line: events.append(f"out:{line[:24]}"),
+        )
+    finally:
+        monkeypatch.setattr(signal, "signal", real)
+        for signum, handler in saved.items():
+            real(signum, handler)
+    last_message = max(i for i, e in enumerate(events) if e.startswith("out:"))
+    first_restore = events.index("restore")
+    assert first_restore > last_message
+    assert any(e.startswith("out:watchdog: REVOCATION") for e in events)
+
+
+def test_the_command_refuses_a_dsn_without_a_bounded_connect_timeout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = "postgresql+psycopg://admin:pw@db.example.test/cp"
+    for dsn in (
+        base,
+        base + "?connect_timeout=0",
+        base + "?connect_timeout=6",
+        base + "?connect_timeout=abc",
+    ):
+        assert (
+            watchdog.main(["--role", "run_x"], {watchdog.ADMIN_DSN_ENV: dsn})
+            == watchdog.EXIT_FAILED
+        )
+        err = capsys.readouterr().err
+        assert "connect_timeout" in err and "pw" not in err

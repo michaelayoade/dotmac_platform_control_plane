@@ -157,9 +157,10 @@ is retried with bounded backoff (12 attempts, capped at 15 s) until the read-bac
 by hand. Exit codes: 0 clean end, 3 tripped, 4 failed, 5 revocation not clean, 6 signalled.
 It cannot survive SIGKILL, and a revocation can take minutes (each attempt is several
 fresh connections plus lock waits, and the retry sleeps alone total about two minutes), so
-run it where nothing sends SIGKILL: `systemd-run` (journal stdout; survives SSH loss), or
-docker with `--stop-timeout 600` and never `docker stop` it. The watchdog's DSN carries
-`connect_timeout=5`, so a blackholed database cannot hang a connect. After ANY watchdog
+run it where nothing sends SIGKILL: `systemd-run -p TimeoutStopSec=1200` (journal stdout; survives SSH loss; never `systemctl stop` it), or
+docker with `--stop-timeout 1200` and never `docker stop` it. The watchdog's DSN must carry
+`connect_timeout=5` (the command refuses one without; the kit also asserts it, plus TCP
+keepalives and `tcp_user_timeout`, since it does not bound a mid-statement blackhole). After ANY watchdog
 exit the ceremony kit's trap runs `revoke` and `verify` unconditionally. A signal at any
 instant, including inside the mask-and-revoke window, cannot skip revocation: once
 revoking starts the handler is a no-op and the revoke is re-entered if anything still

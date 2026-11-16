@@ -27,8 +27,10 @@ are IGNORED, so a second signal cannot abort it. Revocation is retried with boun
 backoff until the read-back is clean; if it never is (a database that stays
 unreachable), the watchdog exits LOUDLY with code 5 and the ceremony must revoke by
 hand. What it cannot survive is SIGKILL (for example `docker stop` after its grace
-period): run it so that cannot happen (`--stop-timeout 120`, or `systemd-run`, which
-also survives SSH loss) and let the ceremony kit's trap run the revocation too.
+period): run it so that cannot happen, with a stop timeout of 1200 s
+(`--stop-timeout 1200`, or `systemd-run -p TimeoutStopSec=1200`, which also
+survives SSH loss), and let the ceremony kit's trap run the revocation too. The
+DSN must carry `connect_timeout` (at most 5 s): the command refuses one without.
 Exit codes: 0 clean end, 3 tripped, 4 failed, 5 revocation NOT clean, 6 signalled.
 
 Its own database access (documented, not new): it runs on the CEREMONY host, never
@@ -58,6 +60,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
 
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
 from vendor_cp.deployment.consumption_role_spec import (
     revocation_sql,
@@ -93,6 +96,7 @@ IDLE_IN_TRANSACTION_SECONDS: Final = 30
 TRANSACTION_SECONDS: Final = 120
 STATEMENT_SECONDS: Final = 10
 BLOCKING_SECONDS: Final = 5
+MAX_CONNECT_TIMEOUT_SECONDS: Final = 5
 EXIT_CLEAN: Final = 0
 EXIT_TRIPPED: Final = 3
 EXIT_FAILED: Final = 4
@@ -191,7 +195,7 @@ def revoke_until_clean(
         if counts == (0, 0, 0):
             return True
         what = "not clean" if counts is not None else "could not read back"
-        with contextlib.suppress(OSError):  # a dead terminal must not end the retry
+        with contextlib.suppress(Exception):  # a dead terminal must not end the retry
             out(f"watchdog: revocation {what} (attempt {attempt} of {attempts})")
         if attempt < attempts:
             sleep(min(delay, REVOKE_BACKOFF_CAP_SECONDS))
@@ -225,6 +229,11 @@ def run(
 
     revoking = False
 
+    def say(message: str) -> None:
+        # A dead terminal or a failing writer must not change the exit code.
+        with contextlib.suppress(Exception):
+            out(message)
+
     def on_signal(signum: int, _frame: Any) -> None:
         nonlocal revoking
         if revoking:
@@ -247,24 +256,25 @@ def run(
                 session = session_factory()
                 try:
                     if not role_exists(session, role):
-                        out("watchdog: the role is already gone")
-                        return EXIT_CLEAN
+                        say("watchdog: the role is already gone")
+                        break  # still revoked and read back below, never a bare 0
                     kinds = tick(session, role)
                     session.rollback()
                 finally:
                     session.close()
                 if kinds:
-                    out("watchdog tripped: " + ", ".join(sorted(set(kinds))))
+                    say("watchdog tripped: " + ", ".join(sorted(set(kinds))))
                     result = EXIT_TRIPPED
                     break
                 sleep(interval)
             else:
-                out("watchdog: deadline reached")
+                say("watchdog: deadline reached")
         except _Interrupted as interrupted:
-            out(f"watchdog: signal {interrupted.signum} received: revoking")
+            say(f"watchdog: signal {interrupted.signum} received: revoking")
             result = EXIT_SIGNALLED
         except Exception:
-            out("watchdog failed: revoking")
+            revoking = True  # from here a signal is a no-op, even for the message
+            say("watchdog failed: revoking")
             result = EXIT_FAILED
     finally:
         # From the first statement here the handler is a no-op, so nothing can
@@ -277,19 +287,24 @@ def run(
                 for signum in SIGNALS if install_signals else ():
                     signal.signal(signum, signal.SIG_IGN)
                 clean = revoke_until_clean(session_factory, role, sleep=sleep, out=out)
-                for old_signum, handler in previous.items():
-                    signal.signal(old_signum, handler)
                 break
             except _Interrupted:
                 continue
-    if not clean:
-        out(
+    # Signals are still ignored here. The old handlers come back only AFTER the
+    # final message is written and the exit code chosen, so a signal on this path
+    # cannot turn exit 5 into 143, nor a failed message into a traceback.
+    if clean:
+        say("watchdog: role revoked and read back clean")
+        code = result
+    else:
+        say(
             "watchdog: REVOCATION INCOMPLETE; the role may still be alive. "
             "Revoke it by hand NOW (consumption_role_spec revoke, then verify)"
         )
-        return EXIT_UNCLEAN
-    out("watchdog: role revoked and read back clean")
-    return result
+        code = EXIT_UNCLEAN
+    for old_signum, handler in previous.items():
+        signal.signal(old_signum, handler)
+    return code
 
 
 def main(
@@ -306,6 +321,20 @@ def main(
     dsn = env.get(ADMIN_DSN_ENV, "").strip()
     if not dsn:
         print(f"{ADMIN_DSN_ENV} is not supplied", file=sys.stderr)
+        return EXIT_FAILED
+    try:
+        # A blackholed database must not hang a connect for minutes.
+        timeout = make_url(dsn).query.get("connect_timeout")
+        if not isinstance(timeout, str) or not timeout.isdigit():
+            raise ValueError("connect_timeout")
+        if not 1 <= int(timeout) <= MAX_CONNECT_TIMEOUT_SECONDS:
+            raise ValueError("connect_timeout")
+    except ValueError:
+        print(
+            f"{ADMIN_DSN_ENV} must carry connect_timeout "
+            f"(1 to {MAX_CONNECT_TIMEOUT_SECONDS} seconds)",
+            file=sys.stderr,
+        )
         return EXIT_FAILED
     try:
         from dotmac_kernel.session_runtime import DatabaseRuntime
