@@ -2574,12 +2574,14 @@ def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
     try:
         config = harness.pin_both()
         # The token role is exactly what the image renders (ceremony read-back).
-        assert (
-            transit_custody.readback_token_role(
-                kit.role_description(), harness.role_body
-            )
-            == []
+        drift = transit_custody.readback_token_role(
+            kit.role_description(), harness.role_body
         )
+        shown = {
+            field: json.loads(kit.role_description())["data"].get(field)
+            for field in drift
+        }
+        assert drift == [], shown
         # ... and its CIDR binding is enforced: a role bound to a documentation
         # range refuses a perfectly valid token, then the real role is restored.
         wrong = transit_custody.render_token_role(kit.policy, "192.0.2.7/32")
