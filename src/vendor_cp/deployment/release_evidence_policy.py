@@ -66,7 +66,7 @@ def release_evidence_trust(
             code=TargetRefusal.EVIDENCE_POLICY_INCOMPLETE,
         )
     repository = env[RELEASE_EVIDENCE_REPOSITORY_ENV].strip()
-    if not _REPOSITORY.match(repository):
+    if not _REPOSITORY.fullmatch(repository):
         raise FoundationBindingsUnavailable(
             f"{RELEASE_EVIDENCE_REPOSITORY_ENV} is not an owner/name repository",
             code=TargetRefusal.EVIDENCE_POLICY_INCOMPLETE,

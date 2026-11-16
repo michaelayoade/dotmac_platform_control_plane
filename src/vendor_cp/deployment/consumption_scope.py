@@ -373,7 +373,7 @@ def consumption_sessions(dsn: str) -> Callable[[], Session]:
 
 
 def _timeout_ms(value: str) -> int | None:
-    match = _DURATION.match(value.strip())
+    match = _DURATION.fullmatch(value.strip())
     if match is None:
         return None
     number, unit = int(match.group(1)), match.group(2) or "ms"
@@ -567,7 +567,7 @@ def prove_scoped_role(
         parsed = _timeout_ms(settings.get(name, "").strip("'\" "))
         if parsed is None or not 0 < parsed <= limit_ms:
             raise _refuse(f"the consumption role has no bounded {name}", over)
-    temp = _SIZE.match(settings.get("temp_file_limit", "").strip("'\" "))
+    temp = _SIZE.fullmatch(settings.get("temp_file_limit", "").strip("'\" "))
     temp_kb = (
         int(temp.group(1))
         * {None: 1, "kB": 1, "MB": 1024, "GB": 1024 * 1024}[temp.group(2)]

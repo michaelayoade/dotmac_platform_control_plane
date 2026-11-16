@@ -45,8 +45,9 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", default=None)
-    # The dispatch the role is bound to, read from the target's own
-    # dispatch-materials.json by the ceremony.
+    # The dispatch the role is bound to, read by the ceremony from the
+    # CONTROLLER-side dispatch-materials.json that `issue` wrote, never from a
+    # copy the target holds.
     parser.add_argument("--dispatch-id", required=True)
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ

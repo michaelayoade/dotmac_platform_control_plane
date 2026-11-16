@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import signal
 from typing import Any
 
 import pytest
@@ -37,6 +38,8 @@ class _World:
         self.leftovers = leftovers
         self.role_present = True
         self.lock_timeouts = 0
+        self.verify_script: list[Any] = []
+        self.on_statement: Any = None
         self.fail_on: str | None = None
 
     def factory(self) -> Any:
@@ -48,10 +51,17 @@ class _World:
                     world.lock_timeouts += 1
                     return _Result(None)
                 world.executed.append(statement)
+                if world.on_statement:
+                    world.on_statement(statement)
                 if world.fail_on and world.fail_on in statement:
                     raise RuntimeError("boom")
                 if statement.startswith("DROP ROLE"):
                     world.role_present = False
+                if statement.startswith("SELECT (SELECT count") and world.verify_script:
+                    item = world.verify_script.pop(0)
+                    if isinstance(item, Exception):
+                        raise item
+                    return _Result(item)
                 if statement.startswith("SELECT (SELECT count"):
                     return _Result(
                         world.leftovers
@@ -152,7 +162,8 @@ def test_revocation_is_attempted_in_full_even_when_a_step_errors() -> None:
 def test_leftovers_after_revocation_are_a_failure() -> None:
     world = _World([["advisory_lock"]], leftovers=(1, 0, 0))
     code, out = _run(world)
-    assert code == watchdog.EXIT_FAILED and "left something behind" in out[-1]
+    assert code == watchdog.EXIT_UNCLEAN
+    assert any("REVOCATION INCOMPLETE" in line for line in out)
 
 
 @pytest.mark.parametrize("deadline", [0, -1, MAX_ROLE_TTL.total_seconds() + 1])
@@ -179,3 +190,97 @@ def test_the_command_needs_its_admin_credential(
 ) -> None:
     assert watchdog.main(["--role", "run_x"], {}) == watchdog.EXIT_FAILED
     assert watchdog.ADMIN_DSN_ENV in capsys.readouterr().err
+
+
+# ── signals and the revocation retry (review F1) ────────────────────────────
+
+
+@pytest.mark.parametrize("signum", watchdog.SIGNALS)
+def test_every_signal_takes_the_revoke_path_and_exits_nonzero(signum: int) -> None:
+    before = {s: signal.getsignal(s) for s in watchdog.SIGNALS}
+    world = _World([[]] * 20)
+    fired: list[int] = []
+
+    def sleeper(_seconds: float) -> None:
+        if not fired:
+            fired.append(signum)
+            signal.raise_signal(signum)
+
+    out: list[str] = []
+    code = watchdog.run(
+        world.factory,
+        "run_x",
+        deadline_seconds=100,
+        sleep=sleeper,
+        clock=iter(range(1000)).__next__,
+        out=out.append,
+    )
+    assert code == watchdog.EXIT_SIGNALLED
+    assert any(f"signal {int(signum)}" in line for line in out)
+    assert world.executed[:-1] == list(spec.revocation_sql("run_x"))
+    assert not world.role_present
+    # The previous handlers are restored, so the process is not left muted.
+    assert {s: signal.getsignal(s) for s in watchdog.SIGNALS} == before
+
+
+def test_a_second_signal_during_revocation_cannot_abort_it() -> None:
+    world = _World([[]] * 20)
+    raised: list[str] = []
+
+    def sleeper(_seconds: float) -> None:
+        if not raised:
+            raised.append("first")
+            signal.raise_signal(signal.SIGHUP)
+
+    def mid_revoke(statement: str) -> None:
+        if statement.startswith("ALTER ROLE") and "second" not in raised:
+            raised.append("second")
+            signal.raise_signal(signal.SIGTERM)
+            signal.raise_signal(signal.SIGINT)
+            signal.raise_signal(signal.SIGQUIT)
+
+    world.on_statement = mid_revoke
+    out: list[str] = []
+    code = watchdog.run(
+        world.factory,
+        "run_x",
+        deadline_seconds=100,
+        sleep=sleeper,
+        clock=iter(range(1000)).__next__,
+        out=out.append,
+    )
+    assert raised == ["first", "second"]
+    assert code == watchdog.EXIT_SIGNALLED
+    # Revocation ran to the end despite three more signals.
+    assert world.executed[:-1] == list(spec.revocation_sql("run_x"))
+    assert not world.role_present
+
+
+def test_revocation_retries_until_the_read_back_is_clean() -> None:
+    world = _World([["advisory_lock"]])
+    world.verify_script = [RuntimeError("unreachable"), (1, 0, 0), (0, 0, 0)]
+    sleeps: list[float] = []
+    out: list[str] = []
+    ok = watchdog.revoke_until_clean(
+        world.factory, "run_x", sleep=sleeps.append, out=out.append
+    )
+    assert ok is True and sleeps == [1.0, 2.0]
+    assert sum("could not read back" in line for line in out) == 1
+
+
+def test_a_revocation_that_is_never_clean_ends_loudly_and_boundedly() -> None:
+    world = _World([["advisory_lock"]])
+    world.verify_script = [RuntimeError("down")] * 100
+    sleeps: list[float] = []
+    out: list[str] = []
+    ok = watchdog.revoke_until_clean(
+        world.factory, "run_x", sleep=sleeps.append, out=out.append
+    )
+    assert ok is False
+    assert len(sleeps) == watchdog.REVOKE_ATTEMPTS - 1
+    assert max(sleeps) <= watchdog.REVOKE_BACKOFF_CAP_SECONDS
+    full = _World([["advisory_lock"]])
+    full.verify_script = [RuntimeError("down")] * 100
+    code, lines = _run(full)
+    assert code == watchdog.EXIT_UNCLEAN
+    assert any("REVOCATION INCOMPLETE" in line for line in lines)

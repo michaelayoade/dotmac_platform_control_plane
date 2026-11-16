@@ -19,9 +19,17 @@ LIMIT 0`, terminate its sessions, drop its ledger policies, `DROP OWNED`, `DROP
 ROLE`, then the read-back must show nothing remaining. Reconnecting does not
 reopen the window, so abuse is bounded to about one tick, once. The legitimate
 consumption holds millisecond transactions; a false trip costs one re-run
-(budget B3). If the watchdog exits for ANY reason (deadline, signal, error, the
-database becoming unreachable) it revokes first. There is no mode that leaves the
-role alive and unwatched.
+(budget B3).
+
+Signals. SIGTERM, SIGINT, SIGHUP (an SSH drop, the ruled session model) and SIGQUIT
+all take the one exit path, which revokes. Once revocation starts, further signals
+are IGNORED, so a second signal cannot abort it. Revocation is retried with bounded
+backoff until the read-back is clean; if it never is (a database that stays
+unreachable), the watchdog exits LOUDLY with code 5 and the ceremony must revoke by
+hand. What it cannot survive is SIGKILL (for example `docker stop` after its grace
+period): run it so that cannot happen (`--stop-timeout 120`, or `systemd-run`, which
+also survives SSH loss) and let the ceremony kit's trap run the revocation too.
+Exit codes: 0 clean end, 3 tripped, 4 failed, 5 revocation NOT clean, 6 signalled.
 
 Its own database access (documented, not new): it runs on the CEREMONY host, never
 on a target, with the SAME administrative session credential that created the role
@@ -63,6 +71,13 @@ from vendor_cp.deployment.target_refusals import (
 __all__ = [
     "ADMIN_DSN_ENV",
     "BLOCKING_SECONDS",
+    "EXIT_CLEAN",
+    "EXIT_FAILED",
+    "EXIT_SIGNALLED",
+    "EXIT_TRIPPED",
+    "EXIT_UNCLEAN",
+    "REVOKE_ATTEMPTS",
+    "SIGNALS",
     "IDLE_IN_TRANSACTION_SECONDS",
     "STATEMENT_SECONDS",
     "TRANSACTION_SECONDS",
@@ -80,6 +95,13 @@ BLOCKING_SECONDS: Final = 5
 EXIT_CLEAN: Final = 0
 EXIT_TRIPPED: Final = 3
 EXIT_FAILED: Final = 4
+EXIT_UNCLEAN: Final = 5
+EXIT_SIGNALLED: Final = 6
+#: Signals that take the revoke-and-exit path.
+SIGNALS: Final = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
+#: Revocation retries: bounded, so a dead database ends loudly, not never.
+REVOKE_ATTEMPTS: Final = 12
+REVOKE_BACKOFF_CAP_SECONDS: Final = 15.0
 
 # One query, one row per violation, a fixed kind name and nothing else.
 # The literal intervals equal the constants above; a test pins them together.
@@ -142,6 +164,39 @@ def revoke(session_factory: Callable[[], Any], role: str) -> tuple[int, int, int
         session.close()
 
 
+class _Interrupted(BaseException):
+    """A signal arrived. BaseException so no `except Exception` can swallow it."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def revoke_until_clean(
+    session_factory: Callable[[], Any],
+    role: str,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    out: Callable[[str], None] = print,
+    attempts: int = REVOKE_ATTEMPTS,
+) -> bool:
+    """Revoke, read back, and retry with bounded backoff until nothing remains."""
+    delay = 1.0
+    for attempt in range(1, attempts + 1):
+        try:
+            counts: tuple[int, int, int] | None = revoke(session_factory, role)
+        except Exception:
+            counts = None
+        if counts == (0, 0, 0):
+            return True
+        what = "not clean" if counts is not None else "could not read back"
+        out(f"watchdog: revocation {what} (attempt {attempt} of {attempts})")
+        if attempt < attempts:
+            sleep(min(delay, REVOKE_BACKOFF_CAP_SECONDS))
+            delay *= 2
+    return False
+
+
 def run(
     session_factory: Callable[[], Any],
     role: str,
@@ -151,41 +206,66 @@ def run(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     out: Callable[[str], None] = print,
+    install_signals: bool = True,
 ) -> int:
-    """Watch until the deadline, tripping on any violation. Always ends revoked."""
+    """Watch until the deadline, tripping on any violation. Always ends revoked.
+
+    Any of `SIGNALS` takes the revoke path; once revocation starts, signals are
+    ignored; revocation retries until the read-back is clean, else exit 5.
+    """
     if not 0 < deadline_seconds <= MAX_ROLE_TTL.total_seconds():
         raise FoundationBindingsUnavailable(
             "the watchdog deadline must be within the 4 hour role window",
             code=TargetRefusal.CONSUMPTION_ROLE_OVERBROAD,
         )
+
+    def on_signal(signum: int, _frame: Any) -> None:
+        raise _Interrupted(signum)
+
+    previous: dict[int, Any] = {}
+    if install_signals:
+        for signum in SIGNALS:
+            previous[signum] = signal.signal(signum, on_signal)
     stop = clock() + deadline_seconds
     result = EXIT_CLEAN
     try:
-        while clock() < stop:
-            session = session_factory()
-            try:
-                if not role_exists(session, role):
-                    out("watchdog: the role is already gone")
-                    return EXIT_CLEAN
-                kinds = tick(session, role)
-                session.rollback()
-            finally:
-                session.close()
-            if kinds:
-                out("watchdog tripped: " + ", ".join(sorted(set(kinds))))
-                result = EXIT_TRIPPED
-                break
-            sleep(interval)
-        else:
-            out("watchdog: deadline reached")
-    except Exception:
-        out("watchdog failed: revoking")
-        result = EXIT_FAILED
+        try:
+            while clock() < stop:
+                session = session_factory()
+                try:
+                    if not role_exists(session, role):
+                        out("watchdog: the role is already gone")
+                        return EXIT_CLEAN
+                    kinds = tick(session, role)
+                    session.rollback()
+                finally:
+                    session.close()
+                if kinds:
+                    out("watchdog tripped: " + ", ".join(sorted(set(kinds))))
+                    result = EXIT_TRIPPED
+                    break
+                sleep(interval)
+            else:
+                out("watchdog: deadline reached")
+        except _Interrupted as interrupted:
+            out(f"watchdog: signal {interrupted.signum} received: revoking")
+            result = EXIT_SIGNALLED
+        except Exception:
+            out("watchdog failed: revoking")
+            result = EXIT_FAILED
     finally:
-        counts = revoke(session_factory, role)
-    if counts != (0, 0, 0):
-        out("watchdog: revocation left something behind")
-        return EXIT_FAILED
+        # From here nothing may abort the revocation.
+        for signum in SIGNALS if install_signals else ():
+            signal.signal(signum, signal.SIG_IGN)
+        clean = revoke_until_clean(session_factory, role, sleep=sleep, out=out)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    if not clean:
+        out(
+            "watchdog: REVOCATION INCOMPLETE; the role may still be alive. "
+            "Revoke it by hand NOW (consumption_role_spec revoke, then verify)"
+        )
+        return EXIT_UNCLEAN
     out("watchdog: role revoked and read back clean")
     return result
 
@@ -211,10 +291,6 @@ def main(
         factory = DatabaseRuntime.from_urls(
             database_url=dsn, platform_database_url=dsn
         ).platform_session_factory
-        # SIGTERM must still revoke: turn it into the normal exit path.
-        signal.signal(
-            signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt())
-        )
         return run(
             factory,
             args.role,

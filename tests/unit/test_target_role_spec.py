@@ -175,26 +175,110 @@ def test_revocation_is_ordered_and_closes_each_gap() -> None:
     assert "'run_consume'" in verify
 
 
+def _create_argv(**overrides: str) -> list[str]:
+    values = {
+        "--role": "run_consume",
+        "--dispatch-id": _DISPATCH,
+        "--scram-verifier": spec.scram_verifier("pw", salt=b"0123456789abcdef"),
+        "--valid-until": (datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+    }
+    values.update(overrides)
+    return ["create", *[part for item in values.items() for part in item]]
+
+
 def test_the_cli_prints_text_and_executes_nothing(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert spec.main(["create", "--role", "run_consume"]) == 0
+    assert spec.main(_create_argv()) == 0
     out = capsys.readouterr().out
     assert out.count(";") >= 15 and "CREATE ROLE" in out
     assert spec.main(["revoke", "--role", "run_consume"]) == 0
     assert "DROP OWNED BY" in capsys.readouterr().out
-    assert spec.main(["verify"]) == 0
+    assert spec.main(["verify", "--role", "run_consume"]) == 0
     assert (
         spec.main(["guard-enable"]) == 0
         and "ENABLE ROW LEVEL" in capsys.readouterr().out
     )
     assert spec.main(["guard-disable"]) == 0 and "RAISE" in capsys.readouterr().out
-    assert spec.main(["create", "--role", "run_consume", "--dispatch-id", "bad"]) == 2
-    assert (
-        spec.main(["create", "--role", "run_consume", "--scram-verifier", "plain"]) == 2
+
+
+def test_create_renders_sql_that_runs_as_written() -> None:
+    sql = spec.executable_creation_sql(
+        "run_consume",
+        dispatch_id=_DISPATCH,
+        scram_verifier=spec.scram_verifier("pw"),
+        valid_until=datetime.now(UTC) + timedelta(hours=1),
     )
-    assert spec.main(["create", "--role", "Bad Name"]) == 2
-    assert "refused" in capsys.readouterr().err
+    text_ = "\n".join(sql)
+    # Nothing left to fill in: no placeholder, no psql variable, no plaintext.
+    assert "<" not in text_ and spec.VERIFIER_PLACEHOLDER not in text_
+    assert ":'" not in text_ and "VALID UNTIL '20" in text_
+    assert "PASSWORD 'SCRAM-SHA-256$" in text_
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"--role": spec.ROLE_PLACEHOLDER},
+        {"--dispatch-id": spec.DISPATCH_PLACEHOLDER},
+        {"--scram-verifier": spec.VERIFIER_PLACEHOLDER},
+        {"--scram-verifier": "plaintext-password"},
+        {"--valid-until": spec.VALID_UNTIL_PLACEHOLDER},
+        {"--valid-until": "2026-11-16T10:00:00"},
+        {"--valid-until": (datetime.now(UTC) + timedelta(hours=5)).isoformat()},
+        {"--valid-until": (datetime.now(UTC) - timedelta(hours=1)).isoformat()},
+        {"--role": ""},
+        {"--dispatch-id": ""},
+        {"--scram-verifier": ""},
+        {"--valid-until": ""},
+    ],
+)
+def test_create_refuses_every_placeholder_empty_or_out_of_cap_value(
+    capsys: pytest.CaptureFixture[str], overrides: dict[str, str]
+) -> None:
+    assert spec.main(_create_argv(**overrides)) == 2
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    "drop", ["--role", "--dispatch-id", "--scram-verifier", "--valid-until"]
+)
+def test_create_requires_every_value(
+    capsys: pytest.CaptureFixture[str], drop: str
+) -> None:
+    argv = _create_argv()
+    index = argv.index(drop)
+    assert spec.main(argv[:index] + argv[index + 2 :]) == 2
+    assert capsys.readouterr().out == ""
+
+
+def test_revoke_and_verify_require_a_real_role(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for action in ("revoke", "verify"):
+        assert spec.main([action]) == 2
+        assert spec.main([action, "--role", spec.ROLE_PLACEHOLDER]) == 2
+    capsys.readouterr()
+
+
+def test_the_template_is_documentation_only_and_never_a_password(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert spec.main(["template"]) == 0
+    out = capsys.readouterr().out
+    assert "<run_role>" in out and "PASSWORD :'scram_verifier'" in out
+    # The verifier is a psql variable, so executing the template as-is is a
+    # syntax error and can never create a role with a plaintext password.
+    assert "PASSWORD '" not in out
+
+
+def test_a_trailing_newline_is_not_a_valid_verifier_or_role() -> None:
+    verifier = spec.scram_verifier("pw")
+    for value in (verifier + "\n", verifier + " "):
+        with pytest.raises(ValueError):
+            spec.creation_sql("run_consume", scram_verifier=value)
+    with pytest.raises(ValueError):
+        spec.creation_sql("run_consume\n")
 
 
 def test_the_spec_module_cannot_reach_a_database() -> None:

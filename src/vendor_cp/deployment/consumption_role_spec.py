@@ -80,6 +80,7 @@ __all__ = [
     "VALID_UNTIL_PLACEHOLDER",
     "VERIFIER_PLACEHOLDER",
     "creation_sql",
+    "executable_creation_sql",
     "guard_disable_sql",
     "guard_enable_sql",
     "revocation_sql",
@@ -88,12 +89,15 @@ __all__ = [
 ]
 
 ROLE_PLACEHOLDER: Final = "<run_role>"
-VERIFIER_PLACEHOLDER: Final = "<SCRAM-SHA-256 verifier computed client-side>"
+#: A psql variable reference, NOT a quoted string: executed as written it is a
+#: syntax error, so the template can never create a role with a known plaintext
+#: password. Only `template` output carries it; `create` refuses it.
+VERIFIER_PLACEHOLDER: Final = ":'scram_verifier'"
 VALID_UNTIL_PLACEHOLDER: Final = "<run end UTC, at most 4 hours after creation>"
 DISPATCH_PLACEHOLDER: Final = "<dispatch uuid>"
-_ROLE: Final = re.compile(r"^[a-z][a-z0-9_]{2,53}$")
+_ROLE: Final = re.compile(r"[a-z][a-z0-9_]{2,53}")
 _VERIFIER: Final = re.compile(
-    r"^SCRAM-SHA-256\$\d{4,7}:[A-Za-z0-9+/]+=*\$[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$"
+    r"SCRAM-SHA-256\$\d{4,7}:[A-Za-z0-9+/]+=*\$[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*"
 )
 _LEDGER: Final = f"public.{LEDGER_TABLE_NAME}"
 _GUARD_LOCK_TIMEOUT: Final = "3s"
@@ -123,7 +127,7 @@ def scram_verifier(
 
 
 def _role(role: str) -> str:
-    if role != ROLE_PLACEHOLDER and not _ROLE.match(role):
+    if role != ROLE_PLACEHOLDER and not _ROLE.fullmatch(role):
         raise ValueError("role must be a lowercase identifier of 3 to 54 characters")
     return role
 
@@ -202,8 +206,15 @@ def creation_sql(
     evidence is the independent read-back, not the server log.
     """
     name = _quoted(_role(role))
-    if scram_verifier != VERIFIER_PLACEHOLDER and not _VERIFIER.match(scram_verifier):
+    if scram_verifier != VERIFIER_PLACEHOLDER and not _VERIFIER.fullmatch(
+        scram_verifier
+    ):
         raise ValueError("the password must be supplied as a SCRAM-SHA-256 verifier")
+    password = (
+        VERIFIER_PLACEHOLDER
+        if scram_verifier == VERIFIER_PLACEHOLDER
+        else f"'{scram_verifier}'"
+    )
     until = _valid_until(valid_until, now=now)
     dispatch = _dispatch(dispatch_id)
     scope = f"'{LEDGER_SCOPE}'"
@@ -218,7 +229,7 @@ def creation_sql(
         "BEGIN",
         "SET LOCAL log_statement = 'none'",
         f"SET LOCAL lock_timeout = '{_GUARD_LOCK_TIMEOUT}'",
-        f"CREATE ROLE {name} LOGIN PASSWORD '{scram_verifier}' NOSUPERUSER "
+        f"CREATE ROLE {name} LOGIN PASSWORD {password} NOSUPERUSER "
         "NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT "
         f"CONNECTION LIMIT {CONNECTION_LIMIT} VALID UNTIL '{until}'",
         f"ALTER ROLE {name} SET statement_timeout = '{STATEMENT_TIMEOUT}'",
@@ -242,6 +253,40 @@ def creation_sql(
         f"FOR SELECT TO {name} USING ({select_using})",
         "COMMIT",
     )
+
+
+def executable_creation_sql(
+    role: str,
+    *,
+    dispatch_id: str,
+    scram_verifier: str,
+    valid_until: datetime,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """The creation transaction with EVERY value supplied, or a refusal.
+
+    No placeholder, empty value or template variable can reach this output, so it
+    runs as written. `valid_until` is a timezone-aware instant within the 4 hour
+    cap. Verified: no statement contains `<` (a leftover placeholder) or a psql
+    variable.
+    """
+    if not isinstance(valid_until, datetime):
+        raise ValueError("valid_until is required")
+    if role == ROLE_PLACEHOLDER or not scram_verifier or not dispatch_id:
+        raise ValueError("role, dispatch id and verifier are all required")
+    if scram_verifier == VERIFIER_PLACEHOLDER or dispatch_id == DISPATCH_PLACEHOLDER:
+        raise ValueError("a placeholder is not a value")
+    statements = creation_sql(
+        role,
+        dispatch_id=dispatch_id,
+        scram_verifier=scram_verifier,
+        valid_until=valid_until,
+        now=now,
+    )
+    for statement in statements:
+        if "<" in statement or VERIFIER_PLACEHOLDER in statement:
+            raise ValueError("the rendered SQL still carries a placeholder")
+    return statements
 
 
 def revocation_sql(role: str) -> tuple[str, ...]:
@@ -280,6 +325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "action",
         choices=(
+            "template",
             "create",
             "revoke",
             "verify",
@@ -288,29 +334,52 @@ def main(argv: Sequence[str] | None = None) -> int:
             "scram",
         ),
     )
-    parser.add_argument("--role", default=ROLE_PLACEHOLDER)
-    parser.add_argument("--dispatch-id", default=DISPATCH_PLACEHOLDER)
-    parser.add_argument("--scram-verifier", default=VERIFIER_PLACEHOLDER)
+    parser.add_argument("--role")
+    parser.add_argument("--dispatch-id")
+    parser.add_argument("--scram-verifier")
+    parser.add_argument(
+        "--valid-until", help="ISO-8601 instant with a zone, at most 4 hours ahead"
+    )
     args = parser.parse_args(argv)
     try:
         if args.action == "scram":
             # The password arrives on stdin and is never echoed or stored.
             print(scram_verifier(sys.stdin.read().strip()))
             return 0
-        if args.action == "create":
-            statements: Sequence[str] = creation_sql(
+        if args.action == "template":
+            # Documentation form only: placeholders, and a verifier that is a psql
+            # variable (a syntax error if executed), never a password.
+            statements: Sequence[str] = creation_sql(ROLE_PLACEHOLDER)
+        elif args.action == "create":
+            # Every value is required: the output runs as written.
+            if not (
+                args.role
+                and args.dispatch_id
+                and args.scram_verifier
+                and args.valid_until
+            ):
+                raise ValueError(
+                    "create requires --role, --dispatch-id, --scram-verifier "
+                    "and --valid-until"
+                )
+            statements = executable_creation_sql(
                 args.role,
                 dispatch_id=args.dispatch_id,
                 scram_verifier=args.scram_verifier,
+                valid_until=datetime.fromisoformat(args.valid_until),
             )
-        elif args.action == "revoke":
-            statements = revocation_sql(args.role)
+        elif args.action in ("revoke", "verify"):
+            if not args.role or args.role == ROLE_PLACEHOLDER:
+                raise ValueError(f"{args.action} requires --role")
+            statements = (
+                revocation_sql(args.role)
+                if args.action == "revoke"
+                else (verification_sql(args.role),)
+            )
         elif args.action == "guard-enable":
             statements = guard_enable_sql()
-        elif args.action == "guard-disable":
-            statements = guard_disable_sql()
         else:
-            statements = (verification_sql(args.role),)
+            statements = guard_disable_sql()
     except ValueError as refusal:
         print(f"refused: {refusal}", file=sys.stderr)
         return 2

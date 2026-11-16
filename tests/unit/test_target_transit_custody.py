@@ -484,3 +484,119 @@ def test_the_module_is_imported_only_by_the_producer_command() -> None:
             if any(name.endswith("transit_custody") for name in names):
                 importers.append(path.name)
     assert set(importers) <= {"materials_producer.py"}
+
+
+# ── token role (review F13) ─────────────────────────────────────────────────
+
+_ROLE_PINNED = (
+    '{"allowed_policies":["cp-a2-sign"],"orphan":false,"renewable":false,'
+    '"token_bound_cidrs":["192.0.2.7/32"],"token_explicit_max_ttl":"600s",'
+    '"token_no_default_policy":true,"token_num_uses":2,"token_ttl":"600s",'
+    '"token_type":"service"}'
+)
+
+
+def test_the_token_role_config_is_pinned_exactly(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rendered = transit.render_token_role("cp-a2-sign", "192.0.2.7/32")
+    assert json.dumps(rendered, sort_keys=True, separators=(",", ":")) == _ROLE_PINNED
+    assert (
+        transit.main(["role", "--policy", "cp-a2-sign", "--bound-cidr", "192.0.2.7/32"])
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == _ROLE_PINNED
+    # Two uses, ten minutes, not renewable, no default policy, a child (not an
+    # orphan) of the minting token.
+    assert rendered["token_num_uses"] == 2 and rendered["token_ttl"] == "600s"
+    assert rendered["renewable"] is False and rendered["orphan"] is False
+    assert rendered["token_no_default_policy"] is True
+
+
+@pytest.mark.parametrize(
+    "cidr",
+    [
+        "",
+        "0.0.0.0/0",
+        "::/0",
+        "10.0.0.0/8",
+        "192.0.2.0/23",
+        "2001:db8::/32",
+        "192.0.2.7/24",
+        "nonsense",
+        "300.0.0.1/32",
+    ],
+)
+def test_the_token_role_requires_a_narrow_valid_bound_cidr(cidr: str) -> None:
+    with pytest.raises(FoundationBindingsUnavailable):
+        transit.render_token_role("cp-a2-sign", cidr)
+
+
+def test_the_token_role_has_no_default_cidr_or_policy(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for argv in (["role", "--policy", "p"], ["role", "--bound-cidr", "192.0.2.7/32"]):
+        with pytest.raises(SystemExit):
+            transit.main(argv)
+    with pytest.raises(FoundationBindingsUnavailable):
+        transit.render_token_role("Bad Policy", "192.0.2.7/32")
+    capsys.readouterr()
+
+
+def _readback(**overrides: Any) -> bytes:
+    data: dict[str, Any] = {
+        "allowed_policies": ["cp-a2-sign"],
+        "orphan": False,
+        "renewable": False,
+        "token_bound_cidrs": ["192.0.2.7"],
+        "token_explicit_max_ttl": 600,
+        "token_no_default_policy": True,
+        "token_num_uses": 2,
+        "token_ttl": 600,
+        "token_type": "service",
+        "name": "x",
+    }
+    data.update(overrides)
+    return json.dumps({"data": data}).encode()
+
+
+def test_the_readback_accepts_exactly_the_rendered_role() -> None:
+    rendered = transit.render_token_role("cp-a2-sign", "192.0.2.7/32")
+    assert transit.readback_token_role(_readback(), rendered) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("renewable", True),
+        ("orphan", True),
+        ("token_num_uses", 0),
+        ("token_num_uses", 3),
+        ("token_ttl", 3600),
+        ("token_explicit_max_ttl", 0),
+        ("token_no_default_policy", False),
+        ("token_type", "batch"),
+        ("allowed_policies", ["cp-a2-sign", "default"]),
+        ("token_bound_cidrs", []),
+        ("token_bound_cidrs", ["192.0.2.0/24"]),
+    ],
+)
+def test_the_readback_names_every_drift(field: str, value: Any) -> None:
+    rendered = transit.render_token_role("cp-a2-sign", "192.0.2.7/32")
+    assert transit.readback_token_role(_readback(**{field: value}), rendered) == [field]
+
+
+def test_the_readback_command_exits_by_verdict(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["role-readback", "--policy", "cp-a2-sign", "--bound-cidr", "192.0.2.7/32"]
+    monkeypatch.setattr(sys, "stdin", SimpleNamespaceBuffer(_readback()))
+    assert transit.main(argv) == 0
+    monkeypatch.setattr(sys, "stdin", SimpleNamespaceBuffer(_readback(renewable=True)))
+    assert transit.main(argv) == 2
+    assert "renewable" in capsys.readouterr().err
+
+
+class SimpleNamespaceBuffer:
+    def __init__(self, data: bytes) -> None:
+        self.buffer = io.BytesIO(data)

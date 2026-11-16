@@ -18,8 +18,6 @@ verification logic and reject tampering, but are NOT Ed25519, signer-custody,
 OIDC, live host authentication, deployment or end-to-end authorization proof.
 """
 
-# ruff: noqa: E501  (the scoped-role and transit cases carry long literal SQL/URL tables)
-
 from __future__ import annotations
 
 import base64
@@ -1984,8 +1982,9 @@ def _guard_reset(admin: Any) -> None:
     """Leave the ledger exactly as Kernel ships it, whatever an earlier case did."""
     with admin.connect() as connection:
         connection.exec_driver_sql("SET lock_timeout = '10s'")
+        policy = consumption_scope.GUARD_POLICY
         connection.exec_driver_sql(
-            f"DROP POLICY IF EXISTS {consumption_scope.GUARD_POLICY} ON {_LEDGER_RELATION}"
+            f"DROP POLICY IF EXISTS {policy} ON {_LEDGER_RELATION}"
         )
         connection.exec_driver_sql(
             f"ALTER TABLE {_LEDGER_RELATION} DISABLE ROW LEVEL SECURITY"
@@ -2165,7 +2164,8 @@ def _prove_consumed_and_out_of_scope_refused(
     with Session(bind=engine) as probe:
         probe.execute(
             text(
-                "UPDATE mod_deploy.deployment_targets SET updated_at = updated_at WHERE false"
+                "UPDATE mod_deploy.deployment_targets "
+                "SET updated_at = updated_at WHERE false"
             )
         )
         probe.rollback()
@@ -2199,7 +2199,8 @@ def _prove_consumed_and_out_of_scope_refused(
                 probe.execute(
                     text(
                         "INSERT INTO public.platform_idempotency_records "
-                        '(id, scope, "key", operation, status, fingerprint, created_at) '
+                        '(id, scope, "key", operation, status, '
+                        "fingerprint, created_at) "
                         "VALUES (gen_random_uuid(), :scope, :key, :scope, 'executed', "
                         ":fp, now() - interval '1 day')"
                     ),
@@ -2556,22 +2557,44 @@ def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
         free, _ = kit.mint(uses=0)
         b64 = base64.b64encode(b"x").decode()
         sign = f"{kit.mount}/sign/{kit.authorization_key}"
+        mount = kit.mount
+        key_path = f"{mount}/keys/{kit.authorization_key}"
         attempts = {
             "batch_input": ("POST", sign, {"batch_input": [{"input": b64}]}),
-            "batch_input beside input": ("POST", sign, {"input": b64, "batch_input": [{"input": b64}]}),
+            "batch_input beside input": (
+                "POST",
+                sign,
+                {"input": b64, "batch_input": [{"input": b64}]},
+            ),
             "context": ("POST", sign, {"input": b64, "context": b64}),
             "prehashed": ("POST", sign, {"input": b64, "prehashed": True}),
-            "hash_algorithm": ("POST", sign, {"input": b64, "hash_algorithm": "sha2-256"}),
-            "signature_algorithm": ("POST", sign, {"input": b64, "signature_algorithm": "pss"}),
-            "marshaling_algorithm": ("POST", sign, {"input": b64, "marshaling_algorithm": "jws"}),
+            "hash_algorithm": (
+                "POST",
+                sign,
+                {"input": b64, "hash_algorithm": "sha2-256"},
+            ),
+            "signature_algorithm": (
+                "POST",
+                sign,
+                {"input": b64, "signature_algorithm": "pss"},
+            ),
+            "marshaling_algorithm": (
+                "POST",
+                sign,
+                {"input": b64, "marshaling_algorithm": "jws"},
+            ),
             "hash path": ("POST", sign + "/sha2-256", {"input": b64}),
-            "read key": ("GET", f"{kit.mount}/keys/{kit.authorization_key}", None),
-            "export": ("GET", f"{kit.mount}/export/signing-key/{kit.authorization_key}", None),
-            "rotate": ("POST", f"{kit.mount}/keys/{kit.authorization_key}/rotate", {}),
-            "config": ("POST", f"{kit.mount}/keys/{kit.authorization_key}/config", {"deletion_allowed": True}),
-            "another key": ("POST", f"{kit.mount}/sign/not-configured", {"input": b64}),
+            "read key": ("GET", key_path, None),
+            "export": (
+                "GET",
+                f"{mount}/export/signing-key/{kit.authorization_key}",
+                None,
+            ),
+            "rotate": ("POST", key_path + "/rotate", {}),
+            "config": ("POST", key_path + "/config", {"deletion_allowed": True}),
+            "another key": ("POST", f"{mount}/sign/not-configured", {"input": b64}),
             "mounts": ("GET", "sys/mounts", None),
-        }  # fmt: skip
+        }
         for name, (method, route, payload) in attempts.items():
             status, _ = harness.bao.call(method, route, payload, token=free)
             assert status == 403, (name, status)

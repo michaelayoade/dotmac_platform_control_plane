@@ -37,6 +37,7 @@ import base64
 import binascii
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -65,6 +66,8 @@ __all__ = [
     "load_config",
     "main",
     "parse_signature",
+    "readback_token_role",
+    "render_token_role",
     "read_token",
     "render_policy",
 ]
@@ -147,7 +150,7 @@ def load_config(path: str) -> TransitCustodyConfig:
         raise _refuse("the custody configuration does not match the closed contract")
     for field in ("mount", "authorization_key", "dispatch_key"):
         value = document[field]
-        if not isinstance(value, str) or not _NAME.match(value):
+        if not isinstance(value, str) or not _NAME.fullmatch(value):
             raise _refuse(f"the custody configuration {field} is not a plain name")
     for field in ("authorization_identity", "dispatch_identity", "socket"):
         value = document[field]
@@ -183,7 +186,10 @@ def read_token(stream: BinaryIO | None = None) -> bytes:
         raise _refuse("the transit token cannot be read from stdin") from None
     if raw.endswith(b"\n"):
         raw = raw[:-1]
-    if not _TOKEN.match(raw.decode("ascii", "replace")) or len(raw) > MAX_TOKEN_BYTES:
+    if (
+        not _TOKEN.fullmatch(raw.decode("ascii", "replace"))
+        or len(raw) > MAX_TOKEN_BYTES
+    ):
         raise _refuse("the transit token on stdin is missing or malformed")
     return raw
 
@@ -344,6 +350,80 @@ def render_policy(config: TransitCustodyConfig) -> str:
     return "".join(lines)
 
 
+# ── token role (ceremony config, rendered by the image) ─────────────────────
+
+#: One issuance makes two signs and lives minutes, so the ROLE itself carries the
+#: limits: a token cannot be minted looser than the role.
+TOKEN_NUM_USES: Final = 2
+TOKEN_TTL_SECONDS: Final = 600
+
+
+def render_token_role(policy: str, bound_cidr: str) -> dict[str, Any]:
+    """The exact `auth/token/roles/<name>` body. Every value is required.
+
+    No default: the bound CIDR (the relay's source as OpenBao sees it) is a
+    ceremony input, never authored here. Refused: a broad network, an unspecified
+    one, or a malformed value. The role is a non-orphan child of the minting
+    token, so revoking the ceremony root revokes every token, even if everything
+    else fails. Not renewable, no default policy (which would add self-lookup,
+    renew, cubbyhole and wrapping), service tokens (batch tokens cannot be
+    use-limited or revoked individually).
+    """
+    if not _NAME.fullmatch(policy):
+        raise _refuse("the policy name is not a plain name")
+    try:
+        network = ipaddress.ip_network(bound_cidr, strict=True)
+    except ValueError:
+        raise _refuse("the bound CIDR is not a network") from None
+    minimum = 24 if network.version == 4 else 64
+    if network.is_unspecified or network.prefixlen < minimum:
+        raise _refuse("the bound CIDR is too broad to bind a token to its relay")
+    return {
+        "allowed_policies": [policy],
+        "orphan": False,
+        "renewable": False,
+        "token_bound_cidrs": [str(network)],
+        "token_explicit_max_ttl": f"{TOKEN_TTL_SECONDS}s",
+        "token_no_default_policy": True,
+        "token_num_uses": TOKEN_NUM_USES,
+        "token_ttl": f"{TOKEN_TTL_SECONDS}s",
+        "token_type": "service",
+    }
+
+
+def readback_token_role(response: bytes, expected: dict[str, Any]) -> list[str]:
+    """Names of the fields in `GET auth/token/roles/<name>` that differ from the
+    rendered config (empty means the role is exactly as rendered)."""
+    try:
+        data = strict_json(response)["data"]
+    except Exception:
+        raise _refuse("the token role description is not an OpenBao response") from None
+
+    def seconds(value: Any) -> Any:
+        if isinstance(value, str) and value.endswith("s") and value[:-1].isdigit():
+            return int(value[:-1])
+        return value
+
+    def cidrs(value: Any) -> Any:
+        try:
+            return sorted(str(ipaddress.ip_network(item)) for item in value)
+        except (ValueError, TypeError):
+            return value
+
+    different = []
+    for field, wanted in sorted(expected.items()):
+        got = data.get(field)
+        if field in ("token_ttl", "token_explicit_max_ttl"):
+            same = seconds(got) == seconds(wanted)
+        elif field == "token_bound_cidrs":
+            same = cidrs(got) == cidrs(wanted)
+        else:
+            same = got == wanted
+        if not same:
+            different.append(field)
+    return different
+
+
 # ── ceremony helpers ────────────────────────────────────────────────────────
 
 
@@ -433,6 +513,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_vf.add_argument("--owner-uid", type=int, default=0)
     p_po = sub.add_parser("policy")
     p_po.add_argument("--config", required=True)
+    for name in ("role", "role-readback"):
+        p_role = sub.add_parser(name)
+        p_role.add_argument("--policy", required=True)
+        p_role.add_argument("--bound-cidr", required=True)
     args = parser.parse_args(argv)
     try:
         if args.action == "print-schema":
@@ -472,6 +556,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise _refuse("the proof of possession does not verify")
             print("proof of possession verified")
+        elif args.action == "role":
+            _print(render_token_role(args.policy, args.bound_cidr))
+        elif args.action == "role-readback":
+            rendered = render_token_role(args.policy, args.bound_cidr)
+            different = readback_token_role(
+                sys.stdin.buffer.read(MAX_RESPONSE_BYTES + 1), rendered
+            )
+            if different:
+                raise _refuse("the token role differs in: " + ", ".join(different))
+            print("token role read-back verified")
         else:
             sys.stdout.write(render_policy(load_config(args.config)))
     except FoundationBindingsUnavailable as refusal:
