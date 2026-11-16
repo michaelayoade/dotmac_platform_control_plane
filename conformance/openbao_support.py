@@ -136,28 +136,36 @@ class _Kit:
         assert status == 200
         return json.dumps(payload).encode()
 
-    def install_policy_and_role(self, hcl: str) -> None:
+    def install_policy_and_role(self, hcl: str, role_body: dict[str, Any]) -> None:
+        """The policy text and token role body exactly as the image renders them."""
         self.bao.must("PUT", f"sys/policies/acl/{self.policy}", {"policy": hcl})
-        self.bao.must(
-            "POST",
-            f"auth/token/roles/{self.role}",
-            {
-                "allowed_policies": [self.policy],
-                "token_no_default_policy": True,
-                "renewable": False,
-                "token_type": "service",
-                "token_explicit_max_ttl": "15m",
-                "orphan": False,
-            },
-        )
+        self.bao.must("POST", f"auth/token/roles/{self.role}", role_body)
 
-    def mint(self, *, uses: int = 2, ttl: str = "10m") -> tuple[str, str]:
+    def role_description(self) -> bytes:
+        status, payload = self.bao.call("GET", f"auth/token/roles/{self.role}")
+        assert status == 200
+        return json.dumps(payload).encode()
+
+    def mint(self, *, ttl: str | None = None) -> tuple[str, str]:
+        """A token through the ROLE: its uses, ttl and bound CIDR are the role's."""
+        body = {"ttl": ttl} if ttl else {}
+        payload = self.bao.must("POST", f"auth/token/create/{self.role}", body)
+        return payload["auth"]["client_token"], payload["auth"]["accessor"]
+
+    def mint_unlimited(self) -> str:
+        """A use-unlimited token with the same policy, outside the role, so a
+        policy refusal is the policy's and never an exhausted token's."""
         payload = self.bao.must(
             "POST",
-            f"auth/token/create/{self.role}",
-            {"num_uses": uses, "ttl": ttl},
+            "auth/token/create",
+            {
+                "policies": [self.policy],
+                "no_default_policy": True,
+                "num_uses": 0,
+                "ttl": "10m",
+            },
         )
-        return payload["auth"]["client_token"], payload["auth"]["accessor"]
+        return payload["auth"]["client_token"]
 
     def revoke_accessor(self, accessor: str) -> None:
         self.bao.must("POST", "auth/token/revoke-accessor", {"accessor": accessor})

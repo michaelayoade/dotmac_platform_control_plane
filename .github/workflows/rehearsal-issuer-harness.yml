@@ -199,6 +199,11 @@ jobs:
             "${image}" server -dev
           echo "CONFORMANCE_OPENBAO_ROOT_TOKEN=${token}" >> "$GITHUB_ENV"
           echo "CONFORMANCE_OPENBAO_ADDR=http://127.0.0.1:18200" >> "$GITHUB_ENV"
+          # The source address OpenBao sees for requests through the published port
+          # (the docker bridge gateway): the token role is bound to it, as production
+          # binds to the relay's source. A runner-internal address, never an estate one.
+          gateway="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' cp-conformance-openbao)"
+          echo "CONFORMANCE_OPENBAO_SOURCE_CIDRS=${gateway}/32" >> "$GITHUB_ENV"
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18200/v1/sys/health -o /tmp/openbao-health.json; then
               break
@@ -206,6 +211,24 @@ jobs:
             sleep 1
           done
           python3 -c 'import json; assert json.load(open("/tmp/openbao-health.json"))["version"] == "2.5.3"'
+      # A second disposable PostgreSQL, the SAME pinned image as the harness
+      # database but with its default scram-sha-256 host authentication, so the
+      # SCRAM login case is a real login. Loopback only; random admin password.
+      - name: Start the disposable scram-sha-256 PostgreSQL
+        run: |
+          set -euo pipefail
+          password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          echo "::add-mask::${password}"
+          docker run -d --name cp-conformance-scram -p 127.0.0.1:15432:5432 \
+            -e POSTGRES_PASSWORD="${password}" \
+            postgres:16@sha256:056b54f00419b49289227ab12d09df508543883f407fe9935a2cec430ef8aa8d
+          for _ in $(seq 1 40); do
+            if docker exec cp-conformance-scram pg_isready -U postgres >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          echo "CONFORMANCE_SCRAM_DATABASE_URL=postgresql+psycopg://postgres:${password}@127.0.0.1:15432/postgres" >> "$GITHUB_ENV"
       - name: Real-wheel host-admission conformance at the adopted Control pin
         env:
           REHEARSAL_ISSUER_MIGRATION_DATABASE_URL: "postgresql+psycopg://app_admin@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
@@ -272,6 +295,9 @@ jobs:
               "test_scoped_role_revocation_leaves_nothing",
               "test_scoped_role_watchdog_revokes_on_an_advisory_lock",
               "test_scoped_role_watchdog_revokes_on_a_long_statement",
+              "test_scoped_role_watchdog_revokes_on_blocking_another_backend",
+              "test_production_control_verification_accepts_a_real_ed25519_presentation",
+              "test_scram_login_with_the_client_computed_verifier",
               "test_transit_custody_against_real_openbao",
               "test_end_to_end_propose_approve_issue_transit_and_consume_as_scoped_role",
           } | {
@@ -286,15 +312,15 @@ jobs:
                   "finalization_withdrawal",
               )
           }
-          assert len(cases) == len(expected) == 32
+          assert len(cases) == len(expected) == 35
           assert {case.attrib["name"] for case in cases} == expected
           assert all(not any(case.find(outcome) is not None for outcome in ("skipped", "failure", "error")) for case in cases)
           print("host-admission conformance: ten component cases, default refusal, scoped-role, watchdog and transit-custody cases and thirteen real-approval source cases passed, zero skipped")
           PY
 
-      - name: Stop the disposable OpenBao
+      - name: Stop the disposable OpenBao and scram PostgreSQL
         if: always()
-        run: docker rm -f cp-conformance-openbao || true
+        run: docker rm -f cp-conformance-openbao cp-conformance-scram || true
 
       - name: Stop Postgres
         if: always()

@@ -654,6 +654,8 @@ def _build_admission_coordinate(
     now: datetime,
     genuine_approval: bool = False,
     external: Any = None,
+    presentation_key: Any = None,
+    install_consumption: bool = True,
 ) -> _AdmissionCoordinate:
     # Every identity below is suffixed with a fresh per-call token. The
     # commands this function calls (register_target, enrol_host_admission_
@@ -721,7 +723,22 @@ def _build_admission_coordinate(
     attempt_id = stored_dispatch.attempt_id
 
     admission_key_id = f"conformance-admission-key-{run}"
-    admission_public_key_b64 = _public_key_b64(admission_key_id)
+    if presentation_key is not None:
+        # A REAL Ed25519 admission key: Control stores its public half, and the
+        # production verifier (not an HMAC double) checks the signature.
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        admission_public_key_b64 = (
+            base64.urlsafe_b64encode(
+                presentation_key.public_key().public_bytes(
+                    Encoding.Raw, PublicFormat.Raw
+                )
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+    else:
+        admission_public_key_b64 = _public_key_b64(admission_key_id)
     credential_id = enrol_host_admission_credential(
         db,
         EnrolHostAdmissionCredentialCommand(
@@ -876,7 +893,16 @@ def _build_admission_coordinate(
         issued_at=now,
         expires_at=now + timedelta(minutes=5),
     )
-    signature = presentation_verifier.sign(admission_key_id, statement.canonical_bytes)
+    if presentation_key is not None:
+        signature = (
+            base64.urlsafe_b64encode(presentation_key.sign(statement.canonical_bytes))
+            .decode("ascii")
+            .rstrip("=")
+        )
+    else:
+        signature = presentation_verifier.sign(
+            admission_key_id, statement.canonical_bytes
+        )
     presentation = HostAdmissionPresentationV1(statement=statement, signature=signature)
 
     trust_policy = AttestationTrustPolicy(
@@ -913,19 +939,20 @@ def _build_admission_coordinate(
     )
 
     clock = _AdmissionClock(now)
-    install_foundation_consumption_security(
-        authorization_verifier=(
-            external.authorization_verifier
-            if external is not None
-            else _AuthorizationVerifier(authorization_signer)
-        ),
-        dispatch_verifier=(
-            external.dispatch_verifier
-            if external is not None
-            else _DispatchVerifier(dispatch_signer)
-        ),
-        clock=clock,
-    )
+    if install_consumption:
+        install_foundation_consumption_security(
+            authorization_verifier=(
+                external.authorization_verifier
+                if external is not None
+                else _AuthorizationVerifier(authorization_signer)
+            ),
+            dispatch_verifier=(
+                external.dispatch_verifier
+                if external is not None
+                else _DispatchVerifier(dispatch_signer)
+            ),
+            clock=clock,
+        )
     # Expected business facts come from Control's owning rows, not from the
     # presented signed material. The fixture uses no privileged row edits.
     rollout_row = db.get(Rollout, rollout.id)
@@ -2343,7 +2370,7 @@ def test_scoped_role_revocation_leaves_nothing() -> None:
         admin.dispose()
 
 
-def _watchdog_case(scenario: str) -> None:
+def _watchdog_case(scenario: str, db: Session | None = None) -> None:
     admin = _admin_engine()
     _guard_reset(admin)
     role, _ = _create_run_role(admin, str(uuid.uuid4()))
@@ -2354,6 +2381,32 @@ def _watchdog_case(scenario: str) -> None:
         if scenario == "advisory_lock":
             holder = engine.connect()
             holder.exec_driver_sql("SELECT pg_advisory_lock(424242)")
+        elif scenario == "blocking":
+            # The run role holds a row lock (the lock column it may update) on a
+            # production-shaped table; platform_api then waits behind it.
+            assert db is not None
+            target = _register_target(db)
+            db.commit()
+            row = {"id": target.id}
+            update = (
+                "UPDATE mod_deploy.deployment_targets "
+                "SET updated_at = updated_at WHERE id = :id"
+            )
+            holder = engine.connect()
+            holder.execute(text(update), row)
+
+            def waiter() -> None:
+                try:
+                    with Session(bind=db.get_bind()) as peer:
+                        peer.execute(text("SET lock_timeout = '25s'"))
+                        peer.execute(text(update), row)
+                        peer.rollback()
+                except BaseException as error:  # released when the role is revoked
+                    errors.append(error)
+
+            thread = threading.Thread(target=waiter, daemon=True)
+            thread.start()
+            time.sleep(0.5)
         else:
 
             def sleeper() -> None:
@@ -2387,6 +2440,8 @@ def _watchdog_case(scenario: str) -> None:
             create_engine(_role_url(role), future=True).connect()
     finally:
         engine.dispose()
+        if db is not None:
+            db.rollback()
         _teardown_run_role(admin, role)
         admin.dispose()
 
@@ -2397,6 +2452,12 @@ def test_scoped_role_watchdog_revokes_on_an_advisory_lock() -> None:
 
 def test_scoped_role_watchdog_revokes_on_a_long_statement() -> None:
     _watchdog_case("long_statement")
+
+
+def test_scoped_role_watchdog_revokes_on_blocking_another_backend(
+    db: Session,
+) -> None:
+    _watchdog_case("blocking", db)
 
 
 # ── OpenBao transit custody, against a real OpenBao 2.5.3 dev server ────────
@@ -2415,6 +2476,8 @@ class _TransitKit:
         self.relay = UnixRelay(os.path.join(self.socket_dir, "r"), self.bao.address)
         self.identity_paths: dict[str, Path] = {}
         self.uid = os.getuid()
+        self.role_body: dict[str, Any] = {}
+        self.bound_cidr = ""
 
     def identity(
         self, key_name: str, purpose: str, key_id: str, *, file: str
@@ -2466,8 +2529,31 @@ class _TransitKit:
             file="dispatch.json",
         )
         config = transit_custody.load_config(self.config())
-        self.kit.install_policy_and_role(transit_custody.render_policy(config))
-        return config
+        hcl = transit_custody.render_policy(config)
+        # The bound CIDR is the relay's source as THIS server sees it. It is a
+        # ceremony input; here the candidates are probed and the first that lets a
+        # signature through is the right one. A documentation-range CIDR must
+        # refuse (below), which proves the binding is enforced.
+        candidates = [
+            c
+            for c in os.environ.get("CONFORMANCE_OPENBAO_SOURCE_CIDRS", "").split(",")
+            if c
+        ] + ["127.0.0.1/32"]
+        for cidr in candidates:
+            self.role_body = transit_custody.render_token_role(self.kit.policy, cidr)
+            self.kit.install_policy_and_role(hcl, self.role_body)
+            token, accessor = self.kit.mint()
+            status, _ = self.bao.call(
+                "POST",
+                f"{self.kit.mount}/sign/{self.kit.authorization_key}",
+                {"input": base64.b64encode(b"probe").decode(), "key_version": 1},
+                token=token,
+            )
+            self.kit.revoke_accessor(accessor)
+            if status == 200:
+                self.bound_cidr = cidr
+                return config
+        raise AssertionError("no candidate CIDR matched the relay's source")
 
     def close(self) -> None:
         self.relay.close()
@@ -2487,6 +2573,27 @@ def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
     kit = harness.kit
     try:
         config = harness.pin_both()
+        # The token role is exactly what the image renders (ceremony read-back).
+        assert (
+            transit_custody.readback_token_role(
+                kit.role_description(), harness.role_body
+            )
+            == []
+        )
+        # ... and its CIDR binding is enforced: a role bound to a documentation
+        # range refuses a perfectly valid token, then the real role is restored.
+        wrong = transit_custody.render_token_role(kit.policy, "192.0.2.7/32")
+        harness.bao.must("POST", f"auth/token/roles/{kit.role}", wrong)
+        stranger_token, stranger_accessor = kit.mint()
+        status, _ = harness.bao.call(
+            "POST",
+            f"{kit.mount}/sign/{kit.authorization_key}",
+            {"input": base64.b64encode(b"x").decode(), "key_version": 1},
+            token=stranger_token,
+        )
+        assert status == 403
+        kit.revoke_accessor(stranger_accessor)
+        harness.bao.must("POST", f"auth/token/roles/{kit.role}", harness.role_body)
         auth_identity = PinnedVerificationIdentity.read(
             str(harness.identity_paths["authorization.json"]),
             purpose="deployment_authorization",
@@ -2525,7 +2632,7 @@ def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
 
         # The adapter end to end through the relay: strict parse, then verified
         # against the pinned identity; the single-issuance token allows two signs.
-        token, accessor = kit.mint(uses=2)
+        token, accessor = kit.mint()
         custody = transit_custody.build_custody(
             config, token.encode(), owner_uid=harness.uid
         )
@@ -2541,7 +2648,7 @@ def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
         assert kit.accessor_is_gone(accessor)
 
         # Server-side use limit: the third use of a 2-use token is refused.
-        limited, _ = kit.mint(uses=2)
+        limited, _ = kit.mint()
         body = {"input": base64.b64encode(b"x").decode(), "key_version": 1}
         path = f"{kit.mount}/sign/{kit.authorization_key}"
         assert [
@@ -2554,7 +2661,7 @@ def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
 
         # Every refusal the policy exists for, with an unlimited token so a refusal
         # is the policy's and not the use limit's.
-        free, _ = kit.mint(uses=0)
+        free = kit.mint_unlimited()
         b64 = base64.b64encode(b"x").decode()
         sign = f"{kit.mount}/sign/{kit.authorization_key}"
         mount = kit.mount
@@ -2609,7 +2716,7 @@ def test_transit_custody_against_real_openbao(tmp_path: Any) -> None:
         # with v1 and verifies; a request that omits key_version signs with v2,
         # which the pinned identity refuses.
         harness.bao.must("POST", f"{kit.mount}/keys/{kit.authorization_key}/rotate")
-        rotated_token, _ = kit.mint(uses=2)
+        rotated_token, _ = kit.mint()
         rotated = transit_custody.build_custody(
             config, rotated_token.encode(), owner_uid=harness.uid
         )
@@ -2673,7 +2780,7 @@ def test_transit_custody_refuses_wrong_and_swapped_keys_before_control_signs(
                 authorization_key=kit.dispatch_key, dispatch_key=kit.authorization_key
             )
         config = transit_custody.load_config(path)
-        token, accessor = kit.mint(uses=2)
+        token, accessor = kit.mint()
         custody = transit_custody.build_custody(
             config, token.encode(), owner_uid=harness.uid
         )
@@ -2803,7 +2910,7 @@ class _TransitExternal:
         return db.get(DeploymentPlan, plan_id)
 
     def issue(self, db: Session, plan: Any) -> uuid.UUID:
-        token, self.accessor = self.harness.kit.mint(uses=2)
+        token, self.accessor = self.harness.kit.mint()
         self._cli(
             db,
             [
@@ -2891,6 +2998,145 @@ def test_end_to_end_propose_approve_issue_transit_and_consume_as_scoped_role(
             admin.dispose()
     finally:
         harness.close()
+
+
+# ── Production verification wiring and SCRAM, proven for real ───────────────
+
+
+def test_production_control_verification_accepts_a_real_ed25519_presentation(
+    db: Session, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """`install_control_verification` is the production wiring: a REAL Ed25519
+    presentation (no HMAC double) must verify through it, and a forged one must
+    not. Resolve is the step that authenticates the presentation."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from vendor_cp.deployment import control_security
+
+    monkeypatch.setattr(control_security, "_INSTALLED", None)
+    directory = tmp_path / "identities"
+    directory.mkdir(mode=0o700)
+    env: dict[str, str] = {}
+    for name, purpose, key_id in (
+        (
+            control_security.AUTHORIZATION_IDENTITY_ENV,
+            "deployment_authorization",
+            "a-prod",
+        ),
+        (control_security.DISPATCH_IDENTITY_ENV, "deployment_dispatch", "d-prod"),
+    ):
+        key = Ed25519PrivateKey.generate()
+        raw = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        text_ = _b64url(raw)
+        fingerprint = PublicKeyFingerprintV1.from_public_key_b64(text_).canonical
+        path = directory / f"{key_id}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": "PlatformCpPublicVerificationIdentity.v1",
+                    "key_id": key_id,
+                    "algorithm": "ed25519",
+                    "purpose": purpose,
+                    "public_key_b64url": text_,
+                    "public_key_fingerprint": fingerprint,
+                }
+            )
+        )
+        path.chmod(0o644)
+        env[name] = str(path)
+
+    admission_key = Ed25519PrivateKey.generate()
+    coordinate = _build_admission_coordinate(
+        db,
+        now=_NOW,
+        presentation_key=admission_key,
+        install_consumption=False,
+    )
+    control_security.install_control_verification(
+        env, clock=coordinate.clock.now, owner_uid=os.getuid()
+    )
+    context = resolve_host_admission_context(
+        db, attempt_id=coordinate.attempt_id, presentation=coordinate.presentation
+    )
+    db.rollback()
+    assert str(context.dispatch_id) == str(coordinate.attempt_id)
+
+    statement = coordinate.presentation.statement
+    forged = {
+        "wrong key": _b64url(
+            Ed25519PrivateKey.generate().sign(statement.canonical_bytes)
+        ),
+        "other message": _b64url(admission_key.sign(statement.canonical_bytes + b"x")),
+        "garbage": _b64url(b"\x01" * 64),
+    }
+    for name, signature in forged.items():
+        with pytest.raises(Exception) as refused:
+            resolve_host_admission_context(
+                db,
+                attempt_id=coordinate.attempt_id,
+                presentation=HostAdmissionPresentationV1(
+                    statement=statement, signature=signature
+                ),
+            )
+        db.rollback()
+        assert "Refused" in type(refused.value).__name__, name
+
+
+def test_scram_login_with_the_client_computed_verifier() -> None:
+    """A real SCRAM-SHA-256 login. The harness Postgres is `trust`, so a separate
+    pinned-image server with the default `scram-sha-256` host auth is used."""
+    url = os.environ.get("CONFORMANCE_SCRAM_DATABASE_URL")
+    assert url, (
+        "CONFORMANCE_SCRAM_DATABASE_URL is required: the SCRAM login case needs the "
+        "disposable scram-sha-256 server. Missing is a failure, not a skip"
+    )
+    admin = create_engine(url, isolation_level="AUTOCOMMIT")
+    role = f"cp_scram_{uuid.uuid4().hex[:10]}"
+    password = secrets.token_urlsafe(32)
+    verifier = consumption_role_spec.scram_verifier(password)
+    created = consumption_role_spec.creation_sql(
+        role,
+        scram_verifier=verifier,
+        valid_until=datetime.now(UTC) + timedelta(hours=1),
+    )
+    # The rendered CREATE ROLE carries the verifier in exactly this form.
+    clause = f"LOGIN PASSWORD '{verifier}' NOSUPERUSER"
+    assert any(clause in statement for statement in created)
+    try:
+        with admin.connect() as connection:
+            connection.exec_driver_sql(
+                f"CREATE ROLE \"{role}\" LOGIN PASSWORD '{verifier}' CONNECTION LIMIT 2"
+            )
+            stored = connection.execute(
+                text("SELECT rolpassword FROM pg_authid WHERE rolname = :r"),
+                {"r": role},
+            ).scalar_one()
+            assert stored == verifier and stored.startswith("SCRAM-SHA-256$4096:")
+        good = make_url(url).set(username=role, password=password)
+        engine = create_engine(good, future=True)
+        try:
+            with engine.connect() as connection:
+                assert connection.execute(text("SELECT current_user")).scalar() == role
+                assert (
+                    connection.execute(text("SHOW password_encryption")).scalar()
+                    == "scram-sha-256"
+                )
+        finally:
+            engine.dispose()
+        for bad in (password + "x", "", verifier):
+            wrong = create_engine(
+                make_url(url).set(username=role, password=bad or None), future=True
+            )
+            try:
+                with pytest.raises(DBAPIError):
+                    wrong.connect()
+            finally:
+                wrong.dispose()
+    finally:
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')
+        admin.dispose()
 
 
 # ── small helpers used above ────────────────────────────────────────────────

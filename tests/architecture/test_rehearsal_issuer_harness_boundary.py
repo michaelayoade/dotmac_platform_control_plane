@@ -186,7 +186,7 @@ def test_harness_proves_the_application_control_and_kernel_artifact_pins() -> No
         assert hashes[evidence["filename"]] == "sha256:" + evidence["sha256"]
     workflow = (ROOT / ".github/workflows/rehearsal-issuer-harness.yml").read_text()
     assert "conformance/test_host_admission_conformance.py" in workflow
-    assert "assert len(cases) == len(expected) == 32" in workflow
+    assert "assert len(cases) == len(expected) == 35" in workflow
     assert '{case.attrib["name"] for case in cases} == expected' in workflow
     assert 'f"test_real_approved_cp_v3_lifecycle[{scenario}]"' in workflow
     assert '"finalization_withdrawal"' in workflow
