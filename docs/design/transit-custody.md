@@ -87,13 +87,36 @@ path "<mount>/sign/<dispatch key>" {
 }
 ```
 
-Token role (ceremony): `allowed_policies` the one policy, `token_no_default_policy = true`,
-`renewable = false`, `token_type = service`, `token_explicit_max_ttl = 15m`,
-`token_bound_cidrs` the relay's source (a typed parameter), `orphan = false`. One 2-use,
-10 minute token per issuance, a child of the ceremony root, revoked by accessor with a
-lookup that must then fail; the root revocation at session end kills it regardless.
+Token role: the image renders the exact `auth/token/roles/<name>` body, so it is not
+hand-authored:
+
+    python -m vendor_cp.deployment.transit_custody role --policy NAME --bound-cidr CIDR
+
+`--bound-cidr` is required (the relay's source address as OpenBao sees it, a typed
+parameter entered at ship time; there is no default, and a broad, unspecified or malformed
+network is refused). The body is `allowed_policies` the one policy, `token_no_default_policy
+= true` (the default policy would add self-lookup, renew, cubbyhole and wrapping),
+`renewable = false`, `token_type = service`, `token_num_uses = 2`, `token_ttl` and
+`token_explicit_max_ttl` of 600 s, `orphan = false` (a child of the minting token, so
+revoking the ceremony root revokes it even if everything else fails), and the bound CIDR.
+Its output is pinned by a test, as the policy is. After writing it, the ceremony reads it back
+and checks it against the render; any drift is named and exits non-zero:
+
+    bao read -format=json auth/token/roles/NAME | \
+        python -m vendor_cp.deployment.transit_custody role-readback --policy NAME --bound-cidr CIDR
+
+One 2-use token per issuance, minted from the ceremony root and revoked by accessor with a
+lookup that must then fail. Note that the bound CIDR is the shared bridge source, so it
+admits any host-local OpenBao client; it narrows, it does not authenticate.
 
 ## Route
+
+HARD PRECONDITION for the issuance session (not built in the image): the relay is the
+allowlisting forwarder of the ceremony kit, never a plain `ssh -R` pass-through. Without it
+the CP host reaches the whole OpenBao HTTP API, including unauthenticated
+`sys/generate-root` and `sys/rekey` endpoints, during the session that runs generate-root.
+The pg_hba line (per role, this database, the target address only) and the firewall path to
+the production database are host-side ceremony items, read back at E10a/E11.
 
 A relay bounded to Michael's SSH session: his usual `ssh -L` to OpenBao plus an `ssh -R`
 unix socket on the CP host (root 0700 directory, mask 0177), bind-mounted into the one-shot

@@ -28,7 +28,7 @@ and run later by a Michael-approved ceremony, after review.
 it, so it detects ceremony mistakes and bounds nothing against an attacker. The control
 is (a) the creation statements below and (b) an INDEPENDENT read-back of the same proof
 by the ceremony before the credential is handed over, with the dispatch id read from the
-target's own `dispatch-materials.json`:
+controller-side `dispatch-materials.json`:
 
     python -m vendor_cp.deployment.consumption_role_check --role NAME --dispatch-id UUID
 
@@ -91,12 +91,27 @@ COMMIT;
 
 ## Creation (text only; one transaction per run role)
 
+`consumption_role_spec template` prints the documentation form below: the password is the
+psql variable `:'scram_verifier'`, which is a syntax error if executed, so a template can
+never create a role with a known plaintext password. The command that renders SQL to run
+is `create`, and it requires EVERY value and refuses any placeholder, empty value or
+`valid-until` beyond 4 hours:
+
+    python -m vendor_cp.deployment.consumption_role_spec create --role NAME \\
+        --dispatch-id UUID --scram-verifier VERIFIER --valid-until ISO8601
+
+The `--dispatch-id` comes from the CONTROLLER-side `dispatch-materials.json` that `issue`
+wrote, never from a copy the target holds, for `create` and for the independent check.
+The kit sends the rendered statements ONE AT A TIME (a single multi-statement query is
+logged whole on receipt, defeating `SET LOCAL log_statement = 'none'`), and records the
+digest of the rendered SQL in the receipt.
+
 ```sql
 -- SPECIFICATION TEXT. NOT EXECUTED. Placeholders are filled at the ceremony.
 BEGIN;
 SET LOCAL log_statement = 'none';
 SET LOCAL lock_timeout = '3s';
-CREATE ROLE "<run_role>" LOGIN PASSWORD '<SCRAM-SHA-256 verifier computed client-side>' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT 4 VALID UNTIL '<run end UTC, at most 4 hours after creation>';
+CREATE ROLE "<run_role>" LOGIN PASSWORD :'scram_verifier' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT 4 VALID UNTIL '<run end UTC, at most 4 hours after creation>';
 ALTER ROLE "<run_role>" SET statement_timeout = '30s';
 ALTER ROLE "<run_role>" SET lock_timeout = '5s';
 ALTER ROLE "<run_role>" SET idle_in_transaction_session_timeout = '30s';
@@ -132,8 +147,18 @@ Each second it checks whether any backend of the role holds an advisory lock, ha
 idle in a transaction for over 30 s, has had a transaction open for over 120 s, has run
 one statement for over 10 s, or blocks another backend that has waited over 5 s. On any
 violation it revokes the ROLE (below) and reads back; reconnecting does not reopen the
-window. On deadline, signal, error or loss of the database it also revokes. Abuse is
-bounded to about one tick, once.
+window. On deadline, error or loss of the database it also revokes. Abuse is bounded to about
+one tick, once.
+
+Signals: SIGTERM, SIGINT, SIGHUP (an SSH drop, the ruled session model) and SIGQUIT take
+one exit path that revokes; once revocation starts further signals are ignored; revocation
+is retried with bounded backoff (12 attempts, capped at 15 s) until the read-back is
+(0,0,0), and if it never is the watchdog exits LOUDLY with code 5 and the ceremony revokes
+by hand. Exit codes: 0 clean end, 3 tripped, 4 failed, 5 revocation not clean, 6 signalled.
+It cannot survive SIGKILL, so run it where that cannot happen (`--stop-timeout 120`, or
+`systemd-run`, which also survives SSH loss), and let the kit's trap run the revocation too.
+Supply its credential with an `--env-file` on tmpfs (removed afterwards) or stdin, not a
+plain environment variable, which shows in `docker inspect` and `/proc`.
 
 Its own database access: it runs on the ceremony host, never on a target, with the SAME
 administrative session credential that created the role (a superuser, or a role holding
@@ -186,6 +211,9 @@ marker or attributable to CP's own activity. Attach both to the run's evidence.
    `(scope, key)`.
 3. **Row locks.** The role can hold row locks on the lock tables until the watchdog trips
    (about one tick). It can take advisory locks; the watchdog treats any as a violation.
+   Repeated lock bursts shorter than the 5 s blocking threshold never trip it, so CP write
+   latency can degrade for up to 4 h. The kit therefore revokes as soon as the run's ledger
+   row appears: the role has nothing legitimate left to do.
 4. **Local-clock re-check inside Control (R6).** Control `service.py` re-checks authorization
    expiry under its locks with `_control_now()`, the local clock. CP cannot avoid that path:
    it sits inside `_stage_dispatch_consumption`, which `admit_and_consume_host_admission`
