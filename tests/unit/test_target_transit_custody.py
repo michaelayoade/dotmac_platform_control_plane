@@ -521,16 +521,34 @@ def test_the_token_role_config_is_pinned_exactly(
         "0.0.0.0/0",
         "::/0",
         "10.0.0.0/8",
-        "192.0.2.0/23",
+        "192.0.2.0/24",
+        "192.0.2.4/30",
+        "192.0.2.6/31",
         "2001:db8::/32",
+        "2001:db8::/64",
+        "2001:db8::/127",
         "192.0.2.7/24",
         "nonsense",
         "300.0.0.1/32",
     ],
 )
-def test_the_token_role_requires_a_narrow_valid_bound_cidr(cidr: str) -> None:
+def test_the_token_role_binds_to_a_single_address_only(cidr: str) -> None:
     with pytest.raises(FoundationBindingsUnavailable):
         transit.render_token_role("cp-a2-sign", cidr)
+
+
+@pytest.mark.parametrize(
+    ("given", "bound"),
+    [
+        ("192.0.2.7/32", "192.0.2.7/32"),
+        ("192.0.2.7", "192.0.2.7/32"),
+        ("2001:db8::1/128", "2001:db8::1/128"),
+    ],
+)
+def test_a_single_address_is_accepted(given: str, bound: str) -> None:
+    assert transit.render_token_role("cp-a2-sign", given)["token_bound_cidrs"] == [
+        bound
+    ]
 
 
 def test_the_token_role_has_no_default_cidr_or_policy(
@@ -550,6 +568,15 @@ def _readback(**overrides: Any) -> bytes:
         "orphan": False,
         "renewable": False,
         "token_bound_cidrs": ["192.0.2.7"],
+        "allowed_policies_glob": [],
+        "disallowed_policies": [],
+        "disallowed_policies_glob": [],
+        "allowed_entity_aliases": [],
+        "path_suffix": "",
+        "token_period": 0,
+        "period": 0,
+        "explicit_max_ttl": 0,
+        "bound_cidrs": [],
         "token_explicit_max_ttl": 600,
         "token_no_default_policy": True,
         "token_num_uses": 2,
@@ -579,6 +606,16 @@ def test_the_readback_accepts_exactly_the_rendered_role() -> None:
         ("allowed_policies", ["cp-a2-sign", "default"]),
         ("token_bound_cidrs", []),
         ("token_bound_cidrs", ["192.0.2.0/24"]),
+        # Fields that can only widen a token: each must be empty or zero.
+        ("allowed_policies_glob", ["*"]),
+        ("disallowed_policies", ["x"]),
+        ("disallowed_policies_glob", ["x*"]),
+        ("allowed_entity_aliases", ["alias"]),
+        ("path_suffix", "anything"),
+        ("token_period", 3600),
+        ("period", 3600),
+        ("explicit_max_ttl", 3600),
+        ("bound_cidrs", ["0.0.0.0/0"]),
     ],
 )
 def test_the_readback_names_every_drift(field: str, value: Any) -> None:
@@ -600,3 +637,23 @@ def test_the_readback_command_exits_by_verdict(
 class SimpleNamespaceBuffer:
     def __init__(self, data: bytes) -> None:
         self.buffer = io.BytesIO(data)
+
+
+def test_a_field_outside_the_2_5_3_read_list_is_refused_by_name() -> None:
+    rendered = transit.render_token_role("cp-a2-sign", "192.0.2.7/32")
+    drift = transit.readback_token_role(_readback(brand_new_widening="x"), rendered)
+    assert drift == ["unknown:brand_new_widening"]
+
+
+def test_absent_widening_fields_are_fine_and_values_are_never_echoed() -> None:
+    rendered = transit.render_token_role("cp-a2-sign", "192.0.2.7/32")
+    data = json.loads(_readback())["data"]
+    for field in transit._ROLE_MUST_BE_EMPTY:
+        data.pop(field, None)
+    assert (
+        transit.readback_token_role(json.dumps({"data": data}).encode(), rendered) == []
+    )
+    leaked = transit.readback_token_role(
+        _readback(path_suffix="SECRET-MARKER"), rendered
+    )
+    assert leaked == ["path_suffix"] and "SECRET-MARKER" not in str(leaked)

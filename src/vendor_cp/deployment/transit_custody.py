@@ -362,10 +362,10 @@ def render_token_role(policy: str, bound_cidr: str) -> dict[str, Any]:
     """The exact `auth/token/roles/<name>` body. Every value is required.
 
     No default: the bound CIDR (the relay's source as OpenBao sees it) is a
-    ceremony input, never authored here. Refused: a broad network, an unspecified
-    one, or a malformed value. The role is a non-orphan child of the minting
-    token, so revoking the ceremony root revokes every token, even if everything
-    else fails. The ten minute life is `token_explicit_max_ttl`, the hard cap
+    ceremony input, never authored here. Refused: anything but a single address
+    (/32 or /128), an unspecified one, or a malformed value. The role is a
+    non-orphan child of the minting token, so revoking the ceremony root revokes
+    every token, even if everything else fails. The ten minute life is `token_explicit_max_ttl`, the hard cap
     (a token role has no default-ttl field of its own). Not renewable, no default
     policy (which would add self-lookup, renew, cubbyhole and wrapping), service
     tokens (batch tokens cannot be use-limited or revoked individually).
@@ -376,9 +376,10 @@ def render_token_role(policy: str, bound_cidr: str) -> dict[str, Any]:
         network = ipaddress.ip_network(bound_cidr, strict=True)
     except ValueError:
         raise _refuse("the bound CIDR is not a network") from None
-    minimum = 24 if network.version == 4 else 64
-    if network.is_unspecified or network.prefixlen < minimum:
-        raise _refuse("the bound CIDR is too broad to bind a token to its relay")
+    # A token is bound to ONE relay source: a single address (/32 or /128), never
+    # a range. A range would admit any client in it.
+    if network.is_unspecified or network.prefixlen != network.max_prefixlen:
+        raise _refuse("the bound CIDR must be a single address (/32 or /128)")
     return {
         "allowed_policies": [policy],
         "orphan": False,
@@ -391,13 +392,60 @@ def render_token_role(policy: str, bound_cidr: str) -> dict[str, Any]:
     }
 
 
+#: Every field OpenBao 2.5.3's token-role READ can return (`vault/token_store.go`).
+#: An ALLOWLIST: a field not listed here is reported as drift, so a role carrying
+#: anything this image has not judged cannot pass the read-back.
+_ROLE_READ_FIELDS: Final = frozenset(
+    {
+        "allowed_entity_aliases",
+        "allowed_policies",
+        "allowed_policies_glob",
+        "bound_cidrs",
+        "disallowed_policies",
+        "disallowed_policies_glob",
+        "explicit_max_ttl",
+        "name",
+        "orphan",
+        "path_suffix",
+        "period",
+        "renewable",
+        "token_bound_cidrs",
+        "token_explicit_max_ttl",
+        "token_no_default_policy",
+        "token_num_uses",
+        "token_period",
+        "token_type",
+    }
+)
+#: Fields that can only WIDEN a token (more policies by glob, a name pattern, a
+#: renewable period, a legacy duplicate of a limit). Each must be absent or
+#: empty/zero. A role update keeps any field it does not send, so a pre-existing
+#: or hand-edited role could carry one; rendering the body alone would not show it.
+_ROLE_MUST_BE_EMPTY: Final = (
+    "allowed_entity_aliases",
+    "allowed_policies_glob",
+    "bound_cidrs",
+    "disallowed_policies",
+    "disallowed_policies_glob",
+    "explicit_max_ttl",
+    "path_suffix",
+    "period",
+    "token_period",
+)
+
+
 def readback_token_role(response: bytes, expected: dict[str, Any]) -> list[str]:
     """Names of the fields in `GET auth/token/roles/<name>` that differ from the
-    rendered config (empty means the role is exactly as rendered)."""
+    rendered config or that can widen a token (empty means exactly as rendered).
+
+    Names only, never values. A field outside the 2.5.3 read list is named
+    `unknown:<field>`."""
     try:
         data = strict_json(response)["data"]
     except Exception:
         raise _refuse("the token role description is not an OpenBao response") from None
+    if not isinstance(data, dict):
+        raise _refuse("the token role description is not an OpenBao response")
 
     def seconds(value: Any) -> Any:
         if isinstance(value, str) and value.endswith("s") and value[:-1].isdigit():
@@ -421,6 +469,12 @@ def readback_token_role(response: bytes, expected: dict[str, Any]) -> list[str]:
             same = got == wanted
         if not same:
             different.append(field)
+    for field in _ROLE_MUST_BE_EMPTY:
+        if data.get(field) not in (None, [], "", 0):
+            different.append(field)
+    different.extend(
+        f"unknown:{field}" for field in sorted(set(data) - _ROLE_READ_FIELDS)
+    )
     return different
 
 

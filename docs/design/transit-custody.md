@@ -93,14 +93,21 @@ hand-authored:
     python -m vendor_cp.deployment.transit_custody role --policy NAME --bound-cidr CIDR
 
 `--bound-cidr` is required (the relay's source address as OpenBao sees it, a typed
-parameter entered at ship time; there is no default, and a broad, unspecified or malformed
-network is refused). The body is `allowed_policies` the one policy, `token_no_default_policy
+parameter entered at ship time; there is no default). It must be a SINGLE address (/32 or
+/128): any range, an unspecified network or a malformed value is refused. The body is `allowed_policies` the one policy, `token_no_default_policy
 = true` (the default policy would add self-lookup, renew, cubbyhole and wrapping),
 `renewable = false`, `token_type = service`, `token_num_uses = 2`,
 `token_explicit_max_ttl` of 600 s (the hard ten minute cap; a token role has no default-ttl field), `orphan = false` (a child of the minting token, so
 revoking the ceremony root revokes it even if everything else fails), and the bound CIDR.
 Its output is pinned by a test, as the policy is. After writing it, the ceremony reads it back
-and checks it against the render; any drift is named and exits non-zero:
+and checks it against the render; any drift is named and exits non-zero. The read-back also
+requires the fields that can only widen a token to be empty or zero (`allowed_policies_glob`,
+`disallowed_policies`, `disallowed_policies_glob`, `allowed_entity_aliases`, `path_suffix`,
+`token_period`, and the legacy `bound_cidrs`, `explicit_max_ttl` and `period`), and names any
+field outside OpenBao 2.5.3's token-role read list, because a role update keeps fields it
+does not send. Create the role fresh, and before minting a token confirm with
+`bao token lookup -accessor` that it came through the role (the role's policy only, 2 uses,
+ttl at most 600 s, not renewable, the bound address):
 
     bao read -format=json auth/token/roles/NAME | \
         python -m vendor_cp.deployment.transit_custody role-readback --policy NAME --bound-cidr CIDR

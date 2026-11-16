@@ -49,6 +49,7 @@ bound is the tick, the small CP tables, and the one-rehearsal scope; removed at 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import signal
 import sys
@@ -190,7 +191,8 @@ def revoke_until_clean(
         if counts == (0, 0, 0):
             return True
         what = "not clean" if counts is not None else "could not read back"
-        out(f"watchdog: revocation {what} (attempt {attempt} of {attempts})")
+        with contextlib.suppress(OSError):  # a dead terminal must not end the retry
+            out(f"watchdog: revocation {what} (attempt {attempt} of {attempts})")
         if attempt < attempts:
             sleep(min(delay, REVOKE_BACKOFF_CAP_SECONDS))
             delay *= 2
@@ -211,7 +213,9 @@ def run(
     """Watch until the deadline, tripping on any violation. Always ends revoked.
 
     Any of `SIGNALS` takes the revoke path; once revocation starts, signals are
-    ignored; revocation retries until the read-back is clean, else exit 5.
+    ignored; revocation retries until the read-back is clean, else exit 5. A
+    signal at ANY point (including inside the mask-and-revoke window) cannot
+    skip it.
     """
     if not 0 < deadline_seconds <= MAX_ROLE_TTL.total_seconds():
         raise FoundationBindingsUnavailable(
@@ -219,17 +223,26 @@ def run(
             code=TargetRefusal.CONSUMPTION_ROLE_OVERBROAD,
         )
 
+    revoking = False
+
     def on_signal(signum: int, _frame: Any) -> None:
+        nonlocal revoking
+        if revoking:
+            # Revocation is under way (or about to be): a signal must never
+            # interrupt it, and `signal.signal` itself runs pending handlers.
+            return
+        revoking = True
         raise _Interrupted(signum)
 
     previous: dict[int, Any] = {}
-    if install_signals:
-        for signum in SIGNALS:
-            previous[signum] = signal.signal(signum, on_signal)
-    stop = clock() + deadline_seconds
     result = EXIT_CLEAN
+    clean = False
     try:
         try:
+            if install_signals:
+                for signum in SIGNALS:
+                    previous[signum] = signal.signal(signum, on_signal)
+            stop = clock() + deadline_seconds
             while clock() < stop:
                 session = session_factory()
                 try:
@@ -254,12 +267,21 @@ def run(
             out("watchdog failed: revoking")
             result = EXIT_FAILED
     finally:
-        # From here nothing may abort the revocation.
-        for signum in SIGNALS if install_signals else ():
-            signal.signal(signum, signal.SIG_IGN)
-        clean = revoke_until_clean(session_factory, role, sleep=sleep, out=out)
-        for old_signum, handler in previous.items():
-            signal.signal(old_signum, handler)
+        # From the first statement here the handler is a no-op, so nothing can
+        # skip or abort the revocation. The loop is belt and braces: if anything
+        # still interrupted it, revocation is simply entered again, and it ends
+        # only when the read-back is clean or the bounded retry is exhausted.
+        revoking = True
+        while True:
+            try:
+                for signum in SIGNALS if install_signals else ():
+                    signal.signal(signum, signal.SIG_IGN)
+                clean = revoke_until_clean(session_factory, role, sleep=sleep, out=out)
+                for old_signum, handler in previous.items():
+                    signal.signal(old_signum, handler)
+                break
+            except _Interrupted:
+                continue
     if not clean:
         out(
             "watchdog: REVOCATION INCOMPLETE; the role may still be alive. "

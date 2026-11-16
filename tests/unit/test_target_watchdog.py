@@ -284,3 +284,111 @@ def test_a_revocation_that_is_never_clean_ends_loudly_and_boundedly() -> None:
     code, lines = _run(full)
     assert code == watchdog.EXIT_UNCLEAN
     assert any("REVOCATION INCOMPLETE" in line for line in lines)
+
+
+# ── a signal at every point of the mask-and-revoke window (re-check R1) ─────
+
+
+def _quiet_handlers() -> dict[int, Any]:
+    """Harmless handlers, so a restored 'previous' can never kill the test run."""
+    saved = {s: signal.getsignal(s) for s in watchdog.SIGNALS}
+    for signum in watchdog.SIGNALS:
+        signal.signal(signum, lambda *_: None)
+    return saved
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+@pytest.mark.parametrize("call_index", range(12))
+def test_a_signal_at_any_signal_call_cannot_skip_revocation(
+    monkeypatch: pytest.MonkeyPatch, when: str, call_index: int
+) -> None:
+    """`signal.signal` runs pending handlers, so a signal raised immediately
+    before or after ANY of the install, mask and restore calls lands inside the
+    window the review named. Revocation must still run in full."""
+    saved = _quiet_handlers()
+    real = signal.signal
+    calls = {"n": 0}
+
+    def injecting(signum: int, handler: Any) -> Any:
+        index = calls["n"]
+        calls["n"] += 1
+        if when == "before" and index == call_index:
+            signal.raise_signal(signal.SIGTERM)
+        previous = real(signum, handler)
+        if when == "after" and index == call_index:
+            signal.raise_signal(signal.SIGHUP)
+        return previous
+
+    world = _World([[]] * 20)
+    out: list[str] = []
+    monkeypatch.setattr(signal, "signal", injecting)
+    try:
+        code = watchdog.run(
+            world.factory,
+            "run_x",
+            deadline_seconds=3,
+            sleep=lambda _s: None,
+            clock=iter(range(1000)).__next__,
+            out=out.append,
+        )
+    finally:
+        monkeypatch.setattr(signal, "signal", real)
+        for signum, handler in saved.items():
+            real(signum, handler)
+    assert world.executed[:-1] == list(spec.revocation_sql("run_x")), (when, call_index)
+    assert not world.role_present
+    assert code in (watchdog.EXIT_CLEAN, watchdog.EXIT_SIGNALLED)
+    assert code != watchdog.EXIT_UNCLEAN
+
+
+def test_a_signal_raised_inside_the_first_mask_call_still_revokes_and_exits_6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact scenario of the review: SIGHUP, then the kit trap's SIGTERM
+    arriving while the first SIG_IGN call is running."""
+    saved = _quiet_handlers()
+    real = signal.signal
+    state = {"masking": False, "fired": False}
+
+    def injecting(signum: int, handler: Any) -> Any:
+        if handler is signal.SIG_IGN and not state["fired"]:
+            state["fired"] = True
+            signal.raise_signal(signal.SIGTERM)
+        return real(signum, handler)
+
+    world = _World([[]] * 20)
+
+    def sleeper(_s: float) -> None:
+        if not state["masking"]:
+            state["masking"] = True
+            signal.raise_signal(signal.SIGHUP)
+
+    monkeypatch.setattr(signal, "signal", injecting)
+    try:
+        code = watchdog.run(
+            world.factory,
+            "run_x",
+            deadline_seconds=100,
+            sleep=sleeper,
+            clock=iter(range(1000)).__next__,
+            out=lambda _line: None,
+        )
+    finally:
+        monkeypatch.setattr(signal, "signal", real)
+        for signum, handler in saved.items():
+            real(signum, handler)
+    assert state["fired"] and code == watchdog.EXIT_SIGNALLED
+    assert world.executed[:-1] == list(spec.revocation_sql("run_x"))
+    assert not world.role_present
+
+
+def test_a_dead_terminal_does_not_end_the_retry() -> None:
+    world = _World([["advisory_lock"]])
+    world.verify_script = [(1, 0, 0), (0, 0, 0)]
+
+    def broken(_line: str) -> None:
+        raise OSError(5, "input/output error")
+
+    assert watchdog.revoke_until_clean(
+        world.factory, "run_x", sleep=lambda _s: None, out=broken
+    )

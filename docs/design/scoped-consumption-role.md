@@ -155,10 +155,20 @@ one exit path that revokes; once revocation starts further signals are ignored; 
 is retried with bounded backoff (12 attempts, capped at 15 s) until the read-back is
 (0,0,0), and if it never is the watchdog exits LOUDLY with code 5 and the ceremony revokes
 by hand. Exit codes: 0 clean end, 3 tripped, 4 failed, 5 revocation not clean, 6 signalled.
-It cannot survive SIGKILL, so run it where that cannot happen (`--stop-timeout 120`, or
-`systemd-run`, which also survives SSH loss), and let the kit's trap run the revocation too.
-Supply its credential with an `--env-file` on tmpfs (removed afterwards) or stdin, not a
-plain environment variable, which shows in `docker inspect` and `/proc`.
+It cannot survive SIGKILL, and a revocation can take minutes (each attempt is several
+fresh connections plus lock waits, and the retry sleeps alone total about two minutes), so
+run it where nothing sends SIGKILL: `systemd-run` (journal stdout; survives SSH loss), or
+docker with `--stop-timeout 600` and never `docker stop` it. The watchdog's DSN carries
+`connect_timeout=5`, so a blackholed database cannot hang a connect. After ANY watchdog
+exit the ceremony kit's trap runs `revoke` and `verify` unconditionally. A signal at any
+instant, including inside the mask-and-revoke window, cannot skip revocation: once
+revoking starts the handler is a no-op and the revoke is re-entered if anything still
+interrupts it.
+Its DSN is a superuser-grade credential and is visible to root-equivalent users of the
+ceremony host (root, the docker group) however it is supplied: an `--env-file` still
+appears in `docker inspect` and in `/proc`, and the watchdog reads it from the environment
+only. That exposure is accepted and bounded by the host's trust and the 4 hour window; it
+is not removed by the env-file. Never place it on a target.
 
 Its own database access: it runs on the ceremony host, never on a target, with the SAME
 administrative session credential that created the role (a superuser, or a role holding
