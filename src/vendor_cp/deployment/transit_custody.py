@@ -365,7 +365,8 @@ def render_token_role(policy: str, bound_cidr: str) -> dict[str, Any]:
     ceremony input, never authored here. Refused: a broad network, an unspecified
     one, or a malformed value. The role is a non-orphan child of the minting
     token, so revoking the ceremony root revokes every token, even if everything
-    else fails. Not renewable, no default policy (which would add self-lookup,
+    else fails. The ten minute life is `token_explicit_max_ttl`, the hard cap
+    (a token role has no default-ttl field of its own). Not renewable, no default policy (which would add self-lookup,
     renew, cubbyhole and wrapping), service tokens (batch tokens cannot be
     use-limited or revoked individually).
     """
@@ -386,7 +387,6 @@ def render_token_role(policy: str, bound_cidr: str) -> dict[str, Any]:
         "token_explicit_max_ttl": f"{TOKEN_TTL_SECONDS}s",
         "token_no_default_policy": True,
         "token_num_uses": TOKEN_NUM_USES,
-        "token_ttl": f"{TOKEN_TTL_SECONDS}s",
         "token_type": "service",
     }
 
@@ -413,7 +413,7 @@ def readback_token_role(response: bytes, expected: dict[str, Any]) -> list[str]:
     different = []
     for field, wanted in sorted(expected.items()):
         got = data.get(field)
-        if field in ("token_ttl", "token_explicit_max_ttl"):
+        if field == "token_explicit_max_ttl":
             same = seconds(got) == seconds(wanted)
         elif field == "token_bound_cidrs":
             same = cidrs(got) == cidrs(wanted)

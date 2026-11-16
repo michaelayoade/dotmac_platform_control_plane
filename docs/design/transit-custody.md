@@ -96,8 +96,8 @@ hand-authored:
 parameter entered at ship time; there is no default, and a broad, unspecified or malformed
 network is refused). The body is `allowed_policies` the one policy, `token_no_default_policy
 = true` (the default policy would add self-lookup, renew, cubbyhole and wrapping),
-`renewable = false`, `token_type = service`, `token_num_uses = 2`, `token_ttl` and
-`token_explicit_max_ttl` of 600 s, `orphan = false` (a child of the minting token, so
+`renewable = false`, `token_type = service`, `token_num_uses = 2`,
+`token_explicit_max_ttl` of 600 s (the hard ten minute cap; a token role has no default-ttl field), `orphan = false` (a child of the minting token, so
 revoking the ceremony root revokes it even if everything else fails), and the bound CIDR.
 Its output is pinned by a test, as the policy is. After writing it, the ceremony reads it back
 and checks it against the render; any drift is named and exits non-zero:

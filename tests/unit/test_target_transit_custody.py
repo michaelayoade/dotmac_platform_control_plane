@@ -491,7 +491,7 @@ def test_the_module_is_imported_only_by_the_producer_command() -> None:
 _ROLE_PINNED = (
     '{"allowed_policies":["cp-a2-sign"],"orphan":false,"renewable":false,'
     '"token_bound_cidrs":["192.0.2.7/32"],"token_explicit_max_ttl":"600s",'
-    '"token_no_default_policy":true,"token_num_uses":2,"token_ttl":"600s",'
+    '"token_no_default_policy":true,"token_num_uses":2,'
     '"token_type":"service"}'
 )
 
@@ -508,7 +508,8 @@ def test_the_token_role_config_is_pinned_exactly(
     assert capsys.readouterr().out.strip() == _ROLE_PINNED
     # Two uses, ten minutes, not renewable, no default policy, a child (not an
     # orphan) of the minting token.
-    assert rendered["token_num_uses"] == 2 and rendered["token_ttl"] == "600s"
+    assert rendered["token_num_uses"] == 2
+    assert rendered["token_explicit_max_ttl"] == "600s"
     assert rendered["renewable"] is False and rendered["orphan"] is False
     assert rendered["token_no_default_policy"] is True
 
@@ -552,7 +553,6 @@ def _readback(**overrides: Any) -> bytes:
         "token_explicit_max_ttl": 600,
         "token_no_default_policy": True,
         "token_num_uses": 2,
-        "token_ttl": 600,
         "token_type": "service",
         "name": "x",
     }
@@ -572,7 +572,7 @@ def test_the_readback_accepts_exactly_the_rendered_role() -> None:
         ("orphan", True),
         ("token_num_uses", 0),
         ("token_num_uses", 3),
-        ("token_ttl", 3600),
+        ("token_explicit_max_ttl", 3600),
         ("token_explicit_max_ttl", 0),
         ("token_no_default_policy", False),
         ("token_type", "batch"),
