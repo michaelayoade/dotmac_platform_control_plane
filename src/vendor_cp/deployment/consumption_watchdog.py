@@ -258,8 +258,8 @@ def run(
         for signum in SIGNALS if install_signals else ():
             signal.signal(signum, signal.SIG_IGN)
         clean = revoke_until_clean(session_factory, role, sleep=sleep, out=out)
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+        for old_signum, handler in previous.items():
+            signal.signal(old_signum, handler)
     if not clean:
         out(
             "watchdog: REVOCATION INCOMPLETE; the role may still be alive. "
