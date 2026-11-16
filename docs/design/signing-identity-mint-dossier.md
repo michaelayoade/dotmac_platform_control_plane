@@ -795,3 +795,37 @@ descriptors name. That may be fine — a pointer descriptor does not assert what
 kind of material sits at the end of it — or the type may want splitting. It is
 a code question, deliberately not decided inside a documentation change.
 
+
+## Amendment — a2 rehearsal identities (transit custody)
+
+Michael's ruling of 2026-11-15 changes custody for the authorization and dispatch
+signers used for the Gate 2 a2 rehearsal, and only those. It supersedes Step 1
+(workstation mint) and Step 4 (key-value records) for them, and for nothing else. The release-evidence and recovery identities, the
+observation identity, and every row of the custody table above are unchanged, and
+`POINTER_MATERIAL` in `signers.py` is deliberately unchanged: the production
+identities are decided at D3, under whatever custody D3 chooses. The design,
+adapter and ceremony commands are in `docs/design/transit-custody.md`.
+
+- Custody: the private halves are generated INSIDE an OpenBao transit mount that
+  holds exactly those signing keys and nothing else, as ed25519 with export and plaintext
+  backup off, derivation off, never rotated, so the identity is key version 1 for
+  its whole life. They never exist outside OpenBao, so no workstation, key-value
+  record or pointer holds them. CP holds no key and no standing credential.
+- Public identity: the ceremony pins each transit public key to a
+  `PlatformCpPublicVerificationIdentity.v1` document with `transit_custody
+  identity`, which refuses an exportable or rotated key, and proves possession by
+  having the key sign a domain-separated challenge that `transit_custody
+  pop-verify` checks. The pinned document is installed root-owned like every other
+  verification file in Step 6b.
+- Signing: an attended operator command, one use-limited token piped on stdin,
+  over a relay that exists only while Michael's session is open. Every signature
+  is verified against the pinned identity before Control receives it, so a wrong
+  or swapped key refuses before anything is persisted as signed.
+- Retirement: the identities are for a2 only. After a2 is published or disposed
+  the ceremony deletes the token role and the policy, permits deletion, and
+  disables the mount, which destroys the keys. The pinned identity files are kept
+  read-only for audit and marked RETIRED here. That step is irreversible by design.
+- Not in this dossier: the Starter ADR-0009 amendment that says remote
+  non-exportable signing custody is not dereferencing is a separate Starter
+  documentation change, and the launcher JWT role gates only the launcher
+  principal and never carries the signing policy.
