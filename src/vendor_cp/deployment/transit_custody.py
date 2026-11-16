@@ -365,8 +365,9 @@ def render_token_role(policy: str, bound_cidr: str) -> dict[str, Any]:
     ceremony input, never authored here. Refused: anything but a single address
     (/32 or /128), an unspecified one, or a malformed value. The role is a
     non-orphan child of the minting token, so revoking the ceremony root revokes
-    every token, even if everything else fails. The ten minute life is `token_explicit_max_ttl`, the hard cap
-    (a token role has no default-ttl field of its own). Not renewable, no default
+    every token, even if everything else fails. The ten minute life is
+    `token_explicit_max_ttl`, the hard cap (a token role has no default-ttl field
+    of its own). Not renewable, no default
     policy (which would add self-lookup, renew, cubbyhole and wrapping), service
     tokens (batch tokens cannot be use-limited or revoked individually).
     """
