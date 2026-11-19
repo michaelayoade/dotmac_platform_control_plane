@@ -509,3 +509,130 @@ def test_a_non_uuid_enrolment_ref_refuses_before_any_signing(
         producer.issue_dispatch_materials(db, request, custody=keys.custody())
     assert caught.value.code is TargetRefusal.MATERIALS_REFUSED
     assert db.order == [] and keys.signed == []
+
+
+# ── CP-7: the host facts come from the E10 receipt row, or from flags, never both ──
+
+
+class _Args(SimpleNamespace):
+    pass
+
+
+def _args(**values: Any) -> Any:
+    base: dict[str, Any] = {
+        "e10_receipt_ref": None,
+        "host_id": None,
+        "host_incarnation": None,
+        "host_enrolment_ref": None,
+    }
+    base.update(values)
+    return _Args(**base)
+
+
+_TYPED = {
+    "host_id": "host-a",
+    "host_incarnation": "sha256:" + "ab" * 32,
+    "host_enrolment_ref": "6f1d1c1e-0000-4000-8000-000000000001",
+}
+
+
+def test_all_three_typed_flags_are_still_accepted() -> None:
+    assert producer._host_facts(_args(**_TYPED), {}) == (
+        "host-a",
+        "sha256:" + "ab" * 32,
+        "6f1d1c1e-0000-4000-8000-000000000001",
+    )
+
+
+@pytest.mark.parametrize("missing", sorted(_TYPED))
+def test_a_partial_set_of_typed_flags_refuses(missing: str) -> None:
+    typed = {k: v for k, v in _TYPED.items() if k != missing}
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        producer._host_facts(_args(**typed), {})
+    assert caught.value.code is TargetRefusal.MATERIALS_REFUSED
+
+
+def test_neither_a_receipt_nor_flags_refuses() -> None:
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer._host_facts(_args(), {})
+
+
+@pytest.mark.parametrize("flag", sorted(_TYPED))
+def test_a_receipt_beside_any_typed_flag_refuses_before_the_database(
+    monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    """A typed value that could disagree with the receipt is the typo that would
+    spend a single-use host; the database is never opened."""
+    from vendor_cp.deployment import lane3_e10
+
+    monkeypatch.setattr(
+        lane3_e10,
+        "owner_session",
+        lambda env: pytest.fail("the owner session was opened before the refusal"),
+    )
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        producer._host_facts(_args(e10_receipt_ref="e10-x", **{flag: _TYPED[flag]}), {})
+    assert caught.value.code is TargetRefusal.MATERIALS_REFUSED
+
+
+def test_the_facts_are_read_from_the_receipt_over_the_owner_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vendor_cp.deployment import lane3_e10
+
+    closed: list[bool] = []
+    session = SimpleNamespace(close=lambda: closed.append(True))
+    seen: dict[str, Any] = {}
+
+    def fake_session(env: Any) -> Any:
+        seen["env"] = dict(env)
+        return session
+
+    def fake_facts(db: Any, *, receipt_ref: str) -> Any:
+        assert db is session
+        seen["ref"] = receipt_ref
+        return lane3_e10.HostFacts(
+            "host-a", "sha256:" + "cd" * 32, _TYPED["host_enrolment_ref"]
+        )
+
+    monkeypatch.setattr(lane3_e10, "owner_session", fake_session)
+    monkeypatch.setattr(lane3_e10, "receipt_host_facts", fake_facts)
+    got = producer._host_facts(
+        _args(e10_receipt_ref="e10-6f1c2f4e-52a8-4d0e-9a1b-2f0c7e6d9b11"),
+        {lane3_e10.DSN_ENV: "postgresql://owner@h/d"},
+    )
+    assert got == ("host-a", "sha256:" + "cd" * 32, _TYPED["host_enrolment_ref"])
+    assert seen["ref"] == "e10-6f1c2f4e-52a8-4d0e-9a1b-2f0c7e6d9b11"
+    assert closed == [True]
+
+
+def test_a_receipt_that_is_not_usable_is_a_typed_refusal_naming_the_code_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vendor_cp.deployment import lane3_e10
+
+    monkeypatch.setattr(
+        lane3_e10, "owner_session", lambda env: SimpleNamespace(close=lambda: None)
+    )
+
+    def refuse(db: Any, *, receipt_ref: str) -> Any:
+        raise lane3_e10.E10Refused("receipt-not-current-root")
+
+    monkeypatch.setattr(lane3_e10, "receipt_host_facts", refuse)
+    with pytest.raises(FoundationBindingsUnavailable) as caught:
+        producer._host_facts(_args(e10_receipt_ref="e10-x"), {})
+    assert caught.value.code is TargetRefusal.MATERIALS_REFUSED
+    assert "receipt-not-current-root" in str(caught.value)
+
+
+def test_the_issue_parser_accepts_a_receipt_ref_and_no_typed_host_flags(
+    tmp_path: Path,
+) -> None:
+    argv = _issue_argv(tmp_path)
+    for flag in ("--host-id", "--host-incarnation", "--host-enrolment-ref"):
+        index = argv.index(flag)
+        argv = argv[:index] + argv[index + 2 :]
+    argv += ["--e10-receipt-ref", "e10-6f1c2f4e-52a8-4d0e-9a1b-2f0c7e6d9b11"]
+    parsed = producer._build_parser().parse_args(argv)
+    assert parsed.e10_receipt_ref == "e10-6f1c2f4e-52a8-4d0e-9a1b-2f0c7e6d9b11"
+    assert parsed.host_id is None

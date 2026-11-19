@@ -449,14 +449,58 @@ def _build_parser() -> Any:
     issue.add_argument("--dispatch-command-id", required=True)
     issue.add_argument("--authorization-expires-at", required=True)
     issue.add_argument("--controller-ssh-fingerprint", required=True)
-    issue.add_argument("--host-id", required=True)
-    issue.add_argument("--host-incarnation", required=True)
-    issue.add_argument("--host-enrolment-ref", required=True)
+    # The host facts come from ONE source: the E10 receipt row (CP-7), or, as
+    # before, all three typed. `_host_facts` refuses a mix and refuses neither.
+    issue.add_argument("--e10-receipt-ref")
+    issue.add_argument("--host-id")
+    issue.add_argument("--host-incarnation")
+    issue.add_argument("--host-enrolment-ref")
     issue.add_argument("--out-dir", required=True)
     # Required and single-valued: there is no default mode and no other custody.
     issue.add_argument("--custody", required=True, choices=("transit",))
     issue.add_argument("--custody-config", required=True)
     return parser
+
+
+def _host_facts(args: Any, env: Mapping[str, str]) -> tuple[str, str, str]:
+    """`(host_id, host_incarnation, host_enrolment_ref)` from exactly one source.
+
+    Either every fact is typed, or `--e10-receipt-ref` names the receipt row they
+    are read from (over the owner session, `LANE3_E10_DATABASE_URL`: no runtime
+    role may read `cp_lane3`). Both, or neither, is a refusal: a typed value that
+    disagrees with the receipt is exactly the typo that would spend a host.
+    """
+    typed = (args.host_id, args.host_incarnation, args.host_enrolment_ref)
+    if args.e10_receipt_ref:
+        if any(value is not None for value in typed):
+            raise _refuse(
+                "host facts come from the receipt OR from flags, never both",
+                TargetRefusal.MATERIALS_REFUSED,
+            )
+        from vendor_cp.deployment import lane3_e10
+
+        try:
+            db = lane3_e10.owner_session(env)
+            try:
+                facts = lane3_e10.receipt_host_facts(
+                    db, receipt_ref=args.e10_receipt_ref
+                )
+            finally:
+                db.close()
+        except lane3_e10.E10Refused as refusal:
+            raise _refuse(
+                f"the E10 receipt is not usable: {refusal.code}",
+                TargetRefusal.MATERIALS_REFUSED,
+            ) from None
+        return facts.host_id, facts.host_incarnation, facts.host_enrolment_ref
+    host_id, host_incarnation, host_enrolment_ref = typed
+    if host_id is None or host_incarnation is None or host_enrolment_ref is None:
+        raise _refuse(
+            "host facts need --e10-receipt-ref or all of --host-id, "
+            "--host-incarnation and --host-enrolment-ref",
+            TargetRefusal.MATERIALS_REFUSED,
+        )
+    return host_id, host_incarnation, host_enrolment_ref
 
 
 def main(
@@ -486,6 +530,7 @@ def main(
             install_custody(
                 transit_custody.build_custody(config, token, owner_uid=owner_uid)
             )
+            host_id, host_incarnation, host_enrolment_ref = _host_facts(args, env)
             request = IssueDispatchRequest(
                 plan_id=UUID(args.plan_id),
                 rollout_ref=args.rollout_ref,
@@ -495,9 +540,9 @@ def main(
                     args.authorization_expires_at
                 ),
                 controller_ssh_fingerprint=args.controller_ssh_fingerprint,
-                host_id=args.host_id,
-                host_incarnation=args.host_incarnation,
-                host_enrolment_ref=args.host_enrolment_ref,
+                host_id=host_id,
+                host_incarnation=host_incarnation,
+                host_enrolment_ref=host_enrolment_ref,
             )
             _check_expiry(request.authorization_expires_at)
             session = _controller_session(env)

@@ -66,6 +66,7 @@ from sqlalchemy import text
 
 __all__ = [
     "ATTESTER_DOMAIN",
+    "ensure_audit_registry",
     "CANDIDATE_DOMAIN",
     "CANDIDATE_POP_PREFIX",
     "E10Refused",
@@ -78,6 +79,8 @@ __all__ = [
     "enrol_candidate_root",
     "enrol_incarnation",
     "format_time",
+    "HostFacts",
+    "receipt_host_facts",
     "incarnation_pop_message",
     "main",
     "receipt_digest",
@@ -941,6 +944,51 @@ def activate_presentation_credential(
         raise E10Refused("control-credential-refused") from None
 
 
+@dataclass(frozen=True, slots=True)
+class HostFacts:
+    """The three host facts an execution context carries, from ONE receipt row."""
+
+    host_id: str
+    host_incarnation: str
+    host_enrolment_ref: str
+
+
+def receipt_host_facts(db: Any, *, receipt_ref: str) -> HostFacts:
+    """CP-7: the host facts for `materials_producer issue --e10-receipt-ref`.
+
+    Read from the receipt row, never typed, so a typo cannot spend a single-use
+    incarnation (B3 protection). Refuses unless the receipt's enrolment is
+    Control's own row for this host and key AND is the host's CURRENT root. It
+    does not demand a destruction: issuance (design 2.2 step 1) comes before
+    the key is signed with and destroyed (steps 5-8).
+    """
+    receipt = _receipt_row(db, receipt_ref)
+    agrees = db.execute(
+        text(
+            "SELECT 1 FROM mod_deploy.attestation_enrolments e "
+            "JOIN mod_deploy.attestation_current_roots c "
+            "ON c.custody_domain = e.custody_domain AND c.subject = e.subject "
+            "AND c.current_fingerprint = e.public_key_fingerprint "
+            "WHERE e.id = CAST(:id AS uuid) AND e.custody_domain = 'host_attester' "
+            "AND e.subject = :host AND e.public_key_fingerprint = :fp "
+            "AND e.key_custody_pointer = :pointer"
+        ),
+        {
+            "id": receipt["enrolment_uuid"],
+            "host": receipt["host_id"],
+            "fp": receipt["incarnation_fingerprint"],
+            "pointer": receipt["key_custody_pointer"],
+        },
+    ).first()
+    if agrees is None:
+        raise E10Refused("receipt-not-current-root")
+    return HostFacts(
+        host_id=str(receipt["host_id"]),
+        host_incarnation=str(receipt["incarnation_fingerprint"]),
+        host_enrolment_ref=str(receipt["enrolment_uuid"]),
+    )
+
+
 def show(db: Any, *, receipt_ref: str) -> dict[str, Any]:
     """The receipt, its digest, its destruction and both roots' shapes. Read-only."""
     receipt = _receipt_row(db, receipt_ref)
@@ -970,7 +1018,7 @@ def show(db: Any, *, receipt_ref: str) -> dict[str, Any]:
 # ── the CLI ──────────────────────────────────────────────────────────────────
 
 
-def _session(env: Mapping[str, str]) -> Any:
+def owner_session(env: Mapping[str, str]) -> Any:
     dsn = env.get(DSN_ENV, "").strip()
     if not dsn:
         raise E10Refused("dsn-missing")
@@ -981,6 +1029,34 @@ def _session(env: Mapping[str, str]) -> Any:
 
     runtime = DatabaseRuntime.from_urls(database_url=dsn, platform_database_url=dsn)
     return runtime.platform_session_factory()
+
+
+def ensure_audit_registry() -> None:
+    """Install the audit-action registry a Control credential command needs.
+
+    Control's credential lifecycle writes an audit event, and the kernel refuses
+    any write in a process that installed no registry (`create_app` installs one;
+    a CLI builds no app). Composed from the SAME manifests `create_app` would use,
+    never a hand-written list, and only if nothing is installed already.
+    """
+    from dotmac_kernel.audit_actions import (
+        AuditActionRegistry,
+        AuditActionsNotInstalledError,
+        active_audit_actions,
+        install_audit_actions,
+    )
+
+    try:
+        active_audit_actions()
+        return
+    except AuditActionsNotInstalledError:
+        pass
+    from dotmac_kernel.modules import ModuleRegistry
+
+    from vendor_cp.assembly import build_spec
+
+    manifests = ModuleRegistry(build_spec().modules).startup_order()
+    install_audit_actions(AuditActionRegistry.from_manifests(manifests))
 
 
 def _stdin_json(stdin: Any) -> dict[str, Any]:
@@ -1055,7 +1131,7 @@ def main(
             print(f"kind={args.kind}")
             print(f"nonce={_b64url(raw)}")
             return 0
-        db = _session(env)
+        db = owner_session(env)
         try:
             if args.action == "enrol-incarnation":
                 outcome = enrol_incarnation(db, chosen, _stdin_json(source))
@@ -1095,6 +1171,7 @@ def main(
                     )
                 )
             elif args.action == "enrol-presentation-credential":
+                ensure_audit_registry()
                 credential = enrol_presentation_credential(
                     db,
                     target_ref=args.target_ref,
@@ -1105,6 +1182,7 @@ def main(
                 db.commit()
                 print(f"credential_id={credential}")
             elif args.action == "activate-presentation-credential":
+                ensure_audit_registry()
                 document = _stdin_json(source)
                 if set(document) != {"challenge", "response"}:
                     raise E10Refused("request-malformed")
@@ -1127,6 +1205,7 @@ def main(
                     db, chosen, receipt_ref=args.receipt_ref
                 )
                 if args.credential_id:
+                    ensure_audit_registry()
                     _revoke_credential(db, args.credential_id, args.command_id)
                 db.commit()
                 print(f"revoked_fingerprint={fingerprint}")
@@ -1139,6 +1218,11 @@ def main(
     except E10Refused as refusal:
         print(f"{args.action} refused: {refusal.code}", file=sys.stderr)
         return 2
+    except Exception as error:  # noqa: BLE001 - class name only, never the text
+        # A database or owner error can carry statement text and parameters; the
+        # operator gets the class, and the cause stays on the host.
+        print(f"{args.action} failed: {type(error).__name__}", file=sys.stderr)
+        return 4
     return 0
 
 
