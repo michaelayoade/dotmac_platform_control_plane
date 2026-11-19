@@ -240,7 +240,6 @@ class CaseDatabase:
         self._url_for_role = url_for_role
         self.registry = registry
         self.start = clock_start.replace(microsecond=0)
-        self.vendored = load_vendored()
         self._engines: list[Engine] = []
         self.stores: list[CpLeaseStore] = []
         self.roles: list[str] = []
@@ -249,12 +248,21 @@ class CaseDatabase:
         self._lock = threading.RLock()
         self._install_clock()
 
+    @property
+    def vendored(self) -> types.SimpleNamespace:
+        """The pinned Starter suite, loaded on first use (it needs Foundation)."""
+        return load_vendored()
+
     # ── the frozen clock ────────────────────────────────────────────────────
 
     def _install_clock(self) -> None:
         with self.admin.begin() as conn:
             conn.execute(text("CREATE SCHEMA cp_lane3_test"))
             conn.execute(text("CREATE TABLE cp_lane3_test.clock (t timestamptz)"))
+            # The replacement `store_now` runs as the function OWNER (the
+            # migration role), which must be able to read the clock table.
+            conn.execute(text("GRANT USAGE ON SCHEMA cp_lane3_test TO app_admin"))
+            conn.execute(text("GRANT SELECT ON cp_lane3_test.clock TO app_admin"))
             conn.execute(
                 text("INSERT INTO cp_lane3_test.clock VALUES (:t)"), {"t": self.start}
             )
@@ -483,6 +491,38 @@ class CaseDatabase:
             incarnation_fingerprint=row["incarnation_fingerprint"],
             enrolment_uuid=row["enrolment_text"],
             incarnation_key_destroyed_at=row["destroyed_at"],
+            receipt_ref=row["receipt_ref"],
+            vm_slot=row["vm_slot"],
+        )
+
+    def unsealed_receipt(self, host: str, generation: int) -> Any:
+        """A receipt whose destruction was NEVER stamped (claimed as destroyed now).
+
+        The store reads the destruction from its own table, so the claim is refused
+        (`-not-destroyed`) however the receipt is spelled.
+        """
+        ref = self._enrol(host, generation, key_of=None)
+        with self.admin.begin() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT *, enrolment_uuid::text AS enrolment_text "
+                        "FROM cp_lane3.e10_receipts WHERE receipt_ref = :r"
+                    ),
+                    {"r": ref},
+                )
+                .mappings()
+                .one()
+            )
+        return self.vendored.e10_receipt.E10ReceiptRef(
+            vm_alias=row["vm_alias"],
+            host_id=row["host_id"],
+            machine_id=row["machine_id"],
+            ssh_host_key_fingerprint=row["ssh_host_key_fingerprint"],
+            incarnation_public_key_b64url=row["incarnation_public_key_b64url"],
+            incarnation_fingerprint=row["incarnation_fingerprint"],
+            enrolment_uuid=row["enrolment_text"],
+            incarnation_key_destroyed_at=self.now(),
             receipt_ref=row["receipt_ref"],
             vm_slot=row["vm_slot"],
         )

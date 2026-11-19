@@ -224,6 +224,10 @@ PyYAML = "6.0.2"
 line-length = 88
 target-version = "py312"
 src = ["src", "tests"]
+# Starter's Lane 3 suite, vendored VERBATIM by sha256 (tests/vendored/starter_lane3/
+# PINS.json). Reformatting or "fixing" a vendored blob would break its pin, which
+# is the point of pinning it.
+extend-exclude = ["tests/vendored"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "S"]
@@ -287,6 +291,15 @@ select = ["E", "F", "I", "UP", "B", "S"]
 # bound as parameters. No external input reaches these statements; the only
 # non-constant values are bound (`:role`, `:schema`).
 "tests/migration/test_commercial_backfill_replay.py" = ["S101", "S105", "S106", "S608"]
+
+# The Lane 3 conformance harness builds its role, binding and clock statements from
+# module constants and a role name it generated itself (`l3_` + uuid hex); identifiers
+# and a quoted literal cannot be bound as parameters, and no external input reaches
+# them.
+"tests/unit/lane3_cp_support.py" = ["S608"]
+# The Lane 3 database tests are SQL-heavy: statements and DSN-shaped literals are one
+# string each by nature and ruff cannot wrap them.
+"tests/migration/test_lane3_*.py" = ["E501", "S608"]
 
 [tool.mypy]
 python_version = "3.12"

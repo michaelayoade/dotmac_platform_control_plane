@@ -25,7 +25,7 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Protocol
+from typing import Any, Protocol
 
 import pytest
 from sqlalchemy import Connection, create_engine, text
@@ -210,3 +210,127 @@ def target_only_connect(
                         text(f"GRANT CONNECT ON DATABASE {quoted} TO {recipient}")
                     )
                 assert fence_module._current_grants(owner, name) == snapshots[name]
+
+
+# ── Lane 3 lease store and E10 receipts (v023) ──────────────────────────────
+#
+# One MIGRATED template database per session (the full composed lineage, as the
+# production migrator), cloned per case with `CREATE DATABASE ... TEMPLATE`. The
+# store's tables are append-only, so a case cannot clean up after itself; a fresh
+# clone per case is also what lets every suite case use `host-a`.
+
+
+def _lane3_support() -> object:
+    """`tests/unit/lane3_cp_support.py`, by path: `tests` is not a package."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    name = "lane3_cp_support"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parents[1] / "unit" / "lane3_cp_support.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _lane3_migrate_template(postgres_url: str, name: str) -> None:
+    """Migrate the template with the COMPOSED lineage, as the production migrator."""
+    from alembic import command
+
+    from vendor_cp.migrations import make_alembic_config
+
+    url = _url_for(postgres_url, name, user="app_admin")
+    command.upgrade(make_alembic_config(url), "heads")
+
+
+@pytest.fixture(scope="session")
+def lane3_template(postgres_url: str) -> Iterator[str]:
+    name = f"vcp_lane3_tmpl_{uuid.uuid4().hex[:10]}"
+    server = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+    with server.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{name}"'))
+    setup = create_engine(_url_for(postgres_url, name), isolation_level="AUTOCOMMIT")
+    with setup.connect() as conn:
+        conn.execute(text("ALTER SCHEMA public OWNER TO app_admin"))
+        conn.execute(text(f'GRANT CREATE ON DATABASE "{name}" TO app_admin'))
+        conn.execute(
+            text(
+                f'GRANT CONNECT ON DATABASE "{name}" TO platform_api, app_user, '
+                "app_admin"
+            )
+        )
+    setup.dispose()
+    try:
+        _lane3_migrate_template(postgres_url, name)
+        yield name
+    finally:
+        with server.connect() as conn:
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :n AND pid <> pg_backend_pid()"
+                ),
+                {"n": name},
+            )
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+        server.dispose()
+
+
+class Lane3CaseFactory:
+    """Clones of the migrated template, each with a `CaseDatabase` over it."""
+
+    def __init__(self, postgres_url: str, template: str) -> None:
+        self._url = postgres_url
+        self._template = template
+        self._server = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        self._cases: list[tuple[str, object, list[str]]] = []
+
+    def new(self, *, registry: object | None = None) -> Any:
+        from datetime import UTC, datetime
+
+        from vendor_cp.deployment import lane3_e10
+
+        support: Any = _lane3_support()
+        name = f"vcp_lane3_{uuid.uuid4().hex[:10]}"
+        with self._server.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{name}" TEMPLATE "{self._template}"'))
+        engine = create_engine(_url_for(self._url, name))
+        case = support.CaseDatabase(
+            admin=engine,
+            url_for_role=lambda role: _url_for(self._url, name, user=role),
+            registry=registry or lane3_e10.ControlRegistry(),
+            clock_start=datetime.now(UTC),
+        )
+        self._cases.append((name, case, case.roles))
+        return case
+
+    def dispose(self) -> None:
+        for name, case, roles in self._cases:
+            case.close()  # type: ignore[attr-defined]
+            case.admin.dispose()  # type: ignore[attr-defined]
+            with self._server.connect() as conn:
+                conn.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :n AND pid <> pg_backend_pid()"
+                    ),
+                    {"n": name},
+                )
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+                for role in roles:
+                    conn.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
+        self._server.dispose()
+
+
+@pytest.fixture
+def lane3_cases(postgres_url: str, lane3_template: str) -> Iterator[Lane3CaseFactory]:
+    factory = Lane3CaseFactory(postgres_url, lane3_template)
+    try:
+        yield factory
+    finally:
+        factory.dispose()
