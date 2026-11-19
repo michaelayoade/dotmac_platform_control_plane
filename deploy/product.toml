@@ -21,15 +21,16 @@
 # indistinguishable from the next CORRECTION.
 #
 # Provenance of these bytes:
-#   candidate    deploy/candidates/2026-10-21-deploy-agent-evidence.toml
-#   promoted     2026-10-21, as a COMPOSITION CHANGE, not a deployment
+#   candidate    deploy/candidates/2026-11-19-lane3-store.toml
+#   promoted     2026-11-19, as a COMPOSITION CHANGE, not a deployment
 #   record       deploy/descriptor-promotions.json (append-only)
-#   supersedes   deploy/candidates/2026-10-01-controller-key-nonreuse.toml
+#   supersedes   deploy/candidates/2026-10-21-deploy-agent-evidence.toml
 #
-# Vendor v022_deploy_agent replaces v021_issuer_command_receipts with retained
-# deploy-agent evidence and the public host-key registry. The composed-heads CI
-# gate re-derives the complete set. This source composition changes no runtime
-# activation setting and performs no deployment or database operation.
+# Vendor v023_lane3_store replaces v022_deploy_agent with the Lane 3 lease store
+# and E10 receipt tables in a new `cp_lane3` schema that no runtime role can
+# reach. The composed-heads CI gate re-derives the complete set. This source
+# composition changes no runtime activation setting and performs no deployment
+# or database operation.
 #
 # The image half is UNCHANGED and deliberately so. `[image]` still names the
 # artifact the application is running and `[assembly].manifest_digest` still
@@ -59,7 +60,7 @@
 #   [migration] AHEAD OF THE TARGET. `expected_heads` names what the NEXT
 #               deployment will reach (`ap_0003_withdrawals`,
 #               `cg_0002_approval_withdrawals`, `dc_0016_controller_key_nonreuse`,
-#               `v022_deploy_agent`), not what the running
+#               `v023_lane3_store`), not what the running
 #               database holds. Until that deployment lands, a drift check
 #               against production reports those four as declared-absent and
 #               `ap_0002`/`dc_0002`/`v019` as present-undeclared.
@@ -385,6 +386,13 @@ owner_material = "MIGRATION_DATABASE_URL"
 # 2026-10-21: Vendor v022_deploy_agent replaces v021_issuer_command_receipts.
 # It adds retained deploy-agent receipts and the public host-key registry;
 # no deployment, database application or deploy-agent activation is claimed.
+#
+# 2026-11-19: Vendor v023_lane3_store replaces v022_deploy_agent. It creates the
+# `cp_lane3` schema: the E10 receipt and destruction records, the lease store's
+# tables and the SECURITY DEFINER functions that are the only way to write them.
+# No runtime role holds USAGE on the schema; only the per-run lease role the E6
+# ceremony creates is granted the functions. No deployment, database application
+# or lease-store activation is claimed.
 expected_heads = [
   "0028_machine_attribution",
   "ap_0003_withdrawals",
@@ -392,7 +400,7 @@ expected_heads = [
   "dc_0016_controller_key_nonreuse",
   "ea_0003_platform_audit_log",
   "rl_0001_release_artifacts",
-  "v022_deploy_agent",
+  "v023_lane3_store",
 ]
 compatibility = "maintenance_required"
 lock_timeout_seconds = 300
@@ -443,6 +451,7 @@ postgres_major = 16
 # from this declaration is the drift this candidate repairs.
 expected_schemas = [
   "public",
+  "cp_lane3",
   "mod_agreements",
   "mod_approvals",
   "mod_deploy",
@@ -530,6 +539,26 @@ code = "app-user-cannot-reach-platform-schemas"
 role = "app_user"
 scope = "schema"
 objects = ["mod_agreements", "mod_approvals", "mod_deploy", "mod_ealloc", "mod_licensing", "mod_rel"]
+privileges = ["USAGE"]
+denied = true
+
+# The Lane 3 store is the one platform schema NO runtime role reaches: its tables
+# are written only by SECURITY DEFINER functions, which only the per-run lease
+# role the ceremony creates may execute. Declared in both runtime roles'
+# denial direction; the lease role is per-run and never a standing role.
+[[database.isolation]]
+code = "app-user-cannot-reach-the-lane3-store"
+role = "app_user"
+scope = "schema"
+objects = ["cp_lane3"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "platform-api-cannot-reach-the-lane3-store"
+role = "platform_api"
+scope = "schema"
+objects = ["cp_lane3"]
 privileges = ["USAGE"]
 denied = true
 

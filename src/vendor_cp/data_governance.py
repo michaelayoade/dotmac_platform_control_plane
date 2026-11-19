@@ -282,6 +282,49 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "current public identity activation state, rebuilt from retained git key "
         "events; no private key material",
     ),
+    # ── `cp_lane3`, the Lane 3 lease store and E10 receipts (v023) ───────
+    _retain(
+        "cp_lane3",
+        "e10_receipts",
+        "the per-VM-incarnation E10 receipt (Q2-A): written only by the ceremony "
+        "command on the owner DSN; v023 refuses UPDATE, DELETE and TRUNCATE and "
+        "no online role holds any privilege in the schema",
+    ),
+    _retain(
+        "cp_lane3",
+        "e10_destructions",
+        "the destruction stamp of an incarnation key, one per receipt, `destroyed_at` "
+        "set by trigger from the database clock; v023 refuses UPDATE, DELETE and "
+        "TRUNCATE",
+    ),
+    _retain(
+        "cp_lane3",
+        "run_bindings",
+        "the ceremony's statement that one lease role may act for one host and run; "
+        "append-only evidence of who was bound to what, and inert once the role is "
+        "gone",
+    ),
+    _gauge(
+        "cp_lane3",
+        "host_current_lease",
+        "the row-lock point and the pointer to each host's current lease, replaced "
+        "by UPDATE inside `cp_lane3.acquire`; never removed (v023 triggers). The "
+        "record is `host_leases`, which is retained",
+    ),
+    _retain(
+        "cp_lane3",
+        "host_leases",
+        "every lease ever granted: the host's mutation history. v023 refuses UPDATE, "
+        "DELETE and TRUNCATE except the one-time NULL to value bind of the lease "
+        "document",
+    ),
+    _retain(
+        "cp_lane3",
+        "host_lease_releases",
+        "the terminal release of a lease and whether the host was mutated, one per "
+        "lease, `released_at` set by trigger from the database clock; v023 refuses "
+        "UPDATE, DELETE and TRUNCATE",
+    ),
     # ── `public`, kernel lineage ─────────────────────────────────────────
     _retain(
         "public",
@@ -574,8 +617,7 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
     _retain(
         "mod_deploy",
         "deployment_targets",
-        "deployment-target identity — the authority vendor `v017` transferred "
-        "this to",
+        "deployment-target identity — the authority vendor `v017` transferred this to",
     ),
     _retain("mod_deploy", "observation_attempts", "every attempt to observe a target"),
     _retain(
@@ -624,7 +666,7 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
     _retain(
         "mod_deploy",
         "target_admission_policy_closures",
-        "append-only closure (revocation or supersession) of an admission " "policy",
+        "append-only closure (revocation or supersession) of an admission policy",
     ),
     _gauge(
         "mod_deploy",
@@ -1251,8 +1293,7 @@ def enforce_retention(connection: _Connection) -> RetentionOutcome:
     refusal = admission_refusal(observed)
     if refusal:
         raise DataGovernanceRefusal(
-            f"{CONTRACT} refuses this database and nothing has been "
-            f"changed.\n{refusal}"
+            f"{CONTRACT} refuses this database and nothing has been changed.\n{refusal}"
         )
 
     before = _privileges(connection)
