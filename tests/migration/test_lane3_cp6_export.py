@@ -574,3 +574,158 @@ def test_a_missing_dsn_refuses_and_never_echoes(
         ["export", "--dispatch-id", str(uuid.uuid4()), "--host-id", HOST], environ={}
     )
     assert code == 2 and "dsn-missing" in capsys.readouterr().err
+
+
+# ── M4: the candidate root is the one CURRENT at the ledger instant ─────────
+
+
+def _rotate_candidate(db: Session, seed: bytes = b"candidate-2") -> None:
+    ckey = SUPPORT.TransitKey(hashlib.sha256(seed).digest())
+    e10.enrol_candidate_root(
+        db,
+        e10.ControlRegistry(),
+        {
+            "subject": CANDIDATE_SUBJECT,
+            "transit_key": ckey.read_back(),
+            "pop_signature": ckey.sign(
+                e10.candidate_pop_message(CANDIDATE_SUBJECT, NONCE)
+            ),
+            "nonce": base64.urlsafe_b64encode(NONCE).decode().rstrip("="),
+            "issuer": "urn:dotmac:foundation:candidate-release-ceremony:a2",
+            "attestation_key_id": "candidate-release-v2",
+            "not_after": "2031-01-01T00:00:00Z",
+        },
+    )
+    db.commit()
+
+
+def _candidate_uuids(db: Session) -> list[str]:
+    return [
+        row[0]
+        for row in db.execute(
+            text(
+                "SELECT id::text FROM mod_deploy.attestation_enrolments WHERE "
+                "custody_domain = 'candidate_release_signer' ORDER BY enrolled_at, id"
+            )
+        )
+    ]
+
+
+def test_a_candidate_rotation_after_the_ledger_row_does_not_change_the_export(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    (first,) = _candidate_uuids(db)
+    _rotate_candidate(db)  # enrolled AFTER the dispatch was consumed
+    assert len(_candidate_uuids(db)) == 2
+    parsed = CP6.parse_cp6_export(world.export()[1])
+    assert parsed.candidate_root.enrolment_uuid == first
+    # the first root is closed now, by a closure LATER than the ledger instant
+    assert parsed.candidate_root.revoked_at is not None
+    assert parsed.candidate_root.revoked_at > parsed.ledger.created_at
+
+
+def test_a_candidate_rotation_before_the_ledger_row_exports_the_newer_root(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    _rotate_candidate(db)
+    first, second = _candidate_uuids(db)
+    # Owner-only setup: move the rotation to BEFORE the ledger instant (the
+    # evidence tables are append-only; `replica` steps over that guard here only).
+    db.execute(text("SET LOCAL session_replication_role = replica"))
+    db.execute(
+        text(
+            "UPDATE mod_deploy.attestation_enrolments SET enrolled_at = "
+            ":t WHERE id = CAST(:i AS uuid)"
+        ),
+        {"t": world.consumed_at - timedelta(seconds=10), "i": second},
+    )
+    db.execute(
+        text(
+            "UPDATE mod_deploy.attestation_fingerprint_closures SET closed_at = :t "
+            "WHERE fingerprint IN (SELECT public_key_fingerprint FROM "
+            "mod_deploy.attestation_enrolments WHERE id = CAST(:i AS uuid))"
+        ),
+        {"t": world.consumed_at - timedelta(seconds=10), "i": first},
+    )
+    db.execute(text("SET LOCAL session_replication_role = origin"))
+    db.commit()
+    parsed = CP6.parse_cp6_export(world.export()[1])
+    assert parsed.candidate_root.enrolment_uuid == second
+    assert parsed.candidate_root.revoked_at is None
+
+
+def test_no_candidate_root_current_at_the_ledger_instant_is_a_refusal(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    db.execute(text("SET LOCAL session_replication_role = replica"))
+    db.execute(
+        text(
+            "UPDATE mod_deploy.attestation_enrolments SET enrolled_at = :t "
+            "WHERE custody_domain = 'candidate_release_signer'"
+        ),
+        {"t": world.consumed_at + timedelta(hours=1)},
+    )
+    db.execute(text("SET LOCAL session_replication_role = origin"))
+    db.commit()
+    with pytest.raises(e10.E10Refused) as refused:
+        world.export()
+    assert refused.value.code == "candidate-root-absent"
+
+
+def test_two_candidate_roots_current_at_the_ledger_instant_are_a_refusal(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    _rotate_candidate(db)
+    first, second = _candidate_uuids(db)
+    # Both enrolled before the ledger instant and the first never closed: two
+    # "current" roots. The export refuses rather than choose.
+    db.execute(text("SET LOCAL session_replication_role = replica"))
+    db.execute(
+        text(
+            "UPDATE mod_deploy.attestation_enrolments SET enrolled_at = :t "
+            "WHERE id = CAST(:i AS uuid)"
+        ),
+        {"t": world.consumed_at - timedelta(seconds=10), "i": second},
+    )
+    db.execute(
+        text(
+            "DELETE FROM mod_deploy.attestation_fingerprint_closures WHERE "
+            "fingerprint IN (SELECT public_key_fingerprint FROM "
+            "mod_deploy.attestation_enrolments WHERE id = CAST(:i AS uuid))"
+        ),
+        {"i": first},
+    )
+    db.execute(text("SET LOCAL session_replication_role = origin"))
+    db.commit()
+    with pytest.raises(e10.E10Refused) as refused:
+        world.export()
+    assert refused.value.code == "candidate-root-ambiguous"
+
+
+def test_the_cp6_key_set_is_unchanged_by_the_candidate_selection(
+    db: Session, case: Any
+) -> None:
+    """The vendored Starter parser (pinned at #1103 @02a4e835) accepts the export
+    and its root blocks carry exactly the keys it expects."""
+    world = _World(db, case)
+    document = world.export()[0]
+    block = document["cp_lane3"]["candidate_root"]
+    assert set(block) == set(document["cp_lane3"]["installed_root"])
+    assert set(block) == {
+        "enrolment_uuid",
+        "custody_domain",
+        "issuer",
+        "key_id",
+        "purpose",
+        "algorithm",
+        "public_key_b64url",
+        "not_before",
+        "not_after",
+        "enrolled_at",
+        "revoked_at",
+    }
+    CP6.parse_cp6_export(record.render(document))

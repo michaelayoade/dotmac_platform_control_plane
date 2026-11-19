@@ -294,19 +294,28 @@ def build_export(db: Any, *, dispatch_id: str, host_id: str) -> dict[str, Any]:
     ).scalar_one_or_none()
     if subject is None:
         raise E10Refused("admission-policy-absent")
-    candidate = (
+    # The candidate root is the one that was CURRENT when the ledger row was
+    # written (`created`): enrolled by then and not closed by then. Exactly one;
+    # none or several is a refusal, never a pick (a later rotation must not
+    # change what an earlier dispatch exported).
+    candidates = (
         db.execute(
             text(
                 _ROOT_SQL + "WHERE e.custody_domain = 'candidate_release_signer' "
-                "AND e.subject = :subject ORDER BY e.enrolled_at DESC LIMIT 1"
+                "AND e.subject = :subject AND e.enrolled_at <= :created "
+                "AND (f.closed_at IS NULL OR f.closed_at > :created) "
+                "ORDER BY e.enrolled_at, e.id"
             ),
-            {"subject": subject},
+            {"subject": subject, "created": created},
         )
         .mappings()
-        .one_or_none()
+        .all()
     )
-    if candidate is None:
+    if not candidates:
         raise E10Refused("candidate-root-absent")
+    if len(candidates) != 1:
+        raise E10Refused("candidate-root-ambiguous")
+    candidate = candidates[0]
 
     return {
         "schema": EXPORT_SCHEMA,
