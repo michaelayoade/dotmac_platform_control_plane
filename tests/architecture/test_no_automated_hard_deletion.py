@@ -749,7 +749,9 @@ def operator_seam_sites(
     return found
 
 
-def _imports(source: str, module: str, target: str) -> bool:
+def _imports(
+    source: str, module: str, target: str, *, is_package: bool = False
+) -> bool:
     """Does `source` (the module `module`) import `target`?
 
     Counts static imports (absolute and relative) AND exact string literals naming
@@ -757,7 +759,7 @@ def _imports(source: str, module: str, target: str) -> bool:
     dynamic load is caught as well as a statement.
     """
     parent, _, leaf = target.rpartition(".")
-    package = module.rpartition(".")[0]
+    package = module if is_package else module.rpartition(".")[0]
     literals = {target, f".{leaf}"}
     tree = ast.parse(source)
     docstrings = _docstring_ids(tree)
@@ -785,7 +787,9 @@ def _imports(source: str, module: str, target: str) -> bool:
     return False
 
 
-def importer_closure(sources: dict[str, str], target: str) -> set[str]:
+def importer_closure(
+    sources: dict[str, str], target: str, *, packages: frozenset[str] = frozenset()
+) -> set[str]:
     """Every module that imports `target`, or imports one that does, transitively."""
     closure: set[str] = set()
     changed = True
@@ -794,7 +798,10 @@ def importer_closure(sources: dict[str, str], target: str) -> set[str]:
         for module, source in sources.items():
             if module == target or module in closure:
                 continue
-            if any(_imports(source, module, t) for t in (target, *closure)):
+            if any(
+                _imports(source, module, t, is_package=module in packages)
+                for t in (target, *closure)
+            ):
                 closure.add(module)
                 changed = True
     return closure
@@ -823,6 +830,13 @@ def _scanned_sources() -> dict[str, str]:
     return {
         module: path.read_text(encoding="utf-8") for path, module in _scanned_files()
     }
+
+
+def _scanned_packages() -> frozenset[str]:
+    """Keep package identity after `_dotted` normalizes away `__init__`."""
+    return frozenset(
+        module for path, module in _scanned_files() if path.name == "__init__.py"
+    )
 
 
 def _seam_callers(sources: dict[str, str]) -> set[tuple[str, str]]:
@@ -881,7 +895,7 @@ def test_the_lane3_command_is_imported_only_by_operator_commands_and_no_route() 
     literals, so an `importlib` load counts) is exactly the three operator
     modules, and none of those, nor `lane3_e10`, references a router or route."""
     sources = _scanned_sources()
-    closure = importer_closure(sources, LANE3_E10)
+    closure = importer_closure(sources, LANE3_E10, packages=_scanned_packages())
     assert closure == LANE3_E10_IMPORTERS, sorted(closure)
     assert _route_modules(sources, closure) == {}
 
@@ -969,6 +983,54 @@ def _planted(**extra: str) -> dict[str, str]:
 
 def test_the_importer_closure_matches_the_expected_set_on_a_clean_plant() -> None:
     assert importer_closure(_planted(), LANE3_E10) == LANE3_E10_IMPORTERS
+
+
+def test_a_lazy_package_relative_import_reaches_the_online_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Import-only runtime probes miss a helper's deferred package-relative load.
+
+    The source closure must still name the route and online root that reach it.
+    Derive package identity from scanned paths, just as the real premise does.
+    """
+    planted = {
+        "vendor_cp/deployment/lane3_e10.py": "def f():\n    pass\n",
+        "vendor_cp/deployment/__init__.py": "def helper():\n    pass\n",
+        "vendor_cp/deployment/routes.py": (
+            "from fastapi import APIRouter\n"
+            "from vendor_cp.deployment import helper\n"
+            "router = APIRouter()\n"
+            "@router.post('/planted')\n"
+            "def online():\n    return helper()\n"
+        ),
+        "vendor_cp/main.py": "from vendor_cp.deployment.routes import router\n",
+    }
+    files = []
+    for relative, source in planted.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        files.append((path, _dotted(path, tmp_path, "")))
+    monkeypatch.setattr(sys.modules[__name__], "_scanned_files", lambda: files)
+    packages = _scanned_packages()
+    assert packages == {"vendor_cp.deployment"}
+    assert importer_closure(_scanned_sources(), LANE3_E10, packages=packages) == set()
+    (tmp_path / "vendor_cp/deployment/__init__.py").write_text(
+        "def helper():\n    from . import lane3_e10\n    return lane3_e10.f()\n",
+        encoding="utf-8",
+    )
+    sources = _scanned_sources()
+    closure = importer_closure(sources, LANE3_E10, packages=packages)
+    assert closure == {
+        "vendor_cp.deployment",
+        "vendor_cp.deployment.routes",
+        "vendor_cp.main",
+    }
+    assert closure - LANE3_E10_IMPORTERS  # the operator-only premise must refuse
+    assert _route_modules(sources, closure) == {
+        "vendor_cp.deployment.routes": {"fastapi", "APIRouter", "router"},
+        "vendor_cp.main": {"router"},
+    }
 
 
 @pytest.mark.parametrize(
