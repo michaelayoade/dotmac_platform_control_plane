@@ -32,12 +32,18 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from vendor_cp.data_governance import (
     DELETION_SITES,
     UNSCANNED_FUNCTIONS,
+    DeletionSite,
     Reachability,
 )
 
@@ -168,7 +174,7 @@ def scan() -> set[tuple[str, str]]:
 #: shape CP PR #187 designed; the host-admission pair arrived with Control a15.
 NOT_COMPOSED_SEAMS: dict[str, frozenset[str]] = {
     "dotmac_deployment_control.attestation_trust_registry": frozenset(
-        {"repair_current_root", "revoke_root"}
+        {"repair_current_root"}
     ),
     "dotmac_deployment_control.host_admission_service": frozenset(
         {"revoke_target_admission_policy", "revoke_target_host"}
@@ -605,3 +611,415 @@ def test_the_census_owner_now_has_a_caller_outside_its_own_tests() -> None:
         and path.name != "table_inventory.py"
     )
     assert callers == ["src/vendor_cp/data_governance.py"]
+
+
+# ── the operator-command seam: `revoke_root`, called by `lane3_e10 revoke` ──────
+#
+# `revoke_root` is no longer `NOT_COMPOSED`: the Lane 3 operator command calls it at
+# step 15. Its ledger entry is `OPERATOR_COMMAND`, a reachability that is only as
+# strong as the premises below, so they are executable and ratcheted both ways:
+# exactly one caller; the command is loaded only by operator commands; and no
+# online entrypoint ever has it in `sys.modules`.
+
+OPERATOR_SEAM_OWNER = "dotmac_deployment_control.attestation_trust_registry"
+OPERATOR_SEAMS: dict[str, frozenset[str]] = {
+    OPERATOR_SEAM_OWNER: frozenset({"revoke_root"})
+}
+#: (module, top-level symbol) of the ONLY reference to the seam.
+OPERATOR_SEAM_CALLERS = {("vendor_cp.deployment.lane3_e10", "ControlRegistry")}
+LANE3_E10 = "vendor_cp.deployment.lane3_e10"
+#: Every module that may import `lane3_e10`, directly or transitively. All three
+#: are operator commands (`materials_producer issue`, `lane3_record export`, and
+#: the custody helper only `materials_producer.main` loads).
+LANE3_E10_IMPORTERS = frozenset(
+    {
+        "vendor_cp.deployment.lane3_record",
+        "vendor_cp.deployment.materials_producer",
+        "vendor_cp.deployment.transit_custody",
+    }
+)
+ROUTE_IDENTIFIERS = frozenset(
+    {
+        "APIRouter",
+        "FastAPI",
+        "Router",
+        "router",
+        "routers",
+        "route",
+        "routes",
+        "include_router",
+        "add_api_route",
+        "add_route",
+    }
+)
+ROUTE_MODULES = ("fastapi", "starlette")
+CONTROL_PIN = "0.1.0a17"
+
+
+def _ledger_symbol_ids(tree: ast.AST, names: frozenset[str]) -> set[int]:
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "DeletionSite"
+        ):
+            for keyword in node.keywords:
+                value = keyword.value
+                if (
+                    keyword.arg == "symbol"
+                    and isinstance(value, ast.Constant)
+                    and value.value in names
+                ):
+                    found.add(id(value))
+    return found
+
+
+def operator_seam_sites(
+    source: str, module: str, names: frozenset[str], *, ledger: bool = False
+) -> set[tuple[str, str]]:
+    """`(module, top-level symbol)` of every reference to a seam name.
+
+    Stricter than "calls": an import, an alias, a name or attribute read, or an
+    exact string literal (the `getattr` / `importlib` route). Docstring prose and,
+    in the ledger module, the `symbol=` constants of `DeletionSite(...)` are not
+    references.
+    """
+    tree = ast.parse(source)
+    docstrings = _docstring_ids(tree)
+    skip = _ledger_symbol_ids(tree, names) if ledger else set()
+    found: set[tuple[str, str]] = set()
+
+    def visit(node: ast.AST, symbol: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                visit(child, symbol or child.name)
+                continue
+            where = symbol or "<module>"
+            if id(child) in skip:
+                continue
+            if isinstance(child, ast.alias) and child.name.split(".")[-1] in names:
+                found.add((module, where))
+            elif isinstance(child, ast.Name) and child.id in names:
+                found.add((module, where))
+            elif isinstance(child, ast.Attribute) and child.attr in names:
+                found.add((module, where))
+            elif (
+                isinstance(child, ast.Constant)
+                and isinstance(child.value, str)
+                and id(child) not in docstrings
+                and child.value in names
+            ):
+                found.add((module, where))
+            visit(child, symbol)
+
+    visit(tree, "")
+    return found
+
+
+def _imports(source: str, module: str, target: str) -> bool:
+    """Does `source` (the module `module`) import `target`?
+
+    Counts static imports (absolute and relative) AND exact string literals naming
+    the module (`importlib.import_module("...lane3_e10")`, `".lane3_e10"`), so a
+    dynamic load is caught as well as a statement.
+    """
+    parent, _, leaf = target.rpartition(".")
+    package = module.rpartition(".")[0]
+    literals = {target, f".{leaf}"}
+    tree = ast.parse(source)
+    docstrings = _docstring_ids(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == target for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                anchor = package.split(".")
+                anchor = anchor[: len(anchor) - (node.level - 1)]
+                base = ".".join([*anchor, *([base] if base else [])])
+            if base == target:
+                return True
+            if base == parent and any(alias.name == leaf for alias in node.names):
+                return True
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and node.value in literals
+        ):
+            return True
+    return False
+
+
+def importer_closure(sources: dict[str, str], target: str) -> set[str]:
+    """Every module that imports `target`, or imports one that does, transitively."""
+    closure: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for module, source in sources.items():
+            if module == target or module in closure:
+                continue
+            if any(_imports(source, module, t) for t in (target, *closure)):
+                closure.add(module)
+                changed = True
+    return closure
+
+
+def route_references(source: str) -> set[str]:
+    """APIRouter / router / route identifiers, and fastapi/starlette imports."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found |= {
+                a.name for a in node.names if a.name.split(".")[0] in ROUTE_MODULES
+            }
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] in ROUTE_MODULES:
+                found.add(node.module or "")
+            found |= {a.name for a in node.names if a.name in ROUTE_IDENTIFIERS}
+        elif isinstance(node, ast.Name) and node.id in ROUTE_IDENTIFIERS:
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in ROUTE_IDENTIFIERS:
+            found.add(node.attr)
+    return found
+
+
+def _scanned_sources() -> dict[str, str]:
+    return {
+        module: path.read_text(encoding="utf-8") for path, module in _scanned_files()
+    }
+
+
+def _seam_callers(sources: dict[str, str]) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    names = OPERATOR_SEAMS[OPERATOR_SEAM_OWNER]
+    for module, source in sources.items():
+        if module == OPERATOR_SEAM_OWNER:
+            continue
+        found |= operator_seam_sites(
+            source, module, names, ledger=module == "vendor_cp.data_governance"
+        )
+    return found
+
+
+def _route_modules(sources: dict[str, str], closure: set[str]) -> dict[str, set[str]]:
+    return {
+        module: refs
+        for module in (*sorted(closure), LANE3_E10)
+        if (refs := route_references(sources[module]))
+    }
+
+
+def test_the_operator_command_sites_are_exactly_revoke_root() -> None:
+    """The ratchet, both directions: a second site, or revoke_root leaving the
+    reachability, fails; and the constructor refuses any non-gauge target."""
+    operator = {
+        (site.module, site.symbol)
+        for site in DELETION_SITES
+        if site.reachability is Reachability.OPERATOR_COMMAND
+    }
+    assert operator == {(OPERATOR_SEAM_OWNER, "revoke_root")}
+    # a repair that nothing calls stays NOT_COMPOSED
+    assert (OPERATOR_SEAM_OWNER, "repair_current_root") not in operator
+    assert NOT_COMPOSED_SEAMS[OPERATOR_SEAM_OWNER] == {"repair_current_root"}
+    for target in ("public.platform_audit_log", "mod_deploy.rollout_attempts", "x.y"):
+        with pytest.raises(ValueError, match="SUPERSEDED_IN_PLACE"):
+            DeletionSite(
+                distribution="dotmac-deployment-control",
+                module="m",
+                symbol="s",
+                target=target,
+                reachability=Reachability.OPERATOR_COMMAND,
+                premise="p",
+            )
+
+
+def test_revoke_root_has_exactly_one_reference_and_it_is_the_operator_registry() -> (
+    None
+):
+    sources = _scanned_sources()
+    assert _seam_callers(sources) == OPERATOR_SEAM_CALLERS
+
+
+def test_the_lane3_command_is_imported_only_by_operator_commands_and_no_route() -> None:
+    """The transitive importer closure of `lane3_e10` (statements AND string
+    literals, so an `importlib` load counts) is exactly the three operator
+    modules, and none of those, nor `lane3_e10`, references a router or route."""
+    sources = _scanned_sources()
+    closure = importer_closure(sources, LANE3_E10)
+    assert closure == LANE3_E10_IMPORTERS, sorted(closure)
+    assert _route_modules(sources, closure) == {}
+
+
+def test_the_installed_control_is_exactly_the_reviewed_pin() -> None:
+    """`revoke_root` is reviewed against ONE Control build."""
+    from importlib import metadata
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'dotmac-deployment-control = {{ version = "{CONTROL_PIN}"' in pyproject
+    installed = metadata.version("dotmac-deployment-control")
+    assert installed == CONTROL_PIN, (
+        f"dotmac-deployment-control is {installed}, not the reviewed {CONTROL_PIN}. "
+        "RE-REVIEW before changing this pin: `revoke_root` must still INSERT the "
+        "closure row first and delete ONLY the current-root pointer that still "
+        "names the revoked fingerprint (`attestation_trust_registry.revoke_root`), "
+        "`lane3_e10 revoke` must still be its only caller, and the data-governance "
+        "premise for `OPERATOR_COMMAND` must still hold."
+    )
+
+
+_ONLINE_ENTRYPOINTS = """
+import importlib, pkgutil, sys
+import vendor_cp.main                      # create_app(build_spec()): the ASGI app
+import vendor_cp.relay as relay            # the outbox relay and its workers
+for info in pkgutil.iter_modules(relay.__path__):
+    importlib.import_module("vendor_cp.relay." + info.name)
+import vendor_cp.cli as cli                # `dotmac-platform` (relay run, ...)
+cli.build_parser()
+%s
+sys.exit(3 if "vendor_cp.deployment.lane3_e10" in sys.modules else 0)
+"""
+
+
+def _run_entrypoints(extra: str = "") -> subprocess.CompletedProcess[str]:
+    dummy = "postgresql+psycopg://x:x@127.0.0.1:5432/vendor_control_plane_test"
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "DATABASE_URL": dummy,
+        "PLATFORM_DATABASE_URL": dummy,
+    }
+    return subprocess.run(  # noqa: S603 -- fixed argv, no shell, isolated mode
+        [sys.executable, "-I", "-c", _ONLINE_ENTRYPOINTS % extra],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=ROOT,
+        timeout=300,
+        check=False,
+    )
+
+
+def test_no_online_entrypoint_loads_the_lane3_command() -> None:
+    """RUNTIME premise: build the app, import every relay worker and the CLI in a
+    fresh `-I` interpreter; the operator command is not in `sys.modules`."""
+    done = _run_entrypoints()
+    assert done.returncode == 0, (done.returncode, done.stderr[-400:])
+
+
+def test_the_runtime_probe_can_still_fail() -> None:
+    """SENSITIVITY: the same probe, with the command imported, exits 3."""
+    done = _run_entrypoints("import vendor_cp.deployment.lane3_e10")
+    assert done.returncode == 3, (done.returncode, done.stderr[-400:])
+
+
+# ── sensitivity plants ──────────────────────────────────────────────────────
+
+
+def _planted(**extra: str) -> dict[str, str]:
+    sources = {
+        LANE3_E10: "def f():\n    pass\n",
+        "vendor_cp.deployment.lane3_record": (
+            "from vendor_cp.deployment.lane3_e10 import f\n"
+        ),
+        "vendor_cp.deployment.materials_producer": (
+            "def g():\n    from vendor_cp.deployment import lane3_e10\n"
+        ),
+        "vendor_cp.deployment.transit_custody": (
+            "from vendor_cp.deployment.materials_producer import g\n"
+        ),
+    }
+    sources.update({k.replace("__", "."): v for k, v in extra.items()})
+    return sources
+
+
+def test_the_importer_closure_matches_the_expected_set_on_a_clean_plant() -> None:
+    assert importer_closure(_planted(), LANE3_E10) == LANE3_E10_IMPORTERS
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "from vendor_cp.deployment import lane3_e10\n",
+        "import vendor_cp.deployment.lane3_e10\n",
+        "from vendor_cp.deployment.lane3_e10 import ControlRegistry\n",
+        "from . import lane3_e10\n",
+        "from .lane3_e10 import ControlRegistry\n",
+        "import importlib\nimportlib.import_module('vendor_cp.deployment.lane3_e10')\n",
+        "import importlib\nimportlib.import_module('.lane3_e10', 'vendor_cp.deployment')\n",  # noqa: E501
+        "from vendor_cp.deployment.materials_producer import g\n",  # transitive
+        "from vendor_cp.deployment.transit_custody import g\n",
+    ],
+)
+def test_a_planted_importer_of_the_command_breaks_the_closure(plant: str) -> None:
+    sources = _planted(**{"vendor_cp__deployment__routes": plant})
+    assert importer_closure(sources, LANE3_E10) == LANE3_E10_IMPORTERS | {
+        "vendor_cp.deployment.routes"
+    }
+
+
+def test_a_planted_route_in_the_closure_is_named() -> None:
+    plant = "from fastapi import APIRouter\nrouter = APIRouter()\n"
+    sources = _planted(
+        vendor_cp__deployment__routes=(
+            plant + "from vendor_cp.deployment import lane3_e10\n"
+        )
+    )
+    closure = importer_closure(sources, LANE3_E10)
+    assert "vendor_cp.deployment.routes" in closure
+    assert _route_modules(sources, closure) == {
+        "vendor_cp.deployment.routes": {"fastapi", "APIRouter", "router"}
+    }
+    # a route planted into an EXISTING member of the closure is named too
+    existing = _planted(
+        vendor_cp__deployment__lane3_record=(
+            plant + "from vendor_cp.deployment.lane3_e10 import f\n"
+        )
+    )
+    assert _route_modules(existing, importer_closure(existing, LANE3_E10)) == {
+        "vendor_cp.deployment.lane3_record": {"fastapi", "APIRouter", "router"}
+    }
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "from dotmac_deployment_control.attestation_trust_registry import revoke_root\n",  # noqa: E501
+        "import dotmac_deployment_control.attestation_trust_registry as r\nr.revoke_root\n",  # noqa: E501
+        "x = getattr(m, 'revoke_root')\n",
+        "def late(db):\n    return revoke_root(db)\n",
+    ],
+)
+def test_a_second_revoke_root_caller_is_a_different_site(plant: str) -> None:
+    sources = {
+        "vendor_cp.deployment.lane3_e10": (
+            "class ControlRegistry:\n    def revoke(self):\n"
+            "        from dotmac_deployment_control.attestation_trust_registry "
+            "import revoke_root\n        revoke_root()\n"
+        ),
+        "vendor_cp.other": plant,
+    }
+    sites = _seam_callers(sources)
+    assert sites >= OPERATOR_SEAM_CALLERS
+    assert any(module == "vendor_cp.other" for module, _ in sites)
+    assert sites != OPERATOR_SEAM_CALLERS
+
+
+def test_the_seam_scan_ignores_prose_near_misses_and_the_ledger_declaration() -> None:
+    names = OPERATOR_SEAMS[OPERATOR_SEAM_OWNER]
+    benign = (
+        '"""Calls revoke_root."""\n'
+        "# revoke_root in a comment\n"
+        "def revoke_root_report():\n    return 'revoke_root_x'\n"
+    )
+    assert operator_seam_sites(benign, "m", names) == set()
+    ledger = "DELETION_SITES = (DeletionSite(symbol='revoke_root', premise='p'),)\n"
+    assert (
+        operator_seam_sites(ledger, "vendor_cp.data_governance", names, ledger=True)
+        == set()
+    )
+    assert operator_seam_sites(ledger, "vendor_cp.other", names) == {
+        ("vendor_cp.other", "<module>")
+    }
