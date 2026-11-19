@@ -86,6 +86,7 @@ REFUSAL_CODES: Final = frozenset(
     {
         "lease-role-unbound",
         "lease-ttl-invalid",
+        "lease-controller-identity-invalid",
         "lease-held-by-another-run",
         "lease-host-mutated",
         "lease-host-unknown",

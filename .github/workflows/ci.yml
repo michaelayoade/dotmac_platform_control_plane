@@ -179,6 +179,9 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/.lane3-foundation-source/packages/dotmac-deployment-foundation/src
           PYTHONDONTWRITEBYTECODE: "1"
           LANE3_REQUIRE_FOUNDATION: "1"
+          # The vendored S1 files must equal this checkout byte for byte
+          # (tests/unit/test_lane3_vendored_pins.py); a missing value FAILS.
+          LANE3_STARTER_SOURCE_DIR: ${{ github.workspace }}/.lane3-foundation-source
         run: |
           set -euo pipefail
           source_dir="${GITHUB_WORKSPACE}/.lane3-foundation-source"

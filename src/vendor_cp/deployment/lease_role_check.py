@@ -17,6 +17,7 @@ renders:
   (`lease_role_spec.LEASE_FUNCTIONS`), no more and no fewer;
 * no executable `SECURITY DEFINER` function outside `cp_lane3`, and no `USAGE` on
   any module schema (the platform plane the consumption role reads);
+* `CONNECT` on the database it is checked in (the effective privilege);
 * one live `run_bindings` row naming this role, this host and this run.
 
     LEASE_ROLE_CHECK_DATABASE_URL=... \\
@@ -68,6 +69,12 @@ _LEASE_EXECUTE_SQL: Final = (
     "SELECT p.proname || '(' || oidvectortypes(p.proargtypes) || ')' "
     "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
     "WHERE n.nspname = 'cp_lane3' AND has_function_privilege(:role, p.oid, 'EXECUTE')"
+)
+#: The role must be able to CONNECT to this database at all: PUBLIC holds it by
+#: default, but a hardened cluster revokes that, and a role that cannot connect
+#: would be "proven" while unusable. Checked with the effective privilege.
+_CONNECT_SQL: Final = (
+    "SELECT has_database_privilege(:role, current_database(), 'CONNECT')"
 )
 #: SECURITY DEFINER functions OUTSIDE the lease schema that the role can execute.
 _DEFINERS_OUTSIDE_SQL: Final = (
@@ -135,6 +142,7 @@ def prove_lease_role(
         usable = {str(row[0]) for row in ask(_SCHEMA_USAGE_SQL).all()}
         executable = {str(row[0]) for row in ask(_LEASE_EXECUTE_SQL).all()}
         definers = ask(_DEFINERS_OUTSIDE_SQL).scalar()
+        can_connect = ask(_CONNECT_SQL).scalar()
         binding = {"host": host_id, "run": authorization_run}
         live = ask(_BINDING_SQL, binding).scalar()
         elsewhere = ask(_OTHER_BINDINGS_SQL, binding).scalar()
@@ -175,6 +183,8 @@ def prove_lease_role(
             raise _refuse(f"lease-role-{attribute}")
     if can_login is not True:
         raise _refuse("lease-role-cannot-login")
+    if can_connect is not True:
+        raise _refuse("lease-role-cannot-connect")
     if memberships != 0:
         raise _refuse("lease-role-membership")
     if valid_until is None or ttl is None:

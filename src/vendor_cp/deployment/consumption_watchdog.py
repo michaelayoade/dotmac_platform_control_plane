@@ -337,7 +337,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True)
-    parser.add_argument("--kind", choices=KINDS, default="consumption")
+    parser.add_argument("--kind", choices=KINDS, required=True)
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument(
         "--deadline-seconds", type=float, default=MAX_ROLE_TTL.total_seconds()

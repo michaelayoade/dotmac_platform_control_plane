@@ -279,6 +279,7 @@ class _Catalogue:
                 (_catalogue_spelling(signature),) for signature in spec.LEASE_FUNCTIONS
             ],
             check._DEFINERS_OUTSIDE_SQL: 0,
+            check._CONNECT_SQL: True,
             check._BINDING_SQL: 1,
             check._OTHER_BINDINGS_SQL: 0,
         }
@@ -294,6 +295,7 @@ class _Catalogue:
             "SCHEMA_USAGE": check._SCHEMA_USAGE_SQL,
             "LEASE_EXECUTE": check._LEASE_EXECUTE_SQL,
             "DEFINERS_OUTSIDE": check._DEFINERS_OUTSIDE_SQL,
+            "CONNECT": check._CONNECT_SQL,
             "BINDING": check._BINDING_SQL,
             "OTHER_BINDINGS": check._OTHER_BINDINGS_SQL,
         }
@@ -409,6 +411,19 @@ def test_the_executable_function_set_is_compared_exactly() -> None:
 
 def test_an_executable_definer_function_elsewhere_refuses() -> None:
     assert _code(_Catalogue(DEFINERS_OUTSIDE=1)) == "lease-role-other-definer"
+
+
+@pytest.mark.parametrize("answer", [False, None])
+def test_a_role_that_cannot_connect_refuses_and_null_counts_as_not_connecting(
+    answer: object,
+) -> None:
+    assert _code(_Catalogue(CONNECT=answer)) == "lease-role-cannot-connect"
+
+
+def test_the_connect_check_asks_about_the_current_database_for_this_role() -> None:
+    assert "has_database_privilege(:role, current_database(), 'CONNECT')" in (
+        check._CONNECT_SQL
+    )
 
 
 def test_the_role_must_be_bound_to_this_host_and_run_and_no_other() -> None:
