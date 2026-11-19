@@ -544,8 +544,8 @@ denied = true
 
 # The Lane 3 store is the one platform schema NO runtime role reaches: its tables
 # are written only by SECURITY DEFINER functions, which only the per-run lease
-# role the ceremony creates may execute. Declared in both runtime roles'
-# denial direction; the lease role is per-run and never a standing role.
+# role the ceremony creates may execute. Declared in every runtime role's
+# denial direction (both application roles and both outbox dispatchers); the lease role is per-run and never a standing role.
 [[database.isolation]]
 code = "app-user-cannot-reach-the-lane3-store"
 role = "app_user"
@@ -557,6 +557,22 @@ denied = true
 [[database.isolation]]
 code = "platform-api-cannot-reach-the-lane3-store"
 role = "platform_api"
+scope = "schema"
+objects = ["cp_lane3"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "outbox-dispatcher-cannot-reach-the-lane3-store"
+role = "outbox_dispatcher"
+scope = "schema"
+objects = ["cp_lane3"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "platform-outbox-dispatcher-cannot-reach-the-lane3-store"
+role = "platform_outbox_dispatcher"
 scope = "schema"
 objects = ["cp_lane3"]
 privileges = ["USAGE"]

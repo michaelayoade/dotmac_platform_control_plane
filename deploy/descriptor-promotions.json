@@ -233,7 +233,7 @@
       "promoted_at": "2026-11-19",
       "kind": "composition_change",
       "candidate": "deploy/candidates/2026-11-19-lane3-store.toml",
-      "descriptor_sha256": "sha256:6629c8896802a15081fa8e0a193567180dd0cabb885130c72b4aeaa54e83008d",
+      "descriptor_sha256": "sha256:6becbdb31ca0af59b198cd7b82b9c1637aeddbfbd544174a27f4920896e67e07",
       "supersedes": "sha256:5dfc6b2028a21d009e7394350df4a4f34d98fe16e6cc56f67e40fb4fcfdea381",
       "summary": "Declares vendor v023_lane3_store in place of v022_deploy_agent, and the cp_lane3 schema it creates: the Lane 3 lease store and the append-only E10 receipt and destruction records, written only through SECURITY DEFINER functions that no runtime role may execute. The composed effective-head and schema checks re-derive the declaration from the installed lineages. Source composition only; no deployment, database application or activation is claimed or authorized.",
       "changed_sections": [

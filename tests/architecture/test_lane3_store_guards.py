@@ -178,3 +178,55 @@ def test_no_lane3_parser_takes_a_secret_by_argv(name: str) -> None:
     assert options
     for option in options:
         assert not any(word in option for word in _SECRET_WORDS), option
+
+
+# ── the descriptor declares the store unreachable for EVERY runtime role ─────
+
+
+def test_every_standing_runtime_role_is_declared_unable_to_reach_the_lane3_store() -> (
+    None
+):
+    """`app_user` and `platform_api` were declared; the two outbox dispatcher roles
+    (also standing logins on the control-plane database) were not. The isolation
+    list is the descriptor's statement of intent, so each one gets its own denied
+    `cp_lane3` USAGE entry, and every role the descriptor declares must be covered."""
+    import tomllib
+
+    descriptor = tomllib.loads(
+        (ROOT / "deploy" / "product.toml").read_text(encoding="utf-8")
+    )["database"]
+    standing = {
+        role["name"]
+        for role in descriptor["roles"]
+        if role.get("kind") in {"app", "platform_app", "dispatcher"}
+        or role["name"] in {"app_user", "platform_api"}
+    }
+    assert {
+        "app_user",
+        "platform_api",
+        "outbox_dispatcher",
+        "platform_outbox_dispatcher",
+    } <= standing
+    denied = {
+        entry["role"]
+        for entry in descriptor["isolation"]
+        if entry["scope"] == "schema"
+        and "cp_lane3" in entry["objects"]
+        and entry["privileges"] == ["USAGE"]
+        and entry["denied"] is True
+    }
+    assert denied >= {
+        "app_user",
+        "platform_api",
+        "outbox_dispatcher",
+        "platform_outbox_dispatcher",
+    }
+    # exactly one entry per role, and no entry grants cp_lane3 to anyone
+    reaching = [
+        entry["role"]
+        for entry in descriptor["isolation"]
+        if "cp_lane3" in entry["objects"] and entry["denied"] is not True
+    ]
+    assert reaching == []
+    codes = [e["code"] for e in descriptor["isolation"] if "cp_lane3" in e["objects"]]
+    assert len(codes) == len(set(codes)) == len(denied)
