@@ -470,6 +470,7 @@ def test_not_composed_seam_premises_are_executable() -> None:
         (site.module, site.symbol)
         for site in DELETION_SITES
         if site.module in NOT_COMPOSED_SEAMS
+        and site.reachability is Reachability.NOT_COMPOSED
     }
     expected = {
         (module, symbol)
@@ -477,16 +478,35 @@ def test_not_composed_seam_premises_are_executable() -> None:
         for symbol in symbols
     }
     assert declared == expected
-    assert all(
-        site.reachability is Reachability.NOT_COMPOSED
+    # every ledger site in a seam module is one or the other, never unclassified:
+    # `revoke_root` is the OPERATOR_COMMAND one, and nothing else is
+    assert {
+        (site.module, site.symbol)
         for site in DELETION_SITES
         if site.module in NOT_COMPOSED_SEAMS
-    )
+        and site.reachability is not Reachability.NOT_COMPOSED
+    } == {(OPERATOR_SEAM_OWNER, "revoke_root")}
     assert not_composed_seam_reference_sites() == set()
 
 
+def _all_seams() -> dict[str, frozenset[str]]:
+    """Both seam kinds, merged per owning module (they share one module)."""
+    merged: dict[str, frozenset[str]] = {}
+    for table in (NOT_COMPOSED_SEAMS, OPERATOR_SEAMS):
+        for owner, names in table.items():
+            merged[owner] = merged.get(owner, frozenset()) | names
+    return merged
+
+
 def test_the_seam_detector_is_sensitive_to_calls() -> None:
+    """One plant, three readings: each seam kind is caught by ITS OWN table, and
+    neither table claims the other's name."""
     assert seam_references_in(SEAM_CALL_PLANT, NOT_COMPOSED_SEAMS) == {
+        "repair_current_root",
+        "revoke_target_host",
+    }
+    assert seam_references_in(SEAM_CALL_PLANT, OPERATOR_SEAMS) == {"revoke_root"}
+    assert seam_references_in(SEAM_CALL_PLANT, _all_seams()) == {
         "repair_current_root",
         "revoke_root",
         "revoke_target_host",
@@ -494,11 +514,23 @@ def test_the_seam_detector_is_sensitive_to_calls() -> None:
 
 
 def test_the_seam_detector_is_sensitive_to_aliases_and_package_imports() -> None:
-    """A re-exported name imported from the package, under an alias, is seen."""
+    """A re-exported name imported from the package, under an alias, is seen, for
+    the NOT_COMPOSED re-export and for the OPERATOR_COMMAND alias alike."""
     assert seam_references_in(SEAM_ALIAS_PLANT, NOT_COMPOSED_SEAMS) == {
+        "revoke_target_admission_policy",
+    }
+    assert seam_references_in(SEAM_ALIAS_PLANT, OPERATOR_SEAMS) == {"revoke_root"}
+    assert seam_references_in(SEAM_ALIAS_PLANT, _all_seams()) == {
         "revoke_target_admission_policy",
         "revoke_root",
     }
+    # the operator-seam site scanner names the alias and the call too
+    assert operator_seam_sites(
+        SEAM_ALIAS_PLANT, "plant", OPERATOR_SEAMS[OPERATOR_SEAM_OWNER]
+    ) == {("plant", "<module>")}  # the aliased import itself; `rv(...)` is a Name
+    assert operator_seam_sites(
+        SEAM_CALL_PLANT, "plant", OPERATOR_SEAMS[OPERATOR_SEAM_OWNER]
+    ) == {("plant", "mounted_adapter")}
 
 
 def test_the_seam_detector_is_sensitive_to_dynamic_references() -> None:
