@@ -298,6 +298,15 @@ class Lane3CaseFactory:
         support: Any = _lane3_support()
         name = f"vcp_lane3_{uuid.uuid4().hex[:10]}"
         with self._server.connect() as conn:
+            # `CREATE DATABASE ... TEMPLATE` refuses while anyone is connected to
+            # the template (a lingering migrator connection would be enough).
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :n AND pid <> pg_backend_pid()"
+                ),
+                {"n": self._template},
+            )
             conn.execute(text(f'CREATE DATABASE "{name}" TEMPLATE "{self._template}"'))
         engine = create_engine(_url_for(self._url, name))
         case = support.CaseDatabase(
