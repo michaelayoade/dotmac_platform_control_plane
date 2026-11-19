@@ -160,6 +160,40 @@ jobs:
             tests/migration/test_dump_evidence.py \
             --junitxml="$RUNNER_TEMP/d16-bundle-conformance.xml"
           poetry run python scripts/check_d16_bundle_junit.py "$RUNNER_TEMP/d16-bundle-conformance.xml"
+      # The Lane 3 lease store (CP-5, pre-E11 design 3.4): Starter's store-agnostic
+      # conformance suite, vendored by digest, runs against `CpLeaseStore` on this
+      # disposable PG16 with real Control and real Foundation lease types. Foundation
+      # comes from one exact Starter commit (the S1 squash that carries the suite); the
+      # step sets LANE3_REQUIRE_FOUNDATION=1 so a missing import FAILS rather than
+      # skips, and the JUnit gate refuses any skipped, failed or omitted file.
+      - name: Fetch exact Starter source for the Lane 3 store suite
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_starter_mt
+          ref: f50d497e4df178e1411d2b4fccbfa153a21fd12a
+          path: .lane3-foundation-source
+          persist-credentials: false
+      - name: Lane 3 lease store conformance, E10 command, CP-6 export (Foundation required)
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5439/vendor_cp_test
+          PYTHONPATH: ${{ github.workspace }}/.lane3-foundation-source/packages/dotmac-deployment-foundation/src
+          PYTHONDONTWRITEBYTECODE: "1"
+          LANE3_REQUIRE_FOUNDATION: "1"
+        run: |
+          set -euo pipefail
+          source_dir="${GITHUB_WORKSPACE}/.lane3-foundation-source"
+          test "$(git -C "$source_dir" rev-parse HEAD)" = f50d497e4df178e1411d2b4fccbfa153a21fd12a
+          test -z "$(git -C "$source_dir" status --porcelain=v1 --untracked-files=all)"
+          poetry run python -c 'import dotmac_deployment_foundation.lease_release as m, os; from pathlib import Path; expected = Path(os.environ["GITHUB_WORKSPACE"]) / ".lane3-foundation-source/packages/dotmac-deployment-foundation/src/dotmac_deployment_foundation/lease_release.py"; assert Path(m.__file__).resolve() == expected.resolve(), m.__file__'
+          poetry run pytest -q -rs \
+            tests/migration/test_lane3_lease_store.py \
+            tests/migration/test_lane3_e10_database.py \
+            tests/migration/test_lane3_store_catalogue.py \
+            tests/migration/test_lane3_cp6_export.py \
+            tests/unit/test_lane3_vendored_pins.py \
+            tests/unit/test_lane3_host_admission_vector.py \
+            --junitxml="$RUNNER_TEMP/lane3-store.xml"
+          poetry run python scripts/check_lane3_junit.py "$RUNNER_TEMP/lane3-store.xml"
       - name: Stop Postgres
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
