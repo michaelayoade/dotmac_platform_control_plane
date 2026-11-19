@@ -1069,10 +1069,17 @@ def _template_engine(case: Any, template: str) -> Any:
     return create_engine(make_url(str(case.admin.url)).set(database=template))
 
 
-def _violations(engine: Any) -> tuple[str, ...]:
+MIGRATION_FILE = (
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "v023_lane3_store.py"
+)
+
+
+def _violations(engine: Any, **kwargs: Any) -> tuple[str, ...]:
     with engine.connect() as conn:
         return integrity.check_store_integrity(
-            lambda sql: conn.execute(text(sql)).all()
+            lambda sql, params=None: conn.execute(text(sql), params or {}).all(),
+            migration_path=MIGRATION_FILE,
+            **kwargs,
         )
 
 
@@ -1126,7 +1133,7 @@ def test_the_pins_name_every_function_and_trigger_the_catalogue_holds(
 def test_the_integrity_check_refuses_a_changed_body_a_disabled_trigger_and_extras(
     lane3_cases: Any,
 ) -> None:
-    db = lane3_cases.new()
+    db = lane3_cases.new(single_binding=True)
     # The case database replaces `store_now` with the frozen clock, so that one
     # violation is the baseline here (the template test above proves it clean).
     base = {"function-changed:store_now()"}
@@ -1178,3 +1185,185 @@ def test_the_integrity_check_is_exposed_for_e10a_and_refuses_without_a_dsn(
 ) -> None:
     assert integrity.main([], {}) == 2
     assert integrity.ADMIN_DSN_ENV in capsys.readouterr().err
+
+
+# ── architect diff-check: post-migration drift the first pins could not see ──
+
+
+def _clone(lane3_cases: Any) -> Any:
+    """A case database that keeps UNIQUE(role_name); its only baseline difference
+    from the pins is the frozen-clock `store_now`."""
+    db = lane3_cases.new(single_binding=True)
+    assert set(_violations(db.admin)) == {"function-changed:store_now()"}
+    return db
+
+
+def _ddl(db: Any, *statements: str) -> set[str]:
+    with db.admin.begin() as conn:
+        for statement in statements:
+            conn.exec_driver_sql(statement)
+    return set(_violations(db.admin)) - {"function-changed:store_now()"}
+
+
+def test_the_append_only_guard_in_public_is_pinned(lane3_cases: Any) -> None:
+    """`app_admin` owns `public` and could replace the one function behind all six
+    append-only tables; the integrity check reads its definition."""
+    assert "public.forbid_mutation_of_append_only_table()" in (
+        integrity.PUBLIC_FUNCTIONS
+    )
+    db = _clone(lane3_cases)
+    found = _ddl(
+        db,
+        "CREATE OR REPLACE FUNCTION public.forbid_mutation_of_append_only_table() "
+        "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+    )
+    assert found == {
+        "public-function-changed:public.forbid_mutation_of_append_only_table()"
+    }
+
+
+def test_a_post_migration_grant_or_default_privilege_is_an_acl_leak(
+    lane3_cases: Any,
+) -> None:
+    for statement, name in (
+        ("GRANT SELECT ON cp_lane3.e10_receipts TO PUBLIC", "RELATION_ACL_SQL"),
+        ("GRANT USAGE ON SCHEMA cp_lane3 TO platform_api", "SCHEMA_ACL_SQL"),
+        (
+            "GRANT EXECUTE ON FUNCTION cp_lane3.covers(uuid, text) TO PUBLIC",
+            "FUNCTION_ACL_SQL",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA cp_lane3 GRANT SELECT ON TABLES "
+            "TO PUBLIC",
+            "DEFAULT_ACL_SQL",
+        ),
+    ):
+        db = _clone(lane3_cases)
+        assert f"acl-leak:{name}" in _ddl(db, statement), statement
+
+
+def test_a_changed_owner_of_the_schema_or_any_object_is_not_a_single_owner(
+    lane3_cases: Any,
+) -> None:
+    for statement in (
+        "ALTER TABLE cp_lane3.run_bindings OWNER TO app_user",
+        "ALTER FUNCTION cp_lane3.covers(uuid, text) OWNER TO app_user",
+        "ALTER SCHEMA cp_lane3 OWNER TO app_user",
+    ):
+        db = _clone(lane3_cases)
+        assert "owner-not-single" in _ddl(db, statement), statement
+
+
+def test_the_acl_queries_are_read_from_the_migration_not_copied(
+    lane3_cases: Any,
+) -> None:
+    queries = integrity.acl_queries(MIGRATION_FILE)
+    module = _migration()
+    assert queries == {n: getattr(module, n) for n in integrity.ACL_QUERY_NAMES}
+    assert tuple(queries) == integrity.ACL_QUERY_NAMES == tuple(ACL_QUERIES)
+
+
+def test_the_default_migration_location_resolves_where_the_migrator_looks() -> None:
+    pytest.importorskip("dotmac_approvals")  # `vendor_cp.migrations` needs the lineage
+    assert set(integrity.acl_queries()) == set(integrity.ACL_QUERY_NAMES)
+
+
+def test_every_constraint_and_index_is_pinned_and_a_change_is_caught(
+    lane3_cases: Any,
+) -> None:
+    assert {
+        "host_leases.host_leases_reprovision_receipt_ref_key",
+        "host_lease_releases.host_lease_releases_pkey",
+        "run_bindings.run_bindings_role_name_key",
+    } <= set(integrity.CONSTRAINTS)
+    assert {
+        "host_leases_reprovision_receipt_ref_key",
+        "host_lease_releases_pkey",
+        "run_bindings_role_name_key",
+    } <= set(integrity.INDEXES)
+    # the fingerprint-derivation CHECK is among them
+    assert any(
+        k.startswith("e10_receipts.e10_receipts_check") for k in integrity.CONSTRAINTS
+    )
+
+    db = _clone(lane3_cases)
+    found = _ddl(
+        db,
+        "ALTER TABLE cp_lane3.host_leases DROP CONSTRAINT "
+        "host_leases_reprovision_receipt_ref_key",
+    )
+    assert found == {
+        "constraint-missing:host_leases.host_leases_reprovision_receipt_ref_key",
+        "index-missing:host_leases_reprovision_receipt_ref_key",
+    }
+    db = _clone(lane3_cases)
+    found = _ddl(
+        db,
+        "ALTER TABLE cp_lane3.host_lease_releases DROP CONSTRAINT "
+        "host_lease_releases_pkey",
+    )
+    assert "constraint-missing:host_lease_releases.host_lease_releases_pkey" in found
+    db = _clone(lane3_cases)
+    found = _ddl(
+        db,
+        "ALTER TABLE cp_lane3.host_leases DROP CONSTRAINT "
+        "host_leases_reprovision_receipt_ref_key",
+        "ALTER TABLE cp_lane3.host_leases ADD CONSTRAINT "
+        "host_leases_reprovision_receipt_ref_key CHECK (true)",
+    )
+    assert (
+        "constraint-changed:host_leases.host_leases_reprovision_receipt_ref_key"
+        in found
+    )
+    db = _clone(lane3_cases)
+    found = _ddl(
+        db,
+        "ALTER TABLE cp_lane3.run_bindings DROP CONSTRAINT run_bindings_role_name_key",
+    )
+    assert "constraint-missing:run_bindings.run_bindings_role_name_key" in found
+    db = _clone(lane3_cases)
+    assert "constraint-unpinned:run_bindings.extra" in _ddl(
+        db, "ALTER TABLE cp_lane3.run_bindings ADD CONSTRAINT extra CHECK (true)"
+    )
+    db = _clone(lane3_cases)
+    assert "index-unpinned:stray_idx" in _ddl(
+        db, "CREATE INDEX stray_idx ON cp_lane3.e10_receipts (host_id)"
+    )
+    db = _clone(lane3_cases)
+    found = _ddl(
+        db, "CREATE UNIQUE INDEX host_leases_dup ON cp_lane3.host_leases (host_id)"
+    )
+    assert "index-unpinned:host_leases_dup" in found
+
+
+def test_a_rewrite_rule_or_a_row_level_security_policy_is_refused(
+    lane3_cases: Any,
+) -> None:
+    db = _clone(lane3_cases)
+    found = _ddl(
+        db,
+        "CREATE RULE sneaky AS ON INSERT TO cp_lane3.run_bindings DO INSTEAD NOTHING",
+    )
+    assert "rule-present:run_bindings.sneaky" in found
+    db = _clone(lane3_cases)
+    found = _ddl(
+        db,
+        "ALTER TABLE cp_lane3.e10_receipts ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY p ON cp_lane3.e10_receipts USING (true)",
+    )
+    assert {"rls-enabled:e10_receipts", "rls-policy-present:e10_receipts.p"} <= found
+
+
+def test_another_postgresql_major_is_repin_required_not_a_digest_mismatch(
+    lane3_cases: Any,
+) -> None:
+    db = _clone(lane3_cases)
+    with db.admin.connect() as conn:
+
+        def execute(sql: str, params: Any = None) -> Any:
+            if sql == "SHOW server_version_num":
+                return [("170002",)]
+            return conn.execute(text(sql), params or {}).all()
+
+        found = integrity.check_store_integrity(execute, migration_path=MIGRATION_FILE)
+    assert found == ("repin-required:postgresql-17",)
