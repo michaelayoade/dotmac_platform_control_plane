@@ -50,6 +50,7 @@ Create Date: 2026-11-19
 # body is one string by nature.
 from __future__ import annotations
 
+import contextlib
 import hashlib
 
 from alembic import op
@@ -670,12 +671,33 @@ PREFLIGHT_ROLE_SQL = (
 PREFLIGHT_EVENT_TRIGGERS_SQL = "SELECT count(*) FROM pg_catalog.pg_event_trigger"
 # A default-privilege rule that will apply to what this migration creates: one of
 # the migrating role's own database-wide rules, or any rule naming the schema.
-PREFLIGHT_DEFAULT_ACL_SQL = (
+# `{role}` is the SQL expression naming the role: `current_user` here, a bind
+# parameter in `lane3_store_preflight` (one text, two callers).
+PREFLIGHT_DEFAULT_ACL_TEMPLATE = (
     "SELECT count(*) FROM pg_catalog.pg_default_acl d WHERE (d.defaclnamespace = 0 "
     "AND d.defaclrole = (SELECT r.oid FROM pg_catalog.pg_roles r "
-    "WHERE r.rolname = current_user)) OR d.defaclnamespace IN "
+    "WHERE r.rolname = {role})) OR d.defaclnamespace IN "
     "(SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = 'cp_lane3')"
 )
+PREFLIGHT_DEFAULT_ACL_SQL = PREFLIGHT_DEFAULT_ACL_TEMPLATE.replace(
+    "{role}", "current_user"
+)
+# Role membership in EITHER direction is a path to privilege the role does not
+# hold itself (a superuser role it can SET ROLE to, or a role that can SET ROLE to it).
+PREFLIGHT_MEMBER_OF_TEMPLATE = (
+    "SELECT count(*) FROM pg_catalog.pg_auth_members m WHERE m.member = "
+    "(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = {role})"
+)
+PREFLIGHT_HAS_MEMBERS_TEMPLATE = (
+    "SELECT count(*) FROM pg_catalog.pg_auth_members m WHERE m.roleid = "
+    "(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = {role})"
+)
+PREFLIGHT_MEMBER_OF_SQL = PREFLIGHT_MEMBER_OF_TEMPLATE.replace("{role}", "current_user")
+PREFLIGHT_HAS_MEMBERS_SQL = PREFLIGHT_HAS_MEMBERS_TEMPLATE.replace(
+    "{role}", "current_user"
+)
+#: Every read-back query resolves its names from here only.
+PINNED_SEARCH_PATH = "pg_catalog, pg_temp"
 PREFLIGHT_GUARD_SQL = (
     "SELECT pg_catalog.pg_get_functiondef(p.oid) FROM pg_catalog.pg_proc p "
     "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
@@ -701,33 +723,67 @@ OWNER_NOT_MIGRATOR_SQL = (
 )
 
 
+@contextlib.contextmanager
+def _pinned_search_path(connection):  # type: ignore[no-untyped-def]
+    """Resolve every name in a read-back from `pg_catalog` only, then restore.
+
+    The migrating role owns `public` and can set its own `search_path`, so an
+    unqualified operator or aggregate (`<>` on oids, `count`) could otherwise be
+    one it planted (the CVE-2018-1058 class). Transaction-local, and restored
+    because Alembic's own version-table update still needs the caller's path.
+    """
+    saved = connection.exec_driver_sql(
+        "SELECT pg_catalog.current_setting('search_path')"
+    ).scalar_one()
+    connection.exec_driver_sql(
+        "SELECT pg_catalog.set_config('search_path', %s, true)",
+        (PINNED_SEARCH_PATH,),
+    )
+    try:
+        yield
+    finally:
+        connection.exec_driver_sql(
+            "SELECT pg_catalog.set_config('search_path', %s, true)", (saved,)
+        )
+
+
 def _preflight(connection) -> None:  # type: ignore[no-untyped-def]
     """Refuse, by NAME and before any DDL, unless the preconditions hold."""
 
     def refuse(name: str) -> None:
         raise RuntimeError(f"v023_lane3_store preflight refused: {name}")
 
-    major = int(connection.exec_driver_sql(PREFLIGHT_VERSION_SQL).scalar_one()) // 10000
-    if major != PREFLIGHT_MAJOR:
-        refuse("server-major-not-16")
-    row = connection.exec_driver_sql(PREFLIGHT_ROLE_SQL).one_or_none()
-    if row is None:
-        refuse("migration-role-unreadable")
-    if row[0] is not False:
-        refuse("migration-role-is-superuser")
-    if row[1] is not False:
-        refuse("migration-role-has-createrole")
-    if connection.exec_driver_sql(PREFLIGHT_EVENT_TRIGGERS_SQL).scalar_one():
-        refuse("event-triggers-exist")
-    if connection.exec_driver_sql(PREFLIGHT_DEFAULT_ACL_SQL).scalar_one():
-        refuse("default-privileges-would-apply")
-    if connection.exec_driver_sql(PREFLIGHT_SCHEMA_SQL).scalar_one():
-        refuse("schema-already-exists")
-    guard = connection.exec_driver_sql(PREFLIGHT_GUARD_SQL).scalar_one_or_none()
-    if guard is None:
-        refuse("append-only-guard-absent")
-    if hashlib.sha256(str(guard).encode()).hexdigest() != PUBLIC_GUARD_SHA256:
-        refuse("append-only-guard-changed")
+    with _pinned_search_path(connection):
+        major = (
+            int(connection.exec_driver_sql(PREFLIGHT_VERSION_SQL).scalar_one()) // 10000
+        )
+        if major != PREFLIGHT_MAJOR:
+            refuse("server-major-not-16")
+        row = connection.exec_driver_sql(PREFLIGHT_ROLE_SQL).one_or_none()
+        if row is None:
+            refuse("migration-role-unreadable")
+        if row[0] is not False:
+            refuse("migration-role-is-superuser")
+        if row[1] is not False:
+            refuse("migration-role-has-createrole")
+        if connection.exec_driver_sql(PREFLIGHT_MEMBER_OF_SQL).scalar_one():
+            refuse("migration-role-is-member-of-a-role")
+        if connection.exec_driver_sql(PREFLIGHT_HAS_MEMBERS_SQL).scalar_one():
+            refuse("migration-role-has-members")
+        if connection.exec_driver_sql(PREFLIGHT_EVENT_TRIGGERS_SQL).scalar_one():
+            refuse("event-triggers-exist")
+        if connection.exec_driver_sql(PREFLIGHT_DEFAULT_ACL_SQL).scalar_one():
+            refuse("default-privileges-would-apply")
+        if connection.exec_driver_sql(PREFLIGHT_SCHEMA_SQL).scalar_one():
+            refuse("schema-already-exists")
+        guards = connection.exec_driver_sql(PREFLIGHT_GUARD_SQL).all()
+        if not guards:
+            refuse("append-only-guard-absent")
+        if len(guards) != 1:
+            refuse("append-only-guard-ambiguous")
+        digest = hashlib.sha256(str(guards[0][0]).encode()).hexdigest()
+        if digest != PUBLIC_GUARD_SHA256:
+            refuse("append-only-guard-changed")
 
 
 def upgrade() -> None:
@@ -755,19 +811,20 @@ def upgrade() -> None:
     # a statement ran, not that a privilege is gone). The migration grants NOTHING:
     # the per-run lease role is granted by the E6 ceremony, never here, so the list
     # of intended grants is empty.
-    for sql, message in (
-        (SCHEMA_ACL_SQL, "an ACL entry other than the owner's on the schema"),
-        (
-            RELATION_ACL_SQL,
-            "an ACL entry other than the owner's on a table or sequence",
-        ),
-        (COLUMN_ACL_SQL, "a column ACL entry other than the owner's"),
-        (FUNCTION_ACL_SQL, "an ACL entry other than the owner's on a function"),
-        (DEFAULT_ACL_SQL, "a default-privilege rule names the schema"),
-        (OWNER_NOT_MIGRATOR_SQL, "an object not owned by the migrating role"),
-    ):
-        if connection.exec_driver_sql(sql).scalar_one():
-            raise RuntimeError(f"v023_lane3_store: {message}")
+    with _pinned_search_path(connection):
+        for sql, message in (
+            (SCHEMA_ACL_SQL, "an ACL entry other than the owner's on the schema"),
+            (
+                RELATION_ACL_SQL,
+                "an ACL entry other than the owner's on a table or sequence",
+            ),
+            (COLUMN_ACL_SQL, "a column ACL entry other than the owner's"),
+            (FUNCTION_ACL_SQL, "an ACL entry other than the owner's on a function"),
+            (DEFAULT_ACL_SQL, "a default-privilege rule names the schema"),
+            (OWNER_NOT_MIGRATOR_SQL, "an object not owned by the migrating role"),
+        ):
+            if connection.exec_driver_sql(sql).scalar_one():
+                raise RuntimeError(f"v023_lane3_store: {message}")
 
 
 def downgrade() -> None:

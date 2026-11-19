@@ -740,6 +740,18 @@ def _verify_installed(
         or envelope.audience != receipt["host_id"]
     ):
         raise E10Refused("installed-attestation-not-this-incarnation")
+    # The evidence must be the installed-host kind and still be in force (database
+    # time): a different purpose, or a lapsed attestation, is not I(D).
+    if envelope.purpose != INSTALLED_PURPOSE:
+        raise E10Refused("installed-attestation-purpose")
+    try:
+        expires = datetime.fromisoformat(
+            str(envelope.expires_at).replace("Z", "+00:00")
+        )
+    except ValueError:
+        raise E10Refused("installed-attestation-malformed") from None
+    if expires.tzinfo is None or expires <= store_now(db):
+        raise E10Refused("installed-attestation-expired")
     try:
         dispatch_id = str(uuid.UUID(envelope.observation_id))
     except ValueError:

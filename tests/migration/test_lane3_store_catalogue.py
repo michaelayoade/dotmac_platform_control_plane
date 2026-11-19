@@ -1077,7 +1077,7 @@ MIGRATION_FILE = (
 def _violations(engine: Any, **kwargs: Any) -> tuple[str, ...]:
     with engine.connect() as conn:
         return integrity.check_store_integrity(
-            lambda sql, params=None: conn.execute(text(sql), params or {}).all(),
+            integrity.session_execute(conn),
             migration_path=MIGRATION_FILE,
             **kwargs,
         )
@@ -1183,7 +1183,7 @@ def test_the_integrity_check_refuses_a_changed_body_a_disabled_trigger_and_extra
 def test_the_integrity_check_is_exposed_for_e10a_and_refuses_without_a_dsn(
     capsys: Any,
 ) -> None:
-    assert integrity.main([], {}) == 2
+    assert integrity.main(["--expected-owner", "app_admin"], {}) == 2
     assert integrity.ADMIN_DSN_ENV in capsys.readouterr().err
 
 
@@ -1363,7 +1363,7 @@ def test_another_postgresql_major_is_repin_required_not_a_digest_mismatch(
         def execute(sql: str, params: Any = None) -> Any:
             if sql == "SHOW server_version_num":
                 return [("170002",)]
-            return conn.execute(text(sql), params or {}).all()
+            return integrity.session_execute(conn)(sql, params)
 
         found = integrity.check_store_integrity(execute, migration_path=MIGRATION_FILE)
     assert found == ("repin-required:postgresql-17",)
@@ -1391,3 +1391,128 @@ def test_the_single_owner_must_be_the_role_that_ran_the_migration(
     )
     found = _ddl(db, "ALTER SCHEMA mod_deploy OWNER TO app_user")
     assert "owner-not-migration-owner" in found and "owner-not-single" not in found
+
+
+# ── architect review: hostile search_path, role membership, the owner anchor ─
+
+
+def _owner_of(db: Any) -> str:
+    with db.admin.begin() as conn:
+        return str(
+            conn.execute(
+                text(
+                    "SELECT pg_get_userbyid(nspowner) FROM pg_namespace "
+                    "WHERE nspname = 'cp_lane3'"
+                )
+            ).scalar_one()
+        )
+
+
+@contextlib.contextmanager
+def _roles(db: Any, *attributes: str) -> Any:
+    name = "l3r_" + uuid.uuid4().hex[:10]
+    with db.admin.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql(f'CREATE ROLE "{name}" {" ".join(attributes)}')
+    try:
+        yield name
+    finally:
+        with db.admin.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.exec_driver_sql(f'DROP ROLE IF EXISTS "{name}"')
+
+
+def test_a_planted_shadow_operator_and_hostile_path_cannot_hide_a_grant(
+    lane3_cases: Any,
+) -> None:
+    from sqlalchemy.engine import make_url
+
+    db = _clone(lane3_cases)
+    with db.admin.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        database = conn.exec_driver_sql("SELECT current_database()").scalar_one()
+        for statement in (
+            "GRANT SELECT ON cp_lane3.e10_receipts TO PUBLIC",
+            "CREATE FUNCTION public.l3_never(oid, oid) RETURNS boolean "
+            "LANGUAGE sql AS 'SELECT false'",
+            "CREATE OPERATOR public.<> (LEFTARG = oid, RIGHTARG = oid, "
+            "FUNCTION = public.l3_never)",
+            "CREATE FUNCTION public.l3_zero(bigint) RETURNS bigint "
+            "LANGUAGE sql AS 'SELECT 0::bigint'",
+            "CREATE AGGREGATE public.count(*) (SFUNC = public.l3_zero, "
+            "STYPE = bigint, INITCOND = '0')",
+            f'ALTER DATABASE "{database}" SET search_path = public, pg_catalog',
+        ):
+            conn.exec_driver_sql(statement)
+    hostile = create_engine(make_url(str(db.admin.url)).set(database=database))
+    try:
+        with hostile.connect() as conn:
+            # the shadow is real: the unpinned read-back says there is no leak
+            leak = integrity.acl_queries(MIGRATION_FILE)["RELATION_ACL_SQL"]
+            assert conn.exec_driver_sql(leak).scalar_one() == 0
+            conn.rollback()
+        with hostile.connect() as conn:
+            found = integrity.check_store_integrity(
+                integrity.session_execute(conn), migration_path=MIGRATION_FILE
+            )
+        assert "acl-leak:RELATION_ACL_SQL" in found
+    finally:
+        hostile.dispose()
+
+
+def test_an_owner_membership_in_either_direction_is_refused_with_its_own_code(
+    lane3_cases: Any,
+) -> None:
+    db = _clone(lane3_cases)
+    owner = _owner_of(db)
+    with _roles(db) as group, _roles(db, "SUPERUSER") as boss, _roles(db) as child:
+        found = _ddl(db, f'GRANT "{group}" TO "{owner}"')
+        assert "owner-is-member-of-a-role" in found
+        assert "owner-has-members" not in found
+        found = _ddl(db, f'REVOKE "{group}" FROM "{owner}"')
+        assert not {"owner-is-member-of-a-role", "owner-has-members"} & found
+        found = _ddl(db, f'GRANT "{boss}" TO "{owner}"')  # a path to a superuser
+        assert "owner-is-member-of-a-role" in found
+        _ddl(db, f'REVOKE "{boss}" FROM "{owner}"')
+        found = _ddl(db, f'GRANT "{owner}" TO "{child}"')
+        assert "owner-has-members" in found
+        assert "owner-is-member-of-a-role" not in found
+
+
+def test_the_integrity_command_needs_the_owner_from_the_operator_and_compares_it(
+    lane3_cases: Any, capsys: Any
+) -> None:
+    from sqlalchemy.engine import make_url
+
+    db = _clone(lane3_cases)
+    owner = _owner_of(db)
+    # reinstall the migration's exact `store_now` so the schema is otherwise clean
+    with db.admin.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE OR REPLACE FUNCTION cp_lane3.store_now() RETURNS timestamptz "
+            "LANGUAGE sql VOLATILE SET search_path = pg_catalog, cp_lane3, pg_temp "
+            "AS $$ SELECT clock_timestamp() $$"
+        )
+        database = conn.exec_driver_sql("SELECT current_database()").scalar_one()
+    dsn = (
+        make_url(str(db.admin.url))
+        .set(database=database)
+        .render_as_string(hide_password=False)
+    )
+    env = {integrity.ADMIN_DSN_ENV: dsn}
+    with pytest.raises(SystemExit) as exited:  # required: not derived, not optional
+        integrity.main([], env, migration_path=MIGRATION_FILE)
+    assert exited.value.code == 2
+    with pytest.raises(SystemExit):  # typed: a role name, nothing else
+        integrity.main(["--expected-owner", "x; DROP"], env)
+    capsys.readouterr()
+    assert (
+        integrity.main(["--expected-owner", owner], env, migration_path=MIGRATION_FILE)
+        == 0
+    )
+    assert "store integrity passed" in capsys.readouterr().out
+    assert (
+        integrity.main(
+            ["--expected-owner", owner + "_other"], env, migration_path=MIGRATION_FILE
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert "owner-not-migration-owner" in err and dsn not in err

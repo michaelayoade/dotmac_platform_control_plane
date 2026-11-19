@@ -8,20 +8,22 @@ known before the deploy:
     LANE3_STORE_PREFLIGHT_DATABASE_URL=... \\
         python -m vendor_cp.deployment.lane3_store_preflight [--role app_admin]
 
-It issues SELECTs and `SHOW` only, in a read-only transaction, and prints ONLY
-check names, booleans and role/schema names (`ok <check>`, `FAIL <check>`,
-`info <name>=<role>`), never a value of any kind. Exit 0 only when every check
-holds, 2 on any failure, 4 when the database cannot be asked.
+It issues SELECTs and `SHOW` only, in a read-only transaction (read back: refused
+unless the server says `on`) with `search_path` pinned to `pg_catalog, pg_temp`,
+and prints ONLY check names, booleans and role/schema names (`ok <check>`,
+`FAIL <check>`, `info <name>=<role>`), never a value of any kind. Exit 0 only
+when every check holds, 2 on any failure, 4 when the database cannot be asked.
 
 Checks (`--role` is the migration role, `app_admin` on production):
 
 * the server is PostgreSQL 16;
 * the role exists, is NOSUPERUSER and NOCREATEROLE, and may CREATE in the database;
+* the role is a member of no role and has no members (either direction);
 * no event trigger exists;
 * no default-privilege rule would apply to what the migration creates;
 * `cp_lane3` does not exist yet;
-* `public.forbid_mutation_of_append_only_table()` exists and its definition digest
-  equals the pin;
+* `public.forbid_mutation_of_append_only_table()` exists exactly once and its
+  definition digest equals the pin;
 * the owner of `mod_deploy` is the role (the owner the integrity check will
   demand afterwards). The guard's owner and the role's attributes are reported.
 """
@@ -36,11 +38,13 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
-from sqlalchemy import text
-
 from vendor_cp.deployment.lane3_store_integrity import (
     PUBLIC_FUNCTIONS,
+    SessionRefused,
+    begin_read_only,
     migration_module,
+    pin_search_path,
+    session_execute,
 )
 
 __all__ = ["ADMIN_DSN_ENV", "main", "run_preflight"]
@@ -64,11 +68,10 @@ _ATTRIBUTES: Final = (
 _DB_CREATE_SQL: Final = (
     "SELECT has_database_privilege(:role, current_database(), 'CREATE')"
 )
-_DEFAULT_ACL_SQL: Final = (
-    "SELECT count(*) FROM pg_catalog.pg_default_acl d WHERE (d.defaclnamespace = 0 "
-    "AND d.defaclrole = (SELECT r.oid FROM pg_catalog.pg_roles r "
-    "WHERE r.rolname = :role)) OR d.defaclnamespace IN "
-    "(SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = 'cp_lane3')"
+_MEMBERSHIP_COUNT_SQL: Final = (
+    "SELECT count(*) FROM pg_catalog.pg_auth_members m WHERE m.roleid = "
+    "(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = :role) OR "
+    "m.member = (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = :role)"
 )
 _MOD_DEPLOY_OWNER_SQL: Final = (
     "SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace "
@@ -90,6 +93,7 @@ def run_preflight(
 ) -> list[tuple[str, bool]]:
     """`(check name, held)` pairs, in order, plus `info` pairs are not included:
     see `info_lines`. Read-only: `execute(sql, params=None)` returns rows."""
+    pin_search_path(execute)
     source = migration_module(migration_path)
     results: list[tuple[str, bool]] = []
 
@@ -112,16 +116,25 @@ def run_preflight(
         "no-event-triggers",
         int(execute(source.PREFLIGHT_EVENT_TRIGGERS_SQL)[0][0]) == 0,
     )
-    check(
-        "no-default-privileges-apply",
-        int(execute(_DEFAULT_ACL_SQL, params)[0][0]) == 0,
-    )
+    for name, template in (
+        ("migration-role-not-a-member", source.PREFLIGHT_MEMBER_OF_TEMPLATE),
+        ("migration-role-has-no-members", source.PREFLIGHT_HAS_MEMBERS_TEMPLATE),
+        ("no-default-privileges-apply", source.PREFLIGHT_DEFAULT_ACL_TEMPLATE),
+    ):
+        check(
+            name,
+            bool(row)
+            and int(execute(template.replace("{role}", ":role"), params)[0][0]) == 0,
+        )
     check(
         "schema-cp_lane3-absent", int(execute(source.PREFLIGHT_SCHEMA_SQL)[0][0]) == 0
     )
     guard = execute(source.PREFLIGHT_GUARD_SQL)
-    check("append-only-guard-exists", bool(guard))
-    digest = hashlib.sha256(str(guard[0][0]).encode()).hexdigest() if guard else ""
+    check("append-only-guard-exists", len(guard) >= 1)
+    check("append-only-guard-exactly-one", len(guard) == 1)
+    digest = (
+        hashlib.sha256(str(guard[0][0]).encode()).hexdigest() if len(guard) == 1 else ""
+    )
     check(
         "append-only-guard-digest-matches-pin", digest == PUBLIC_FUNCTIONS[_GUARD_KEY]
     )
@@ -145,6 +158,9 @@ def info_lines(execute: Callable[..., Any], *, role: str) -> list[str]:
         lines.append(f"info {label}={rows[0][0] if rows else 'absent'}")
     row = execute(_ROLE_SQL, {"role": role})
     if row:
+        # a number only: how many membership rows involve the role, either way
+        count = int(execute(_MEMBERSHIP_COUNT_SQL, {"role": role})[0][0])
+        lines.append(f"info role_memberships={count}")
         for name, value in zip(_ATTRIBUTES, row[0], strict=True):
             lines.append(f"info role_{name}={str(value).lower()}")
     return lines
@@ -171,10 +187,8 @@ def main(
             database_url=dsn, platform_database_url=dsn
         ).platform_session_factory()
         try:
-            session.execute(text("SET TRANSACTION READ ONLY"))
-
-            def execute(sql: str, params: Any = None) -> Any:
-                return session.execute(text(sql), params or {}).all()
+            execute = session_execute(session)
+            begin_read_only(execute)
 
             results = run_preflight(
                 execute, role=args.role, migration_path=migration_path
@@ -183,6 +197,9 @@ def main(
         finally:
             session.rollback()
             session.close()
+    except SessionRefused as refusal:
+        print(f"preflight refused: {refusal.code}", file=sys.stderr)
+        return 2
     except Exception as error:  # noqa: BLE001 - class name only, never the text
         print(f"preflight unverifiable: {type(error).__name__}", file=sys.stderr)
         return 4

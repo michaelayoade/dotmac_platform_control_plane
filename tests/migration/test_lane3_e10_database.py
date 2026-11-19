@@ -22,7 +22,7 @@ import importlib.util
 import os
 import sys
 import uuid
-from datetime import timedelta
+from datetime import UTC, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -386,7 +386,7 @@ def _installed(
         "custody_domain": "host_attester",
         "trust_root_version": receipt["enrolment_uuid"],
         "issued_at": "2026-11-19T10:00:00Z",
-        "expires_at": "2026-11-19T12:00:00Z",
+        "expires_at": "2031-01-01T00:00:00Z",
         "audience": receipt["host_id"],
         "observation_id": dispatch_id,
         "subject": {"host_identity": receipt["host_id"]},
@@ -460,6 +460,17 @@ def test_an_installed_attestation_is_verified_then_its_dispatch_and_digest_recor
         (
             {"trust_root_version": str(uuid.uuid4())},
             "installed-attestation-not-this-incarnation",
+        ),
+        (
+            {"purpose": "dotmac.foundation.candidate-artifact.v2"},
+            "installed-attestation-purpose",
+        ),
+        (
+            {
+                "issued_at": "2020-01-01T00:00:00Z",
+                "expires_at": "2020-01-02T00:00:00Z",
+            },
+            "installed-attestation-expired",
         ),
         ({"observation_id": "not-a-uuid"}, "installed-attestation-observation"),
         ({"observation_id": str(uuid.uuid4())}, "dispatch-unknown"),
@@ -954,3 +965,36 @@ def test_m2_a_closure_naming_the_fingerprint_makes_the_receipt_not_current(
 def test_the_ensure_audit_registry_helper_is_idempotent() -> None:
     e10.ensure_audit_registry()
     e10.ensure_audit_registry()
+
+
+def test_an_attestation_expiring_exactly_now_is_expired_and_nothing_is_written(
+    case: Any, db: Session
+) -> None:
+    """Fail closed at the boundary: `expires_at <= database time` is lapsed."""
+    _foundation_or_skip()
+    key = _key("host-a-1")
+    outcome = _enrol(db, "host-a", 1, seed="host-a-1")
+    receipt = e10._receipt_row(db, outcome.receipt_ref)
+    dispatch_id = str(uuid.uuid4())
+    _dispatch_row(db, dispatch_id)
+    now = case.now().astimezone(UTC)
+    installed = _installed(
+        receipt,
+        key,
+        dispatch_id,
+        issued_at=(now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        expires_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    with pytest.raises(e10.E10Refused) as refused:
+        e10.record_destruction(
+            db,
+            {
+                "receipt_ref": outcome.receipt_ref,
+                "evidence_digest": "sha256:" + "b" * 64,
+                "recorded_by": "operator",
+                "installed": installed,
+            },
+        )
+    assert refused.value.code == "installed-attestation-expired"
+    assert _count(db, "SELECT count(*) FROM cp_lane3.e10_destructions") == 0
+    db.rollback()

@@ -59,6 +59,7 @@ class Scratch:
         self.url = postgres_url
         self.name = "vcp_pre_" + uuid.uuid4().hex[:10]
         self.role = "l3pre_" + uuid.uuid4().hex[:10]
+        self.extra_roles: list[str] = []
         self.server = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
         with self.server.connect() as conn:
             conn.execute(text(f'CREATE DATABASE "{self.name}"'))
@@ -99,16 +100,54 @@ class Scratch:
         finally:
             plain.dispose()
 
+    def make_role(self, *attributes: str) -> str:
+        """A cluster role (cleaned up with the scratch database)."""
+        name = "l3x_" + uuid.uuid4().hex[:10]
+        with self.server.connect() as conn:
+            conn.execute(text(f'CREATE ROLE "{name}" {" ".join(attributes)}'))
+        self.extra_roles.append(name)
+        return name
+
+    def hostile(self) -> None:
+        """Plant a shadow `=`/`<>` on oids and a `count(*)` aggregate in `public`
+        that answer 0/false, and put `public` BEFORE `pg_catalog` in every NEW
+        session's path (database-level setting): the owner of `public` can do both."""
+        self.sql(
+            "CREATE FUNCTION public.l3_never(oid, oid) RETURNS boolean "
+            "LANGUAGE sql AS 'SELECT false'",
+            "CREATE OPERATOR public.= (LEFTARG = oid, RIGHTARG = oid, "
+            "FUNCTION = public.l3_never)",
+            "CREATE OPERATOR public.<> (LEFTARG = oid, RIGHTARG = oid, "
+            "FUNCTION = public.l3_never)",
+            "CREATE FUNCTION public.l3_zero(bigint) RETURNS bigint "
+            "LANGUAGE sql AS 'SELECT 0::bigint'",
+            "CREATE AGGREGATE public.count(*) (SFUNC = public.l3_zero, "
+            "STYPE = bigint, INITCOND = '0')",
+        )
+        with self.server.connect() as conn:
+            conn.execute(
+                text(
+                    f'ALTER DATABASE "{self.name}" SET search_path = public, pg_catalog'
+                )
+            )
+        self.engine.dispose()  # the next connection sees the new setting
+
     def schema_exists(self) -> bool:
         return bool(self.rows("SELECT 1 FROM pg_namespace WHERE nspname = 'cp_lane3'"))
 
-    def checks(self) -> dict[str, bool]:
-        with self.engine.connect() as conn:
-            done = preflight.run_preflight(
-                lambda sql, params=None: conn.execute(text(sql), params or {}).all(),
-                role=self.role,
-                migration_path=MIGRATION,
-            )
+    def checks(self, migration_path: Path = MIGRATION) -> dict[str, bool]:
+        # a real transaction: `SET LOCAL` means nothing under autocommit, and the
+        # checks refuse such a session (`search-path-not-pinned`)
+        plain = create_engine(make_url(self.url).set(database=self.name))
+        try:
+            with plain.connect() as conn:
+                done = preflight.run_preflight(
+                    integrity.session_execute(conn),
+                    role=self.role,
+                    migration_path=migration_path,
+                )
+        finally:
+            plain.dispose()
         return dict(done)
 
     def close(self) -> None:
@@ -122,6 +161,8 @@ class Scratch:
                 {"n": self.name},
             )
             conn.execute(text(f'DROP DATABASE IF EXISTS "{self.name}"'))
+            for extra in self.extra_roles:
+                conn.execute(text(f'DROP ROLE IF EXISTS "{extra}"'))
             conn.execute(text(f'DROP ROLE IF EXISTS "{self.role}"'))
         self.server.dispose()
 
@@ -174,6 +215,33 @@ _BREAKS: list[tuple[str, Any, str, str]] = [
         lambda s: s.sql(f'ALTER ROLE "{s.role}" CREATEROLE'),
         "migration-role-has-createrole",
         "migration-role-nocreaterole",
+    ),
+    (
+        "member_of_a_role",
+        lambda s: s.sql(f'GRANT "{s.make_role()}" TO "{s.role}"'),
+        "migration-role-is-member-of-a-role",
+        "migration-role-not-a-member",
+    ),
+    (
+        "member_of_a_superuser_role",
+        lambda s: s.sql(f'GRANT "{s.make_role("SUPERUSER")}" TO "{s.role}"'),
+        "migration-role-is-member-of-a-role",
+        "migration-role-not-a-member",
+    ),
+    (
+        "has_members",
+        lambda s: s.sql(f'GRANT "{s.role}" TO "{s.make_role()}"'),
+        "migration-role-has-members",
+        "migration-role-has-no-members",
+    ),
+    (
+        "guard_not_unique",
+        lambda s: s.sql(
+            "CREATE FUNCTION public.forbid_mutation_of_append_only_table(integer) "
+            "RETURNS integer LANGUAGE sql AS 'SELECT 1'"
+        ),
+        "append-only-guard-ambiguous",
+        "append-only-guard-exactly-one",
     ),
     ("event_trigger", _event_trigger, "event-triggers-exist", "no-event-triggers"),
     (
@@ -241,14 +309,7 @@ def test_another_server_major_is_refused_by_the_migration_and_the_command(
         scratch.migrate(module)
     assert not scratch.schema_exists()
     # the command reads the same constant from the migration it loads
-    with scratch.engine.connect() as conn:
-        done = dict(
-            preflight.run_preflight(
-                lambda sql, params=None: conn.execute(text(sql), params or {}).all(),
-                role=scratch.role,
-                migration_path=_with_major(17),
-            )
-        )
+    done = scratch.checks(_with_major(17))
     assert done["server-major-16"] is False
 
 
@@ -342,3 +403,60 @@ def test_the_command_prints_only_names_and_booleans_and_exits_by_the_result(
         == 4
     )
     assert "secretpw" not in capsys.readouterr().err
+
+
+def test_a_planted_shadow_operator_and_a_hostile_search_path_hide_nothing(
+    scratch: Scratch,
+) -> None:
+    """The migrating role owns `public` and may set its own path: with `public`
+    before `pg_catalog`, an unqualified `=` on oids and `count(*)` would be ITS.
+    Both the migration and the command pin the path and still see the tampering."""
+    scratch.sql(
+        f'ALTER DEFAULT PRIVILEGES FOR ROLE "{scratch.role}" GRANT SELECT ON TABLES '
+        "TO PUBLIC"
+    )
+    scratch.hostile()
+    # the shadow is real: the migration's own (unpinned) text is fooled by it
+    unpinned = _migration().PREFLIGHT_DEFAULT_ACL_SQL.replace(
+        "current_user", f"'{scratch.role}'"
+    )
+    assert scratch.rows(unpinned)[0][0] == 0
+    with pytest.raises(RuntimeError, match="default-privileges-would-apply"):
+        scratch.migrate(_migration())
+    assert not scratch.schema_exists()
+    assert scratch.checks()["no-default-privileges-apply"] is False
+
+
+def test_the_command_reports_the_owners_membership_count_as_a_number_only(
+    scratch: Scratch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = (
+        make_url(scratch.url)
+        .set(database=scratch.name)
+        .render_as_string(hide_password=False)
+    )
+    env = {preflight.ADMIN_DSN_ENV: dsn}
+    assert preflight.main(["--role", scratch.role], env, migration_path=MIGRATION) == 0
+    assert "info role_memberships=0" in capsys.readouterr().out
+    other = scratch.make_role("SUPERUSER")
+    scratch.sql(f'GRANT "{other}" TO "{scratch.role}"')
+    assert preflight.main(["--role", scratch.role], env, migration_path=MIGRATION) == 2
+    out = capsys.readouterr().out
+    assert "info role_memberships=1" in out
+    assert "FAIL migration-role-not-a-member" in out
+    assert other not in out  # no role name beyond the owner's
+
+
+def test_the_command_refuses_a_session_that_is_not_read_only() -> None:
+    def rows(sql: str, params: Any = None) -> list[Any]:
+        return {
+            "SHOW search_path": [("pg_catalog, pg_temp",)],
+            "SHOW transaction_read_only": [("off",)],
+        }.get(sql, [])
+
+    with pytest.raises(integrity.SessionRefused) as refused:
+        integrity.begin_read_only(rows)
+    assert refused.value.code == "transaction-not-read-only"
+    with pytest.raises(integrity.SessionRefused) as refused:
+        integrity.pin_search_path(lambda sql, params=None: [("public, pg_catalog",)])
+    assert refused.value.code == "search-path-not-pinned"

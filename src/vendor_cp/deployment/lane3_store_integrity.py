@@ -42,9 +42,11 @@ a change to a pinned digest is a reviewed diff, never an incidental one.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -56,6 +58,10 @@ __all__ = [
     "ADMIN_DSN_ENV",
     "FUNCTION_DEFINITION_SHA256",
     "TRIGGERS",
+    "SessionRefused",
+    "begin_read_only",
+    "pin_search_path",
+    "session_execute",
     "PUBLIC_FUNCTIONS",
     "CONSTRAINTS",
     "INDEXES",
@@ -130,12 +136,12 @@ TRIGGERS: Final[Mapping[str, tuple[str, str, str]]] = {
     "trg_e10_destructions_append_only": (
         "e10_destructions",
         "O",
-        "417536e63a7c8f5905950c3d1f8dd9835fda8006c648474ea35e592542c5d43e",
+        "4fedb6e7818e308c87545b3446821db5f00eb740c2b88c91e2033cd0ae3f42a4",
     ),
     "trg_e10_destructions_append_only_truncate": (
         "e10_destructions",
         "O",
-        "03613ac0b6292b16f7c26ef893c5d725ecdbb3919f0ffb59e3909cec55e0ec7c",
+        "95a02f97a5e6d3bfc0c3543f081cb04756da5664a11385e609601d206ae89f4a",
     ),
     "trg_e10_destructions_stamp": (
         "e10_destructions",
@@ -145,12 +151,12 @@ TRIGGERS: Final[Mapping[str, tuple[str, str, str]]] = {
     "trg_e10_receipts_append_only": (
         "e10_receipts",
         "O",
-        "3935cec713d58b8852823a054046f69397fb92d6573eb0dc43ce49f5f3fb68b7",
+        "1a2de227d4c7cb18ddcaccacb87663e9f63e5a5927ee4d8dbf78636437d0405a",
     ),
     "trg_e10_receipts_append_only_truncate": (
         "e10_receipts",
         "O",
-        "e13c557e942b3e247b2dabe9d8b5916cb4fd3c2d0b43f9ff0b499988f15ed7a5",
+        "12eb66beb291e32e324d29d0b30ff0a223238eabce43c37e30f5ac031aaebd39",
     ),
     "trg_e10_receipts_stamp": (
         "e10_receipts",
@@ -175,12 +181,12 @@ TRIGGERS: Final[Mapping[str, tuple[str, str, str]]] = {
     "trg_host_lease_releases_append_only": (
         "host_lease_releases",
         "O",
-        "a07205bf1aecde719dd3fca842e014167f51a703047dc91e35afca7ea62d304e",
+        "eabb6d80ede98508774d90af6418aa6679d3b5a1e5c7b414ac04ffa260980333",
     ),
     "trg_host_lease_releases_append_only_truncate": (
         "host_lease_releases",
         "O",
-        "cdfdeec99f5affe8dcb41beaaa8f96e2d3bbc850ee7e91caa8377c7985b59289",
+        "15459c4523ab8d4dd8f5cf439d9e0f95c97f8c32ac7930130dc50f15b12d2495",
     ),
     "trg_host_lease_releases_stamp": (
         "host_lease_releases",
@@ -190,12 +196,12 @@ TRIGGERS: Final[Mapping[str, tuple[str, str, str]]] = {
     "trg_host_leases_delete": (
         "host_leases",
         "O",
-        "c113b7967d262e01dcd6ab4c9d45301e440d5e47f3634d1eb1ba5e147fdd2da5",
+        "1a6607eb22fd8f80b8e21be1a2ef4f9d6a2587a73632b31244e1c6cb414ade0e",
     ),
     "trg_host_leases_truncate": (
         "host_leases",
         "O",
-        "47e7e2bf909d080fc1d2a737e59fa4fa48a9429bd7512cc21a235e43f6e684b6",
+        "253ebec356041144a2da0438ef6ae80364493728f846b44dbc4419fce966ac0a",
     ),
     "trg_host_leases_update": (
         "host_leases",
@@ -205,12 +211,12 @@ TRIGGERS: Final[Mapping[str, tuple[str, str, str]]] = {
     "trg_run_bindings_append_only": (
         "run_bindings",
         "O",
-        "7d1a24660b8501affc414ce94908bee81df0ff45da498d4176d17d1aa0741ba2",
+        "9fab44a57d5cdef3df59d9b55b8540aa215c5c67c2b3ef7eb739352c95482f13",
     ),
     "trg_run_bindings_append_only_truncate": (
         "run_bindings",
         "O",
-        "fcca070a1c71bfaf8b8d704f79b97b00e0dacb733a1c69d377c67b335ea032c1",
+        "3e4ad320c4dbb3cd0b0444059246310d074e113cd1094efba91fd8200cbd2ed0",
     ),
     "trg_run_bindings_stamp": (
         "run_bindings",
@@ -502,6 +508,55 @@ def acl_queries(migration_path: Path | None = None) -> dict[str, str]:
     return {name: str(getattr(module, name)) for name in ACL_QUERY_NAMES}
 
 
+class SessionRefused(Exception):
+    """The session is not one this check may trust. A code, never a value."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+_SEARCH_PATH_SET_SQL: Final = "SET LOCAL search_path = pg_catalog, pg_temp"
+_SEARCH_PATH_SHOW_SQL: Final = "SHOW search_path"
+_READ_ONLY_SHOW_SQL: Final = "SHOW transaction_read_only"
+_OWNER_NAME: Final = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+
+
+def session_execute(session: Any) -> Callable[..., Any]:
+    """`execute(sql, params=None)` over a SQLAlchemy session or connection: the
+    rows for a query, `[]` for a statement that returns none (`SET`)."""
+
+    def execute(sql: str, params: Any = None) -> Any:
+        result = session.execute(text(sql), params or {})
+        return result.all() if result.returns_rows else []
+
+    return execute
+
+
+def pin_search_path(execute: Callable[..., Any]) -> None:
+    """Resolve every name from `pg_catalog` only for the rest of the transaction.
+
+    The owner of `public` (and of the role's own `search_path` setting) could plant
+    an operator or aggregate there (`<>` on oids, `count`) that a read-back would
+    otherwise pick up and answer falsely (the CVE-2018-1058 class). Read back, so a
+    session that ignored the statement is refused rather than trusted.
+    """
+    execute(_SEARCH_PATH_SET_SQL)
+    if str(execute(_SEARCH_PATH_SHOW_SQL)[0][0]).replace(" ", "") != (
+        "pg_catalog,pg_temp"
+    ):
+        raise SessionRefused("search-path-not-pinned")
+
+
+def begin_read_only(execute: Callable[..., Any]) -> None:
+    """Make the transaction read-only, pin the path IMMEDIATELY after, and read the
+    mode back: refuse unless the server says it is on."""
+    execute("SET TRANSACTION READ ONLY")
+    pin_search_path(execute)
+    if str(execute(_READ_ONLY_SHOW_SQL)[0][0]).lower() != "on":
+        raise SessionRefused("transaction-not-read-only")
+
+
 def _diff(
     kind: str, found: Mapping[str, str], expected: Mapping[str, str]
 ) -> list[str]:
@@ -534,6 +589,7 @@ def check_store_integrity(
     refuses. A server that is not PostgreSQL 16 yields ONLY
     `repin-required:postgresql-<major>`: the digests are PG16 output.
     """
+    pin_search_path(execute)
     expected_functions = FUNCTION_DEFINITION_SHA256 if functions is None else functions
     expected_triggers = TRIGGERS if triggers is None else triggers
     major = int(str(execute(_VERSION_SQL)[0][0])) // 10000
@@ -577,6 +633,16 @@ def check_store_integrity(
             migrator = str(rows[0][0]) if rows else None
         if migrator is None or owners != {migrator}:
             violations.append("owner-not-migration-owner")
+        # a membership in EITHER direction is a path to privilege the owner does
+        # not itself hold (a superuser role it can SET ROLE to, or the reverse)
+        source = migration_module(migration_path)
+        params = {"role": next(iter(owners))}
+        for template, code in (
+            (source.PREFLIGHT_MEMBER_OF_TEMPLATE, "owner-is-member-of-a-role"),
+            (source.PREFLIGHT_HAS_MEMBERS_TEMPLATE, "owner-has-members"),
+        ):
+            if int(execute(template.replace("{role}", ":role"), params)[0][0]) != 0:
+                violations.append(code)
     for name, sql in acl_queries(migration_path).items():
         if int(execute(sql)[0][0]) != 0:
             violations.append(f"acl-leak:{name}")
@@ -601,9 +667,19 @@ def check_store_integrity(
 
 
 def main(
-    argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None
+    argv: Sequence[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+    *,
+    migration_path: Path | None = None,
 ) -> int:
-    del argv
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--expected-owner",
+        required=True,
+        type=_owner_name,
+        help="the migration role, passed by the operator (not derived from the DB)",
+    )
+    args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     dsn = env.get(ADMIN_DSN_ENV, "").strip()
     if not dsn:
@@ -619,13 +695,19 @@ def main(
             database_url=dsn, platform_database_url=dsn
         ).platform_session_factory()
         try:
-            session.execute(text("SET TRANSACTION READ ONLY"))
+            execute = session_execute(session)
+            begin_read_only(execute)
             violations = check_store_integrity(
-                lambda sql, params=None: session.execute(text(sql), params or {}).all()
+                execute,
+                expected_owner=args.expected_owner,
+                migration_path=migration_path,
             )
         finally:
             session.rollback()
             session.close()
+    except SessionRefused as refusal:
+        print(f"store integrity refused: {refusal.code}", file=sys.stderr)
+        return 2
     except Exception as error:  # noqa: BLE001 - class name only, never the text
         print(f"store integrity unverifiable: {type(error).__name__}", file=sys.stderr)
         return 2
@@ -634,6 +716,12 @@ def main(
         return 3 if violations[0].startswith("repin-required") else 2
     print("store integrity passed")
     return 0
+
+
+def _owner_name(value: str) -> str:
+    if not _OWNER_NAME.fullmatch(value):
+        raise argparse.ArgumentTypeError("not a role name")
+    return value
 
 
 if __name__ == "__main__":  # pragma: no cover
