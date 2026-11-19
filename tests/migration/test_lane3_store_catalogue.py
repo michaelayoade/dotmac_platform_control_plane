@@ -1367,3 +1367,27 @@ def test_another_postgresql_major_is_repin_required_not_a_digest_mismatch(
 
         found = integrity.check_store_integrity(execute, migration_path=MIGRATION_FILE)
     assert found == ("repin-required:postgresql-17",)
+
+
+def test_the_single_owner_must_be_the_role_that_ran_the_migration(
+    lane3_cases: Any,
+) -> None:
+    """One owner is not enough: it must be the owner of `mod_deploy` (the role that
+    ran the Control lineage, so the migration role), or the one named explicitly.
+    A whole-schema hand-over to another role is a single owner and still a finding."""
+    db = _clone(lane3_cases)
+    with db.admin.begin() as conn:
+        owner = conn.execute(
+            text(
+                "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'cp_lane3'"
+            )
+        ).scalar_one()
+    assert "owner-not-migration-owner" not in _violations(db.admin)
+    assert "owner-not-migration-owner" in _violations(
+        db.admin, expected_owner=owner + "_other"
+    )
+    assert "owner-not-migration-owner" not in _violations(
+        db.admin, expected_owner=owner
+    )
+    found = _ddl(db, "ALTER SCHEMA mod_deploy OWNER TO app_user")
+    assert "owner-not-migration-owner" in found and "owner-not-single" not in found

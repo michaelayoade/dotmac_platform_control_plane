@@ -19,7 +19,8 @@ Beyond the code and triggers it also checks, so a POST-migration change is caugh
 * the privilege read-back of `v023_lane3_store` (`SCHEMA_ACL_SQL` ...
   `DEFAULT_ACL_SQL`, read FROM that migration so there is one source): no ACL entry
   but the owner's, and no default-privilege rule;
-* ONE owner for the schema and every object in it;
+* ONE owner for the schema and every object in it, and that owner is the role
+  that ran the migration (the owner of `mod_deploy`);
 * the sha256 of `pg_get_constraintdef` and `pg_get_indexdef` for every constraint
   and index (the `-spent` UNIQUE, the one-release PK, the fingerprint-derivation
   CHECK, `run_bindings_role_name_key` ...);
@@ -448,9 +449,9 @@ _RLS_FLAGS_SQL: Final = (
     "ON n.oid = c.relnamespace WHERE n.nspname = 'cp_lane3' AND c.relkind = 'r' "
     "AND (c.relrowsecurity OR c.relforcerowsecurity)"
 )
-#: How many DISTINCT owners the schema and everything in it has (must be one).
+#: The DISTINCT owners (by name) of the schema and everything in it.
 _OWNERS_SQL: Final = (
-    "SELECT count(DISTINCT o) FROM ("
+    "SELECT DISTINCT pg_catalog.pg_get_userbyid(o) FROM ("
     "SELECT nspowner AS o FROM pg_catalog.pg_namespace WHERE nspname = 'cp_lane3' "
     "UNION ALL SELECT c.relowner FROM pg_catalog.pg_class c JOIN "
     "pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'cp_lane3' "
@@ -460,10 +461,34 @@ _OWNERS_SQL: Final = (
     "pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'cp_lane3'"
     ") owners"
 )
+#: The role that ran the Control lineage, hence (on production) the migration role:
+#: the owner of `mod_deploy`. The migration itself asserts the schema's owner IS its
+#: `current_user`; afterwards the owner must still be that role.
+_MIGRATOR_SQL: Final = (
+    "SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace "
+    "WHERE nspname = 'mod_deploy'"
+)
 
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def migration_module(migration_path: Path | None = None) -> Any:
+    """`v023_lane3_store` loaded as a module: the single source of the privilege
+    read-back and preflight SQL, and of the append-only guard's pin."""
+    if migration_path is None:
+        from vendor_cp.migrations import vendor_versions_dir
+
+        migration_path = vendor_versions_dir() / _MIGRATION_FILE
+    spec = importlib.util.spec_from_file_location(
+        "v023_lane3_store_source", migration_path
+    )
+    if spec is None or spec.loader is None:
+        raise FileNotFoundError(_MIGRATION_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def acl_queries(migration_path: Path | None = None) -> dict[str, str]:
@@ -473,17 +498,7 @@ def acl_queries(migration_path: Path | None = None) -> dict[str, str]:
     same text afterwards. `migration_path` is for tests; production resolves the
     migration directory exactly as the migrator does (`vendor_cp.migrations`).
     """
-    if migration_path is None:
-        from vendor_cp.migrations import vendor_versions_dir
-
-        migration_path = vendor_versions_dir() / _MIGRATION_FILE
-    spec = importlib.util.spec_from_file_location(
-        "v023_lane3_store_acl", migration_path
-    )
-    if spec is None or spec.loader is None:
-        raise FileNotFoundError(_MIGRATION_FILE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = migration_module(migration_path)
     return {name: str(getattr(module, name)) for name in ACL_QUERY_NAMES}
 
 
@@ -507,8 +522,12 @@ def check_store_integrity(
     functions: Mapping[str, str] | None = None,
     triggers: Mapping[str, tuple[str, str, str]] | None = None,
     migration_path: Path | None = None,
+    expected_owner: str | None = None,
 ) -> tuple[str, ...]:
     """The violations, sorted; empty means the store is exactly as pinned.
+
+    `expected_owner` defaults to the owner of `mod_deploy` (the role that ran the
+    Control lineage, which is the migration role).
 
     `execute(sql, params=None)` returns the rows of a read-only query. The pins
     default to this module's, and are parameters so a test can show the check
@@ -548,8 +567,16 @@ def check_store_integrity(
     violations += [f"rule-present:{r[0]}" for r in execute(_RULES_SQL)]
     violations += [f"rls-policy-present:{r[0]}" for r in execute(_POLICIES_SQL)]
     violations += [f"rls-enabled:{r[0]}" for r in execute(_RLS_FLAGS_SQL)]
-    if int(execute(_OWNERS_SQL)[0][0]) != 1:
+    owners = {str(r[0]) for r in execute(_OWNERS_SQL)}
+    if len(owners) != 1:
         violations.append("owner-not-single")
+    else:
+        migrator = expected_owner
+        if migrator is None:
+            rows = execute(_MIGRATOR_SQL)
+            migrator = str(rows[0][0]) if rows else None
+        if migrator is None or owners != {migrator}:
+            violations.append("owner-not-migration-owner")
     for name, sql in acl_queries(migration_path).items():
         if int(execute(sql)[0][0]) != 0:
             violations.append(f"acl-leak:{name}")
