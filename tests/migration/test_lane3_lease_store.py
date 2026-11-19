@@ -735,3 +735,226 @@ def test_the_same_role_cannot_take_a_lease_outside_its_binding(case: Any) -> Non
         assert caught.value.code == "lease-role-unbound"
     assert support._acquire(store, fx, host="host-a", run="run-1") is not None
     store.close()
+
+
+# ── architect review findings M1-M3 ─────────────────────────────────────────
+
+
+def _close_fingerprint_keeping_the_view(db: Any, fingerprint: str) -> None:
+    """A closure names the fingerprint while `attestation_current_roots` STILL does:
+    the shape the first cut's "current root" test could not see."""
+    with db.admin.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO mod_deploy.attestation_fingerprint_closures "
+                "(fingerprint, closure_kind, closed_at, closure_authority) "
+                "VALUES (:f, 'revoked', now(), 'test')"
+            ),
+            {"f": fingerprint},
+        )
+        assert (
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM mod_deploy.attestation_current_roots "
+                    "WHERE current_fingerprint = :f"
+                ),
+                {"f": fingerprint},
+            ).scalar_one()
+            == 1
+        )
+
+
+def test_m2_a_receipt_whose_fingerprint_is_named_by_any_closure_is_not_current(
+    lane3_cases: Any,
+) -> None:
+    db = lane3_cases.new()
+    store, fx = db.make_store(), db.fixtures()
+    receipt = fx.receipt("host-a", 1)
+    store.e10_receipt(
+        host_id="host-a", authorization_run="run-1", receipt_ref=receipt.receipt_ref
+    )  # current: served
+    _close_fingerprint_keeping_the_view(db, receipt.incarnation_fingerprint)
+    _refused(
+        "e10-receipt-not-current-root",
+        lambda: store.e10_receipt(
+            host_id="host-a",
+            authorization_run="run-1",
+            receipt_ref=receipt.receipt_ref,
+        ),
+    )
+    _refused(
+        "e10-receipt-not-current-root",
+        lambda: _acquire(db, store, fx, receipt=receipt),
+    )
+
+
+def test_m3_acquire_judges_the_destruction_against_the_stored_whole_second(
+    lane3_cases: Any,
+) -> None:
+    """E9 requires destroyed <= acquired, and `acquired_at` is stored truncated to
+    the second. A destruction inside the same second must be refused (fail closed:
+    retry next second), and an accepted run always satisfies E9's check."""
+    db = lane3_cases.new()
+    store, fx = db.make_store(), db.fixtures()
+    db.advance(store, 0.5)
+    receipt = fx.receipt("host-a", 1)  # destroyed at start + 0.5 s
+    db.advance(store, 0.25)  # start + 0.75 s: same second as the destruction
+    _refused(
+        "e10-receipt-not-destroyed", lambda: _acquire(db, store, fx, receipt=receipt)
+    )
+    db.advance(store, 0.25)  # start + 1.0 s: the next whole second
+    held = _acquire(db, store, fx, receipt=receipt)
+    with db.admin.begin() as conn:
+        destroyed = conn.execute(
+            text(
+                "SELECT destroyed_at FROM cp_lane3.e10_destructions "
+                "WHERE receipt_ref = :r"
+            ),
+            {"r": receipt.receipt_ref},
+        ).scalar_one()
+    assert destroyed <= held.acquired_at
+    assert held.acquired_at.microsecond == 0
+
+
+def _raw_release(
+    db: Any,
+    store: Any,
+    fx: Any,
+    held: Any,
+    *,
+    mutate: Any = None,
+    raw: bytes | None = None,
+    host_mutated: bool = False,
+    record_released_at: Any = None,
+) -> str:
+    import hashlib
+    import json
+    from datetime import datetime
+
+    release = fx.make_release(store, held)
+    document = release.as_document()
+    if mutate is not None:
+        mutate(document)
+    data = (
+        raw
+        if raw is not None
+        else json.dumps(
+            document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode()
+    )
+    conn = store._connection()
+    try:
+        return str(
+            conn.execute(
+                text(
+                    "SELECT cp_lane3.release(CAST(:id AS uuid), :b, :d, :ld, :by, "
+                    ":ctl, :at, :m)"
+                ),
+                {
+                    "id": held.handle,
+                    "b": data,
+                    "d": "sha256:" + hashlib.sha256(data).hexdigest(),
+                    "ld": release.lease_digest,
+                    "by": release.released_by.subject,
+                    "ctl": str(release.controller_identity_fingerprint),
+                    "at": record_released_at
+                    or datetime.fromisoformat(release.released_at),
+                    "m": host_mutated,
+                },
+            ).scalar_one()
+        )
+    except DBAPIError as exc:
+        conn.rollback()
+        raise LS.StoreRefused(str(exc.orig.diag.message_primary)) from None  # type: ignore[union-attr]
+
+
+def _raw_refused(code: str, call: Any) -> None:
+    try:
+        call()
+    except LS.StoreRefused as exc:
+        assert exc.code == code, f"expected {code}, got {exc.code}"
+        return
+    raise AssertionError(f"expected {code}, but nothing was refused")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d.update(lease_digest="sha256:" + "0" * 64),
+        lambda d: d.update(controller_identity_fingerprint="SHA256:" + "C" * 43),
+        lambda d: d["released_by"].update(subject="repo:someone/else:ref:x"),
+        lambda d: d.update(authorization_run_id="run-other"),
+        lambda d: d.update(released_at="2001-01-01T00:00:00+00:00"),
+        lambda d: d.pop("released_by"),
+    ],
+    ids=[
+        "lease_digest",
+        "controller",
+        "released_by",
+        "authorization_run",
+        "released_at",
+        "released_by_absent",
+    ],
+)
+def test_m1_a_release_document_that_disagrees_with_the_parameters_is_refused(
+    lane3_cases: Any, mutate: Any
+) -> None:
+    db = lane3_cases.new()
+    store, fx = db.make_store(), db.fixtures()
+    held = _acquire(db, store, fx)
+    _raw_refused(
+        "release-not-this-lease",
+        lambda: _raw_release(db, store, fx, held, mutate=mutate),
+    )
+    with db.admin.begin() as conn:
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM cp_lane3.host_lease_releases")
+            ).scalar_one()
+            == 0
+        )
+    assert store.standing("host-a") is LS.LeaseStanding.HELD
+
+
+@pytest.mark.parametrize("raw", [b"not json", b"\xff\xfe", b"[]", b"null"])
+def test_m1_unparseable_release_bytes_are_refused_with_the_typed_code(
+    lane3_cases: Any, raw: bytes
+) -> None:
+    db = lane3_cases.new()
+    store, fx = db.make_store(), db.fixtures()
+    held = _acquire(db, store, fx)
+    _raw_refused(
+        "release-not-this-lease",
+        lambda: _raw_release(db, store, fx, held, raw=raw),
+    )
+
+
+def test_m1_host_mutated_false_needs_a_reusable_closure_and_a_faithful_document_passes(
+    lane3_cases: Any,
+) -> None:
+    db = lane3_cases.new()
+    store, fx = db.make_store(), db.fixtures()
+    held = _acquire(db, store, fx)
+    for closure in ("inspection_required", "destroy_only", "", None):
+        _raw_refused(
+            "release-not-this-lease",
+            lambda closure=closure: _raw_release(
+                db,
+                store,
+                fx,
+                held,
+                mutate=lambda d: d.update(closure=closure),
+                host_mutated=False,
+            ),
+        )
+    assert store.standing("host-a") is LS.LeaseStanding.HELD
+    # a mutated host may carry a restricted closure
+    assert _raw_release(
+        db,
+        store,
+        fx,
+        held,
+        mutate=lambda d: d.update(closure="inspection_required"),
+        host_mutated=True,
+    )
+    assert store.standing("host-a") is LS.LeaseStanding.RELEASED

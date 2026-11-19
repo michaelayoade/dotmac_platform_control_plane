@@ -43,6 +43,7 @@ from sqlalchemy.exc import (
 from vendor_cp.deployment import consumption_role_spec as consumption_spec
 from vendor_cp.deployment import consumption_scope as scope
 from vendor_cp.deployment import consumption_watchdog as watchdog
+from vendor_cp.deployment import lane3_store_integrity as integrity
 from vendor_cp.deployment import lease_role_check as role_check
 from vendor_cp.deployment import lease_role_spec as lease_spec
 from vendor_cp.deployment.target_refusals import FoundationBindingsUnavailable
@@ -63,7 +64,7 @@ def _support() -> Any:
 
 #: sha256 of `pg_get_functiondef('cp_lane3.store_now()')` as the migration creates it.
 STORE_NOW_DEFINITION_SHA256 = (
-    "cd378527b5e17886a5ce8af1bb01389a12ccbfe97c54ca2ce3e3d52e68fc352f"
+    "a24607462886a8a2aece5779354304e2f786ae706db0e9c8d1831eb4b82f9cc6"
 )
 LANE3_TABLES = (
     "e10_destructions",
@@ -824,6 +825,29 @@ def test_the_lease_proof_refuses_each_way_the_role_could_be_widened(case: Any) -
     refused(role, "lease-role-bound-elsewhere")
 
 
+def test_the_lease_proof_requires_connect_on_the_database_it_is_checked_in(
+    case: Any,
+) -> None:
+    """PUBLIC holds CONNECT by default, so a hardened cluster that revokes it makes
+    a role that is otherwise perfect unable to connect: the proof must say so."""
+    role = _create_lease_role(case)
+    _prove(case, role)
+    with case.admin.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        database = conn.exec_driver_sql("SELECT current_database()").scalar_one()
+        conn.exec_driver_sql(f'REVOKE CONNECT ON DATABASE "{database}" FROM PUBLIC')
+        assert (
+            conn.exec_driver_sql(
+                f"SELECT has_database_privilege('{role}', '{database}', 'CONNECT')"
+            ).scalar_one()
+            is False
+        )
+        with pytest.raises(role_check.LeaseRoleRefused) as caught:
+            _prove(case, role)
+        assert caught.value.code == "lease-role-cannot-connect"
+        conn.exec_driver_sql(f'GRANT CONNECT ON DATABASE "{database}" TO "{role}"')
+    _prove(case, role)
+
+
 def test_revocation_leaves_zero_role_session_and_grant_and_the_watchdog_does_it_too(
     case: Any,
 ) -> None:
@@ -873,3 +897,284 @@ def test_the_hba_block_is_the_designs_and_only_the_tunnel_source_is_accepted() -
     )
     assert [line.split()[0] for line in block] == ["hostssl", "host", "local"]
     assert os.linesep not in "".join(block)
+
+
+# ── LOW: every function pins its search_path; one binding per role ───────────
+
+
+def test_every_function_pins_search_path_with_pg_catalog_first_and_pg_temp_last(
+    lane3_template: str, case: Any
+) -> None:
+    """Including `store_now` and the SECURITY INVOKER trigger functions, which the
+    first cut left to the caller's path. Read on the TEMPLATE (the case replaces
+    `store_now`)."""
+    engine = _template_engine(case, lane3_template)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT p.proname, p.proconfig FROM pg_proc p JOIN pg_namespace "
+                    "n ON n.oid = p.pronamespace WHERE n.nspname = 'cp_lane3'"
+                )
+            ).all()
+    finally:
+        engine.dispose()
+    assert len(rows) == len(INTERNAL_FUNCTIONS) + len(lease_spec.LEASE_FUNCTIONS)
+    for name, config in rows:
+        paths = [c for c in (config or []) if c.startswith("search_path=")]
+        assert len(paths) == 1, name
+        parts = [part.strip() for part in paths[0].split("=", 1)[1].split(",")]
+        assert parts[0] == "pg_catalog" and parts[-1] == "pg_temp", name
+
+
+def test_a_role_can_be_bound_once_and_the_constraint_names_the_role(
+    lane3_cases: Any,
+) -> None:
+    """`single_binding=True` keeps the migration's UNIQUE(role_name); the other
+    cases relax it for the multi-run conformance handle (see the harness)."""
+    db = lane3_cases.new(single_binding=True)
+    with db.admin.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO cp_lane3.run_bindings (role_name, host_id, "
+                "authorization_run, valid_until, recorded_by) VALUES "
+                "('role_one', 'host-a', 'run-1', now() + interval '1 hour', 'test')"
+            )
+        )
+    for host, run in (("host-a", "run-2"), ("host-b", "run-1"), ("host-a", "run-1")):
+        with pytest.raises(IntegrityError) as caught, db.admin.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO cp_lane3.run_bindings (role_name, host_id, "
+                    "authorization_run, valid_until, recorded_by) VALUES "
+                    "('role_one', :h, :r, now() + interval '1 hour', 'test')"
+                ),
+                {"h": host, "r": run},
+            )
+        assert getattr(caught.value.orig, "sqlstate", None) == "23505"
+
+
+# ── M5: the in-migration privilege read-back covers the whole schema ─────────
+
+
+def _migration() -> Any:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "alembic"
+        / "versions"
+        / ("v023_lane3_store.py")
+    )
+    spec = importlib.util.spec_from_file_location("v023_lane3_store_for_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ACL_QUERIES = (
+    "SCHEMA_ACL_SQL",
+    "RELATION_ACL_SQL",
+    "COLUMN_ACL_SQL",
+    "FUNCTION_ACL_SQL",
+    "DEFAULT_ACL_SQL",
+)
+
+
+def _acl_counts(db: Any) -> dict[str, int]:
+    module = _migration()
+    with db.admin.begin() as conn:
+        return {
+            name: int(conn.exec_driver_sql(getattr(module, name)).scalar_one())
+            for name in ACL_QUERIES
+        }
+
+
+def test_the_migrations_privilege_read_back_is_zero_on_the_migrated_schema(
+    case: Any,
+) -> None:
+    """The migration already ran these in its own transaction (it would have
+    raised); on a clone they are zero too, and name every object kind."""
+    assert _acl_counts(case) == dict.fromkeys(ACL_QUERIES, 0)
+
+
+@pytest.mark.parametrize(
+    ("statement", "query"),
+    [
+        ("GRANT USAGE ON SCHEMA cp_lane3 TO platform_api", "SCHEMA_ACL_SQL"),
+        ("GRANT USAGE ON SCHEMA cp_lane3 TO PUBLIC", "SCHEMA_ACL_SQL"),
+        (
+            "GRANT SELECT ON cp_lane3.e10_receipts TO outbox_dispatcher_probe",
+            "RELATION_ACL_SQL",
+        ),
+        ("GRANT SELECT ON cp_lane3.e10_receipts TO PUBLIC", "RELATION_ACL_SQL"),
+        (
+            "GRANT USAGE ON SEQUENCE cp_lane3.e10_receipts_seq_seq TO PUBLIC",
+            "RELATION_ACL_SQL",
+        ),
+        (
+            "GRANT SELECT (host_id) ON cp_lane3.e10_receipts TO outbox_dispatcher_probe",
+            "COLUMN_ACL_SQL",
+        ),
+        (
+            "GRANT EXECUTE ON FUNCTION cp_lane3.store_now() TO outbox_dispatcher_probe",
+            "FUNCTION_ACL_SQL",
+        ),
+        (
+            "GRANT EXECUTE ON FUNCTION cp_lane3.covers(uuid, text) TO PUBLIC",
+            "FUNCTION_ACL_SQL",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA cp_lane3 GRANT SELECT ON TABLES TO PUBLIC",
+            "DEFAULT_ACL_SQL",
+        ),
+    ],
+)
+def test_the_privilege_read_back_sees_every_kind_of_leak(
+    lane3_cases: Any, statement: str, query: str
+) -> None:
+    db = lane3_cases.new()
+    with db.admin.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = "
+            "'outbox_dispatcher_probe') THEN CREATE ROLE outbox_dispatcher_probe; "
+            "END IF; END $$"
+        )
+        conn.exec_driver_sql(statement)
+    counts = _acl_counts(db)
+    assert counts[query] >= 1, counts
+    for other, count in counts.items():
+        if other != query:
+            assert count == 0, (other, counts)
+
+
+def test_a_fresh_function_left_at_the_postgres_default_would_be_counted(
+    lane3_cases: Any,
+) -> None:
+    """The default of a function is PUBLIC EXECUTE (`proacl` NULL): the read-back
+    expands NULL through `acldefault`, so an un-revoked function cannot hide."""
+    db = lane3_cases.new()
+    with db.admin.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE FUNCTION cp_lane3.stray() RETURNS int LANGUAGE sql AS 'SELECT 1'"
+        )
+    assert _acl_counts(db)["FUNCTION_ACL_SQL"] >= 1
+
+
+# ── M6: every function body and trigger is pinned, in CI and for E10a ────────
+
+
+def _template_engine(case: Any, template: str) -> Any:
+    from sqlalchemy.engine import make_url
+
+    return create_engine(make_url(str(case.admin.url)).set(database=template))
+
+
+def _violations(engine: Any) -> tuple[str, ...]:
+    with engine.connect() as conn:
+        return integrity.check_store_integrity(
+            lambda sql: conn.execute(text(sql)).all()
+        )
+
+
+def test_the_migrated_store_is_exactly_as_pinned(
+    lane3_template: str, case: Any
+) -> None:
+    engine = _template_engine(case, lane3_template)
+    try:
+        assert _violations(engine) == ()
+    finally:
+        engine.dispose()
+
+
+def test_the_pins_name_every_function_and_trigger_the_catalogue_holds(
+    lane3_template: str, case: Any
+) -> None:
+    engine = _template_engine(case, lane3_template)
+    try:
+        with engine.connect() as conn:
+            functions = {
+                r[0]
+                for r in conn.execute(
+                    text(
+                        "SELECT p.proname || '(' || oidvectortypes(p.proargtypes) "
+                        "|| ')' FROM pg_proc p JOIN pg_namespace n ON n.oid = "
+                        "p.pronamespace WHERE n.nspname = 'cp_lane3'"
+                    )
+                )
+            }
+            triggers = {
+                r[0]
+                for r in conn.execute(
+                    text(
+                        "SELECT t.tgname FROM pg_trigger t JOIN pg_class c ON "
+                        "c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = "
+                        "c.relnamespace WHERE n.nspname = 'cp_lane3' "
+                        "AND NOT t.tgisinternal"
+                    )
+                )
+            }
+    finally:
+        engine.dispose()
+    assert functions == set(integrity.FUNCTION_DEFINITION_SHA256)
+    assert triggers == set(integrity.TRIGGERS)
+    assert {state for _, state, _ in integrity.TRIGGERS.values()} == {"O"}
+    assert integrity.FUNCTION_DEFINITION_SHA256["store_now()"] == (
+        STORE_NOW_DEFINITION_SHA256
+    )
+
+
+def test_the_integrity_check_refuses_a_changed_body_a_disabled_trigger_and_extras(
+    lane3_cases: Any,
+) -> None:
+    db = lane3_cases.new()
+    # The case database replaces `store_now` with the frozen clock, so that one
+    # violation is the baseline here (the template test above proves it clean).
+    base = {"function-changed:store_now()"}
+    assert set(_violations(db.admin)) == base
+    with db.admin.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE OR REPLACE FUNCTION cp_lane3.stamp_receipt_time() RETURNS trigger "
+            "LANGUAGE plpgsql SET search_path = pg_catalog, cp_lane3, pg_temp "
+            "AS $$ BEGIN RETURN NEW; END $$"
+        )
+    assert set(_violations(db.admin)) == base | {
+        "function-changed:stamp_receipt_time()"
+    }
+    with db.admin.begin() as conn:
+        conn.exec_driver_sql(
+            "ALTER TABLE cp_lane3.e10_receipts "
+            "DISABLE TRIGGER trg_e10_receipts_append_only"
+        )
+    assert "trigger-not-enabled:trg_e10_receipts_append_only" in _violations(db.admin)
+    with db.admin.begin() as conn:
+        conn.exec_driver_sql(
+            "ALTER TABLE cp_lane3.e10_receipts "
+            "ENABLE ALWAYS TRIGGER trg_e10_receipts_append_only"
+        )
+        conn.exec_driver_sql(
+            "CREATE FUNCTION cp_lane3.stray() RETURNS int LANGUAGE sql AS 'SELECT 1'"
+        )
+        conn.exec_driver_sql(
+            "CREATE TRIGGER trg_stray BEFORE INSERT ON cp_lane3.e10_receipts "
+            "FOR EACH ROW EXECUTE FUNCTION cp_lane3.stamp_receipt_time()"
+        )
+    found = set(_violations(db.admin))
+    assert {
+        "trigger-not-enabled:trg_e10_receipts_append_only",
+        "function-unpinned:stray()",
+        "trigger-unpinned:trg_stray",
+    } <= found
+    with db.admin.begin() as conn:
+        conn.exec_driver_sql("DROP TRIGGER trg_stray ON cp_lane3.e10_receipts")
+        conn.exec_driver_sql(
+            "DROP TRIGGER trg_e10_receipts_stamp ON cp_lane3.e10_receipts"
+        )
+    found = set(_violations(db.admin))
+    assert "trigger-missing:trg_e10_receipts_stamp" in found
+
+
+def test_the_integrity_check_is_exposed_for_e10a_and_refuses_without_a_dsn(
+    capsys: Any,
+) -> None:
+    assert integrity.main([], {}) == 2
+    assert integrity.ADMIN_DSN_ENV in capsys.readouterr().err

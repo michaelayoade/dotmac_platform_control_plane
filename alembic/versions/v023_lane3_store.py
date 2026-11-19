@@ -26,6 +26,13 @@ any existing code path; the migration only adds objects.
   exceptions guarded by their own triggers: the one-time NULL -> value bind of a
   lease's document, and the `host_current_lease` row-lock row.
 
+* **The migration proves its own privileges.** Before it commits it reads the
+  catalogue back: the schema, every table and sequence, every column and every
+  function must carry NO ACL entry other than their owner's (the migration grants
+  nothing: the lease role is granted by the ceremony), and no `pg_default_acl`
+  rule may name the schema. `lane3_store_integrity` pins every function body and
+  trigger afterwards, in CI and for the E10a read-back.
+
 ## Refusal codes
 
 A function refuses with `RAISE EXCEPTION '<code>' USING ERRCODE = 'L3001'`.
@@ -72,7 +79,8 @@ def _append_only(table: str) -> tuple[str, ...]:
 
 CLOCK_SQL = (
     "CREATE FUNCTION cp_lane3.store_now() RETURNS timestamptz "
-    "LANGUAGE sql VOLATILE AS $$ SELECT clock_timestamp() $$",
+    "LANGUAGE sql VOLATILE SET search_path = pg_catalog, cp_lane3, pg_temp "
+    "AS $$ SELECT clock_timestamp() $$",
 )
 
 # ── tables ───────────────────────────────────────────────────────────────────
@@ -119,7 +127,7 @@ TABLES_SQL = (
     " recorded_by text NOT NULL CHECK (recorded_by ~ '^[\\x21-\\x7e]{1,120}$'),"
     " CHECK ((dispatch_id IS NULL) = (installed_attestation_digest IS NULL)))",
     "CREATE TABLE cp_lane3.run_bindings ("
-    " role_name text NOT NULL CHECK (role_name ~ '^[a-z][a-z0-9_]{2,53}$'),"
+    " role_name text NOT NULL UNIQUE CHECK (role_name ~ '^[a-z][a-z0-9_]{2,53}$'),"
     " host_id text NOT NULL"
     "  CHECK (host_id ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'),"
     " authorization_run text NOT NULL CHECK (authorization_run ~ '^[\\x21-\\x7e]{1,255}$'),"
@@ -162,21 +170,26 @@ TABLES_SQL = (
 
 TRIGGER_FUNCTIONS_SQL = (
     "CREATE FUNCTION cp_lane3.stamp_receipt_time() RETURNS trigger "
-    "LANGUAGE plpgsql AS $$ BEGIN "
+    "LANGUAGE plpgsql SET search_path = pg_catalog, cp_lane3, pg_temp "
+    "AS $$ BEGIN "
     "NEW.recorded_at := cp_lane3.store_now(); RETURN NEW; END $$",
     "CREATE FUNCTION cp_lane3.stamp_destruction_time() RETURNS trigger "
-    "LANGUAGE plpgsql AS $$ BEGIN "
+    "LANGUAGE plpgsql SET search_path = pg_catalog, cp_lane3, pg_temp "
+    "AS $$ BEGIN "
     "NEW.destroyed_at := cp_lane3.store_now(); RETURN NEW; END $$",
     "CREATE FUNCTION cp_lane3.stamp_binding_time() RETURNS trigger "
-    "LANGUAGE plpgsql AS $$ BEGIN "
+    "LANGUAGE plpgsql SET search_path = pg_catalog, cp_lane3, pg_temp "
+    "AS $$ BEGIN "
     "NEW.created_at := cp_lane3.store_now(); RETURN NEW; END $$",
     "CREATE FUNCTION cp_lane3.stamp_release_time() RETURNS trigger "
-    "LANGUAGE plpgsql AS $$ BEGIN "
+    "LANGUAGE plpgsql SET search_path = pg_catalog, cp_lane3, pg_temp "
+    "AS $$ BEGIN "
     "NEW.released_at := cp_lane3.store_now(); RETURN NEW; END $$",
     # The one lease update: NULL -> value for the document and its digest, and
     # nothing else. A second bind, or any other column, is refused.
     "CREATE FUNCTION cp_lane3.guard_lease_update() RETURNS trigger "
-    "LANGUAGE plpgsql AS $$ BEGIN "
+    "LANGUAGE plpgsql SET search_path = pg_catalog, cp_lane3, pg_temp "
+    "AS $$ BEGIN "
     "IF OLD.lease_bytes IS NULL AND OLD.lease_digest IS NULL "
     "AND NEW.lease_bytes IS NOT NULL AND NEW.lease_digest IS NOT NULL "
     "AND NEW.lease_id = OLD.lease_id AND NEW.host_id = OLD.host_id "
@@ -191,12 +204,14 @@ TRIGGER_FUNCTIONS_SQL = (
     "bind is permitted' USING ERRCODE = 'L3002'; END $$",
     # The row-lock row: only its pointer moves, and it is never removed.
     "CREATE FUNCTION cp_lane3.guard_current_lease_update() RETURNS trigger "
-    "LANGUAGE plpgsql AS $$ BEGIN "
+    "LANGUAGE plpgsql SET search_path = pg_catalog, cp_lane3, pg_temp "
+    "AS $$ BEGIN "
     "IF NEW.host_id = OLD.host_id THEN RETURN NEW; END IF; "
     "RAISE EXCEPTION 'host_current_lease: the host key is immutable' "
     "USING ERRCODE = 'L3002'; END $$",
     "CREATE FUNCTION cp_lane3.forbid_current_lease_removal() RETURNS trigger "
-    "LANGUAGE plpgsql AS $$ BEGIN "
+    "LANGUAGE plpgsql SET search_path = pg_catalog, cp_lane3, pg_temp "
+    "AS $$ BEGIN "
     "RAISE EXCEPTION 'host_current_lease rows are never removed' "
     "USING ERRCODE = 'L3002'; END $$",
 )
@@ -288,7 +303,11 @@ _ENROLMENT_ROW = (
 _IS_CURRENT_ROOT = (
     "SELECT 1 FROM mod_deploy.attestation_current_roots c "
     "WHERE c.custody_domain = 'host_attester' AND c.subject = v_r.host_id "
-    "AND c.current_fingerprint = v_r.incarnation_fingerprint"
+    "AND c.current_fingerprint = v_r.incarnation_fingerprint "
+    # a view row is not enough: a fingerprint any closure names is closed
+    # (revoked or superseded), whatever the view says
+    "AND NOT EXISTS (SELECT 1 FROM mod_deploy.attestation_fingerprint_closures f "
+    "WHERE f.fingerprint = v_r.incarnation_fingerprint)"
 )
 
 LEASE_FUNCTIONS_SQL = (
@@ -342,7 +361,7 @@ LEASE_FUNCTIONS_SQL = (
     "THEN 'reprovision-receipt-' ELSE 'e10-receipt-' END; "
     "v_r record; v_d record; "
     "v_pr record; v_ref text; v_new uuid; "
-    "v_at timestamptz; "
+    "v_at timestamptz; v_acq timestamptz; "
     "BEGIN "
     "IF p_ttl IS NULL OR p_ttl < 1 OR p_ttl > 3600 THEN "
     + _refuse("lease-ttl-invalid")
@@ -357,6 +376,9 @@ LEASE_FUNCTIONS_SQL = (
     "SELECT hc.lease_id INTO v_prev FROM cp_lane3.host_current_lease hc "
     "WHERE hc.host_id = p_host FOR UPDATE; "
     "v_now := cp_lane3.store_now(); "
+    # the lease stores whole seconds, and E9 requires destroyed <= acquired: judge
+    # the destruction against the SAME truncated instant that is stored
+    "v_acq := date_trunc('second', v_now); "
     "IF v_prev IS NOT NULL THEN "
     "SELECT * INTO v_pl FROM cp_lane3.host_leases l WHERE l.lease_id = v_prev; "
     "SELECT * INTO v_rel FROM cp_lane3.host_lease_releases x "
@@ -394,7 +416,7 @@ LEASE_FUNCTIONS_SQL = (
     "IF v_prev IS NOT NULL AND v_mutated AND NOT v_marker THEN "
     + _refuse("lease-host-mutated")
     + " END IF; "
-    "IF v_at IS NULL OR v_at > v_now THEN "
+    "IF v_at IS NULL OR v_at > v_acq THEN "
     "RAISE EXCEPTION USING MESSAGE = v_pre || 'not-destroyed', ERRCODE = 'L3001'; "
     "END IF; "
     # a marker reopens a host only for a DIFFERENT, NEWER incarnation than the
@@ -427,8 +449,8 @@ LEASE_FUNCTIONS_SQL = (
     "controller_identity, workload_principal, e10_receipt_ref, "
     "reprovision_receipt_ref, acquired_at, expires_at, ttl_seconds) "
     "VALUES (v_new, p_host, p_run, p_controller, p_principal, v_ref, "
-    "CASE WHEN v_marker THEN v_ref END, date_trunc('second', v_now), "
-    "date_trunc('second', v_now) + p_ttl * interval '1 second', p_ttl); "
+    "CASE WHEN v_marker THEN v_ref END, v_acq, "
+    "v_acq + p_ttl * interval '1 second', p_ttl); "
     "UPDATE cp_lane3.host_current_lease SET lease_id = v_new WHERE host_id = p_host; "
     "RETURN QUERY SELECT l.lease_id, l.acquired_at, l.expires_at "
     "FROM cp_lane3.host_leases l WHERE l.lease_id = v_new; END $$",
@@ -484,7 +506,7 @@ LEASE_FUNCTIONS_SQL = (
     "p_record_released_at timestamptz, p_host_mutated boolean) RETURNS text "
     + _DEFINER
     + " AS $$ "
-    "DECLARE v_l record; v_now timestamptz; "
+    "DECLARE v_l record; v_now timestamptz; v_doc jsonb; v_ok boolean; "
     "BEGIN "
     "SELECT * INTO v_l FROM cp_lane3.host_leases WHERE lease_id = p_lease; "
     "IF NOT FOUND THEN " + _refuse("lease-role-unbound") + " END IF; "
@@ -504,6 +526,21 @@ LEASE_FUNCTIONS_SQL = (
     + _refuse("release-not-this-lease")
     + " END IF; "
     "IF p_digest IS DISTINCT FROM 'sha256:' || encode(sha256(p_bytes), 'hex') THEN "
+    + _refuse("release-not-this-lease")
+    + " END IF; "
+    # The stored document is what Control keeps as evidence, so it is parsed here
+    # as `bind_document` parses the lease's, and must agree with the parameters
+    # the row records. An unparseable document is not this lease's release.
+    "BEGIN v_doc := convert_from(p_bytes, 'UTF8')::jsonb; "
+    "v_ok := v_doc ->> 'lease_digest' IS NOT DISTINCT FROM v_l.lease_digest "
+    "AND v_doc ->> 'authorization_run_id' IS NOT DISTINCT FROM v_l.authorization_run "
+    "AND v_doc ->> 'controller_identity_fingerprint' IS NOT DISTINCT FROM p_controller "
+    "AND v_doc -> 'released_by' ->> 'subject' IS NOT DISTINCT FROM p_released_by "
+    "AND (v_doc ->> 'released_at')::timestamptz IS NOT DISTINCT FROM p_record_released_at; "
+    "EXCEPTION WHEN others THEN v_ok := false; END; "
+    "IF v_ok IS NOT TRUE THEN " + _refuse("release-not-this-lease") + " END IF; "
+    # a release that says the host was NOT mutated must also say it is reusable
+    "IF NOT p_host_mutated AND v_doc ->> 'closure' IS DISTINCT FROM 'reusable' THEN "
     + _refuse("release-not-this-lease")
     + " END IF; "
     "IF abs(extract(epoch FROM (p_record_released_at - v_now))) > 60 THEN "
@@ -573,6 +610,48 @@ INTERNAL_FUNCTIONS = (
     "store_now()",
 )
 
+# ── the privilege read-back ──────────────────────────────────────────────────
+#
+# Every query counts ACL entries whose grantee is anybody but the object's owner
+# (PUBLIC is grantee 0, so it is counted). A NULL ACL is the type's DEFAULT, which
+# `acldefault` expands, so an object that was never touched is judged as its
+# default is: functions default to PUBLIC EXECUTE, which is why the migration
+# revokes it. The intended grants are none.
+SCHEMA_ACL_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_namespace n, "
+    "LATERAL pg_catalog.aclexplode(COALESCE(n.nspacl, "
+    "pg_catalog.acldefault('n'::\"char\", n.nspowner))) a "
+    "WHERE n.nspname = 'cp_lane3' AND a.grantee <> n.nspowner"
+)
+RELATION_ACL_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_class c "
+    "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace, "
+    "LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault("
+    "CASE WHEN c.relkind = 'S' THEN 's'::\"char\" ELSE 'r'::\"char\" END, "
+    "c.relowner))) a "
+    "WHERE n.nspname = 'cp_lane3' AND a.grantee <> c.relowner"
+)
+COLUMN_ACL_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_attribute t "
+    "JOIN pg_catalog.pg_class c ON c.oid = t.attrelid "
+    "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace, "
+    "LATERAL pg_catalog.aclexplode(t.attacl) a "
+    "WHERE n.nspname = 'cp_lane3' AND t.attacl IS NOT NULL "
+    "AND a.grantee <> c.relowner"
+)
+FUNCTION_ACL_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_proc p "
+    "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace, "
+    "LATERAL pg_catalog.aclexplode(COALESCE(p.proacl, "
+    "pg_catalog.acldefault('f'::\"char\", p.proowner))) a "
+    "WHERE n.nspname = 'cp_lane3' AND a.grantee <> p.proowner"
+)
+DEFAULT_ACL_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_default_acl d "
+    "JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace "
+    "WHERE n.nspname = 'cp_lane3'"
+)
+
 
 def upgrade() -> None:
     connection = op.get_bind()
@@ -593,25 +672,23 @@ def upgrade() -> None:
         connection.exec_driver_sql(
             f"REVOKE ALL ON FUNCTION cp_lane3.{signature} FROM PUBLIC"
         )
-    # Retained evidence: no online role holds anything in this schema, and the
-    # read-back is in the same transaction (issuing a REVOKE proves a statement
-    # ran, not that a privilege is gone).
-    leaked = connection.exec_driver_sql(
-        "SELECT count(*) FROM pg_catalog.pg_class c "
-        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-        "CROSS JOIN pg_catalog.pg_roles r "
-        "WHERE n.nspname = 'cp_lane3' AND c.relkind IN ('r', 'S') "
-        "AND r.rolname IN ('platform_api', 'app_user') "
-        "AND (has_table_privilege(r.oid, c.oid, 'SELECT') "
-        "OR has_table_privilege(r.oid, c.oid, 'INSERT') "
-        "OR has_table_privilege(r.oid, c.oid, 'UPDATE') "
-        "OR has_table_privilege(r.oid, c.oid, 'DELETE') "
-        "OR has_table_privilege(r.oid, c.oid, 'TRUNCATE'))"
-    ).scalar_one()
-    if leaked:
-        raise RuntimeError(
-            "v023_lane3_store: an online role holds a privilege in cp_lane3"
-        )
+    # Retained evidence: nothing in this schema is reachable by anybody but its
+    # owner, and the read-back is in the same transaction (issuing a REVOKE proves
+    # a statement ran, not that a privilege is gone). The migration grants NOTHING:
+    # the per-run lease role is granted by the E6 ceremony, never here, so the list
+    # of intended grants is empty.
+    for sql, message in (
+        (SCHEMA_ACL_SQL, "an ACL entry other than the owner's on the schema"),
+        (
+            RELATION_ACL_SQL,
+            "an ACL entry other than the owner's on a table or sequence",
+        ),
+        (COLUMN_ACL_SQL, "a column ACL entry other than the owner's"),
+        (FUNCTION_ACL_SQL, "an ACL entry other than the owner's on a function"),
+        (DEFAULT_ACL_SQL, "a default-privilege rule names the schema"),
+    ):
+        if connection.exec_driver_sql(sql).scalar_one():
+            raise RuntimeError(f"v023_lane3_store: {message}")
 
 
 def downgrade() -> None:

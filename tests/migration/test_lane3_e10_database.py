@@ -497,6 +497,43 @@ def test_an_installed_attestation_that_is_not_this_incarnations_is_refused(
     assert _count(db, "SELECT count(*) FROM cp_lane3.e10_destructions") == 0
 
 
+def test_h1_step_eight_with_foundation_absent_is_a_clean_refusal_and_writes_nothing(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1 (a RULING is pending, so this pins today's behaviour and chooses no fix):
+    with Foundation off the import path, a destruction that carries an installed
+    attestation is refused `foundation-unavailable`, and nothing was written, not
+    even inside the open transaction (the refusal precedes the INSERT)."""
+    outcome = _enrol(db, "host-a", 1, seed="host-a-1")
+    # `None` in `sys.modules` makes every import of the name raise ImportError,
+    # whether or not the real package is installed in this environment.
+    for name in (
+        "dotmac_deployment_foundation",
+        "dotmac_deployment_foundation.errors",
+        "dotmac_deployment_foundation.trusted_host_source",
+    ):
+        monkeypatch.setitem(sys.modules, name, None)
+    with pytest.raises(ImportError):
+        import dotmac_deployment_foundation.errors  # noqa: F401
+    with pytest.raises(e10.E10Refused) as refused:
+        e10.record_destruction(
+            db,
+            {
+                "receipt_ref": outcome.receipt_ref,
+                "evidence_digest": "sha256:" + "b" * 64,
+                "recorded_by": "operator",
+                "installed": {"any": "mapping"},
+            },
+        )
+    assert refused.value.code == "foundation-unavailable"
+    # no write, even before the transaction is rolled back
+    assert _count(db, "SELECT count(*) FROM cp_lane3.e10_destructions") == 0
+    db.rollback()
+    assert _count(db, "SELECT count(*) FROM cp_lane3.e10_destructions") == 0
+    # the destroy-only form never needed Foundation and is unaffected
+    assert _destroy_only(db, outcome.receipt_ref) is not None
+
+
 def test_an_installed_attestation_signed_by_another_key_is_refused(db: Session) -> None:
     _foundation_or_skip()
     outcome = _enrol(db, "host-a", 1, seed="host-a-1")
@@ -884,6 +921,34 @@ def test_the_host_facts_are_read_from_the_receipt_and_must_be_the_current_root(
             db, receipt_ref="e10-00000000-0000-0000-0000-000000000000"
         )
     assert refused.value.code == "receipt-unknown"
+
+
+def test_m2_a_closure_naming_the_fingerprint_makes_the_receipt_not_current(
+    db: Session,
+) -> None:
+    """The view still lists the fingerprint, but a closure names it: closed."""
+    first = _enrol(db, "host-a", 1)
+    e10.receipt_host_facts(db, receipt_ref=first.receipt_ref)  # current: accepted
+    db.execute(
+        text(
+            "INSERT INTO mod_deploy.attestation_fingerprint_closures "
+            "(fingerprint, closure_kind, closed_at, closure_authority) "
+            "VALUES (:f, 'revoked', now(), 'test')"
+        ),
+        {"f": first.fingerprint},
+    )
+    db.commit()
+    still_listed = db.execute(
+        text(
+            "SELECT count(*) FROM mod_deploy.attestation_current_roots "
+            "WHERE current_fingerprint = :f"
+        ),
+        {"f": first.fingerprint},
+    ).scalar_one()
+    assert still_listed == 1
+    with pytest.raises(e10.E10Refused) as refused:
+        e10.receipt_host_facts(db, receipt_ref=first.receipt_ref)
+    assert refused.value.code == "receipt-not-current-root"
 
 
 def test_the_ensure_audit_registry_helper_is_idempotent() -> None:

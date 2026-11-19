@@ -290,7 +290,9 @@ class Lane3CaseFactory:
         self._server = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
         self._cases: list[tuple[str, object, list[str]]] = []
 
-    def new(self, *, registry: object | None = None) -> Any:
+    def new(
+        self, *, registry: object | None = None, single_binding: bool = False
+    ) -> Any:
         from datetime import UTC, datetime
 
         from vendor_cp.deployment import lane3_e10
@@ -314,6 +316,7 @@ class Lane3CaseFactory:
             url_for_role=lambda role: _url_for(self._url, name, user=role),
             registry=registry or lane3_e10.ControlRegistry(),
             clock_start=datetime.now(UTC),
+            single_binding=single_binding,
         )
         self._cases.append((name, case, case.roles))
         return case

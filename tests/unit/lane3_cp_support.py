@@ -235,6 +235,7 @@ class CaseDatabase:
         url_for_role: Callable[[str], str],
         registry: Any,
         clock_start: datetime,
+        single_binding: bool = False,
     ) -> None:
         self.admin = admin
         self._url_for_role = url_for_role
@@ -247,6 +248,8 @@ class CaseDatabase:
         self._keys: dict[tuple[str, int], TransitKey] = {}
         self._lock = threading.RLock()
         self._install_clock()
+        if not single_binding:
+            self._relax_single_binding()
 
     @property
     def vendored(self) -> types.SimpleNamespace:
@@ -273,6 +276,25 @@ class CaseDatabase:
                     "LANGUAGE sql SECURITY DEFINER "
                     "SET search_path = pg_catalog, pg_temp "
                     "AS $$ SELECT t FROM cp_lane3_test.clock $$"
+                )
+            )
+
+    def _relax_single_binding(self) -> None:
+        """TEST HARNESS ONLY: let one role hold several bindings.
+
+        The migration says UNIQUE(role_name): a production lease role is bound to
+        ONE host and ONE run. The pinned conformance suite, though, drives several
+        hosts and runs through ONE store handle (one connection, one role), which
+        that constraint forbids by design. So a case database drops the constraint,
+        exactly as it replaces `store_now` with a frozen clock, and the constraint
+        itself is proven on a database that keeps it (`single_binding=True`, see
+        `test_lane3_store_catalogue`). The deviation is stated in the PR.
+        """
+        with self.admin.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE cp_lane3.run_bindings "
+                    "DROP CONSTRAINT run_bindings_role_name_key"
                 )
             )
 

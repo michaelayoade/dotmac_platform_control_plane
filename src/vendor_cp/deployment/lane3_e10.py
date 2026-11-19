@@ -971,7 +971,11 @@ def receipt_host_facts(db: Any, *, receipt_ref: str) -> HostFacts:
             "AND c.current_fingerprint = e.public_key_fingerprint "
             "WHERE e.id = CAST(:id AS uuid) AND e.custody_domain = 'host_attester' "
             "AND e.subject = :host AND e.public_key_fingerprint = :fp "
-            "AND e.key_custody_pointer = :pointer"
+            "AND e.key_custody_pointer = :pointer "
+            # the view alone is not trusted: a fingerprint any closure names is closed
+            "AND NOT EXISTS (SELECT 1 FROM "
+            "mod_deploy.attestation_fingerprint_closures f "
+            "WHERE f.fingerprint = e.public_key_fingerprint)"
         ),
         {
             "id": receipt["enrolment_uuid"],
