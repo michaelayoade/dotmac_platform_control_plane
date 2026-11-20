@@ -37,7 +37,7 @@ SRC = ROOT / "src"
 PACKAGE = SRC / "vendor_cp"
 
 PERMITTED_NAMERS = {
-    "vendor_cp/assembly.py",
+    "vendor_cp/composition.py",
     "vendor_cp/contracts/adapter.py",
     "vendor_cp/migrations.py",
 }
