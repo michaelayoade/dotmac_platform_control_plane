@@ -7,13 +7,9 @@ delivery will later consume.
 
 from __future__ import annotations
 
-from dotmac_kernel.features import FeatureManifest
+from dataclasses import replace
 
+from vendor_cp.allocations.declaration import declaration
 from vendor_cp.allocations.router import router
 
-feature = FeatureManifest(
-    name="allocations",
-    routers=[router],
-    core=True,
-    enabled_by_default=True,
-)
+feature = replace(declaration, routers=[router])

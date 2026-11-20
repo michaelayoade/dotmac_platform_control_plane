@@ -295,7 +295,7 @@ def test_only_the_adapter_constructs_the_provenance_type() -> None:
 def test_the_audit_vocabulary_moved_with_the_writer() -> None:
     """ADR-0008: a declared code with no consumer fails the boot, and a writer
     with an undeclared code fails the write. Both directions, in one change."""
-    manifest = (SRC / "vendor_cp" / "licensing" / "feature.py").read_text()
+    manifest = (SRC / "vendor_cp" / "licensing" / "declaration.py").read_text()
     assert f'"{TARGET_RECONCILIATION_AUDIT_ACTION}"' in manifest
     for retired in RETIRED_AUDIT_ACTIONS:
         assert f'"{retired}"' not in manifest, retired

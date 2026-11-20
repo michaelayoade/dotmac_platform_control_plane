@@ -18,13 +18,9 @@ assume it is.
 
 from __future__ import annotations
 
-from dotmac_kernel.features import FeatureManifest
+from dataclasses import replace
 
+from vendor_cp.readiness.declaration import declaration
 from vendor_cp.readiness.router import router
 
-feature = FeatureManifest(
-    name="readiness",
-    routers=[router],
-    core=True,
-    enabled_by_default=True,
-)
+feature = replace(declaration, routers=[router])

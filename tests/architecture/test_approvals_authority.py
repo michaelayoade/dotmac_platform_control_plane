@@ -57,7 +57,7 @@ PACKAGE = SRC / "vendor_cp"
 #: plus composition, which must name the manifest and the migration locator.
 PERMITTED_NAMERS = {
     "vendor_cp/approvals/adapter.py",
-    "vendor_cp/assembly.py",
+    "vendor_cp/composition.py",
     "vendor_cp/migrations.py",
 }
 

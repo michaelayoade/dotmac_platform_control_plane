@@ -406,6 +406,8 @@ def composed_distribution_maximum() -> tuple[str, str]:
 ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
     "dotmac_kernel": frozenset(
         {
+            "AuditActionRegistry",
+            "AuditActionsNotInstalledError",
             "BadRequestError",
             "Base",
             "CapabilityCatalogue",
@@ -433,6 +435,7 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
             "create_app",
             "currency",
             "hash_password",
+            "install_audit_actions",
             "models_platform",
             "settings_models",
             "uuid_pk",
@@ -440,6 +443,7 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "dotmac_kernel.audit": frozenset({"write_platform_audit_event"}),
+    "dotmac_kernel.audit_actions": frozenset({"active_audit_actions"}),
     # First shipped in 0.1.0a100, which IS the composed maximum, so it raises
     # nothing and needs no `ASSEMBLY_SYMBOL_FLOORS` entry (ADR-0016 cutover).
     "dotmac_kernel.api_documentation": frozenset(
