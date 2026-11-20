@@ -479,9 +479,9 @@ def main(
     env = os.environ if environ is None else environ
     try:
         try:
-            from vendor_cp.composition import install_process_audit_actions
+            from vendor_cp.audit_bootstrap import ensure_process_audit_actions
 
-            install_process_audit_actions()
+            ensure_process_audit_actions()
         except Exception:
             raise _refuse(
                 "the process audit vocabulary could not be installed",

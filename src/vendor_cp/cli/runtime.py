@@ -95,9 +95,9 @@ def require_version() -> str:
 def platform_db() -> Iterator[Session]:
     """The one platform session, with this assembly's write vocabulary ready."""
     try:
-        from vendor_cp.composition import install_process_audit_actions
+        from vendor_cp.audit_bootstrap import ensure_process_audit_actions
 
-        install_process_audit_actions()
+        ensure_process_audit_actions()
     except Exception:
         # Imports/configuration can include input values in their exceptions.
         # Fail before opening a session, exposing only this fixed verdict.

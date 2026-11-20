@@ -101,3 +101,19 @@ COMPOSED_DECLARATIONS: tuple[FeatureManifest | ModuleManifest, ...] = (
 def install_process_audit_actions() -> None:
     """Install all declared actions without starting the web or DB runtime."""
     install_audit_actions(AuditActionRegistry.from_manifests(COMPOSED_DECLARATIONS))
+
+
+# Retain the stateful module aliases re-exported by the web assembly, as well
+# as the declaration/bootstrap surface shared with non-web process owners.
+__all__ = [
+    "COMPOSED_DECLARATIONS",
+    "STATEFUL_MODULES",
+    "VENDOR_DECLARATIONS",
+    "approvals_module",
+    "commercial_agreements_module",
+    "deployment_control_module",
+    "entitlement_allocation_module",
+    "install_process_audit_actions",
+    "licensing_module",
+    "release_catalog_module",
+]

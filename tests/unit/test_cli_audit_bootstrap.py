@@ -326,3 +326,93 @@ def test_migration_only_url_reaches_existing_migration_owner_without_audit_boot(
         """,
         database="absent",
     )
+
+
+@pytest.mark.parametrize("registry_kind", ["empty", "partial"])
+def test_leaf_caller_registry_is_preserved_without_importing_cp_composition(
+    registry_kind: str,
+) -> None:
+    _fresh(
+        f"""
+        import builtins
+        import sys
+        import dotmac_deployment_control as control
+        from dotmac_kernel import AuditActionRegistry, install_audit_actions
+        from dotmac_kernel.audit_actions import (
+            UndeclaredAuditActionError, active_audit_actions,
+        )
+        from vendor_cp.audit_bootstrap import ensure_process_audit_actions
+        from vendor_cp.deployment import materials_producer as producer
+        registry = AuditActionRegistry.from_manifests(
+            [] if {registry_kind!r} == 'empty' else [control.module])
+        install_audit_actions(registry)
+        original_import = builtins.__import__
+        def import_module(name, *args, **kwargs):
+            if name == 'vendor_cp.composition':
+                raise AssertionError('leaf caller must not load full CP composition')
+            return original_import(name, *args, **kwargs)
+        builtins.__import__ = import_module
+        ensure_process_audit_actions()
+        assert active_audit_actions() is registry
+        action = next(iter(control.module.audit_actions))
+        if {registry_kind!r} == 'empty':
+            try:
+                active_audit_actions().require(action)
+            except UndeclaredAuditActionError:
+                pass
+            else:
+                raise AssertionError('empty registry was widened')
+        else:
+            active_audit_actions().require(action)
+        try:
+            active_audit_actions().require('canary.undeclared')
+        except UndeclaredAuditActionError:
+            pass
+        else:
+            raise AssertionError('unknown audit action was accepted')
+        calls = []
+        def session(env):
+            assert active_audit_actions() is registry
+            calls.append('session')
+            raise ValueError('stop before database')
+        producer._controller_session = session
+        argv = ['propose', '--command-id', 'canary', '--target-id',
+                '00000000-0000-0000-0000-000000000001', '--operation', 'deploy',
+                '--descriptor-digest', 'd', '--execution-plan-digest', 'e',
+                '--approval-policy-code', 'p', '--approval-policy-version', '1']
+        assert producer.main(argv, {{}}) == 2
+        assert calls == ['session']
+        assert active_audit_actions() is registry
+        assert 'vendor_cp.composition' not in sys.modules
+        assert 'dotmac_kernel.db' not in sys.modules
+        """,
+        database="absent",
+    )
+
+
+def test_unrelated_registry_error_propagates_without_composition_fallback() -> None:
+    _fresh(
+        """
+        import builtins
+        import sys
+        from vendor_cp import audit_bootstrap
+        failure = LookupError('synthetic-unrelated-registry-error')
+        def broken():
+            raise failure
+        audit_bootstrap.active_audit_actions = broken
+        original_import = builtins.__import__
+        def import_module(name, *args, **kwargs):
+            if name == 'vendor_cp.composition':
+                raise AssertionError('unrelated error triggered composition fallback')
+            return original_import(name, *args, **kwargs)
+        builtins.__import__ = import_module
+        try:
+            audit_bootstrap.ensure_process_audit_actions()
+        except LookupError as error:
+            assert error is failure
+        else:
+            raise AssertionError('unrelated registry error was swallowed')
+        assert 'vendor_cp.composition' not in sys.modules
+        """,
+        database="absent",
+    )
