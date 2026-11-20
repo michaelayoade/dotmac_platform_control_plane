@@ -478,6 +478,15 @@ def main(
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     try:
+        try:
+            from vendor_cp.composition import install_process_audit_actions
+
+            install_process_audit_actions()
+        except Exception:
+            raise _refuse(
+                "the process audit vocabulary could not be installed",
+                TargetRefusal.MATERIALS_REFUSED,
+            ) from None
         if args.action == "issue":
             from vendor_cp.deployment import transit_custody
 

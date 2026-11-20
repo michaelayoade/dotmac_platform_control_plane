@@ -9,13 +9,9 @@ route does, through `require_platform_admin`, exactly as
 
 from __future__ import annotations
 
-from dotmac_kernel.features import FeatureManifest
+from dataclasses import replace
 
+from vendor_cp.relay.withdrawal_conflicts_declaration import declaration
 from vendor_cp.relay.withdrawal_router import router
 
-feature = FeatureManifest(
-    name="withdrawal_conflicts",
-    routers=[router],
-    core=True,
-    enabled_by_default=True,
-)
+feature = replace(declaration, routers=[router])

@@ -40,13 +40,15 @@ keeps the cookie; neither credential population reaches the other.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from dotmac_kernel import (
     LocalizedText,
-    ModuleManifest,
     WebNavItem,
     WebSurfaceContribution,
 )
 
+from vendor_cp.console.declaration import declaration
 from vendor_cp.console.web import router
 
 CONSOLE_SURFACE = WebSurfaceContribution(
@@ -68,11 +70,4 @@ CONSOLE_SURFACE = WebSurfaceContribution(
     supported_ui_contract_versions=frozenset({1}),
 )
 
-feature = ModuleManifest(
-    code="console",
-    version="0.1.0",
-    contract_version=2,
-    web_surfaces=(CONSOLE_SURFACE,),
-    core=False,
-    enabled_by_default=True,
-)
+feature = replace(declaration, web_surfaces=(CONSOLE_SURFACE,))
