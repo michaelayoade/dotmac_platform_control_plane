@@ -10,10 +10,13 @@ Admission needs ALL of:
  1. PINS.json `status == "CERTIFIED"` and an `e5_record_digest` (`sha256:<64 hex>`);
  2. a committed certification record (`e5-certification.json`) whose sha256 IS that
     digest, so the digest names real bytes rather than a format;
- 3. the record's `source_commit`, `foundation_src_tree` and per-file sha256 equal PINS;
+ 3. the record is exactly `{schema, certifies}` (fixed schema, no duplicate keys) and
+    `certifies` carries the PINS `source_commit`, `foundation_src_tree`, per-file sha256
+    and the `wheel_only_checks` (`__init__.py`) hash;
  4. a detached OpenSSH SSHSIG over the record (`e5-certification.json.sig`) that
-    `ssh-keygen -Y verify` accepts against the committed `allowed_signers`, for the
-    fixed principal and namespace below.
+    `ssh-keygen -Y verify` accepts against the committed `allowed_signers`, which must
+    hold exactly one line: the fixed principal, exactly the fixed namespace option, an
+    allowed key type. See `signers_problem`.
 
 The record, signature and a non-empty `allowed_signers` are committed AT E5; until
 then the gate refuses. No key is invented here: the shipped `allowed_signers` has no
@@ -39,6 +42,20 @@ ALLOWED_SIGNERS = DIR / "allowed_signers"
 #: Fixed, purpose-bound. Deliberately NOT Gate 2's rehearsal-verification namespace.
 NAMESPACE = "dotmac-vendored-foundation-e5-certification-v1@dotmac.io"
 PRINCIPAL = "e5-certifier@dotmac.io"
+#: The record's fixed schema constant; the record is `{schema, certifies}` only.
+SCHEMA = "dotmac.vendored-foundation.e5-certification.v1"
+CERTIFIES_KEYS = frozenset(
+    {"source_commit", "foundation_src_tree", "files", "wheel_only_checks"}
+)
+KEY_TYPES = frozenset(
+    {
+        "ssh-ed25519",
+        "sk-ssh-ed25519@openssh.com",
+        "ecdsa-sha2-nistp256",
+        "sk-ecdsa-sha2-nistp256@openssh.com",
+    }
+)
+_KEY_BLOB = re.compile(rb"[A-Za-z0-9+/]{60,}={0,2}")
 SSH_KEYGEN = "/usr/bin/ssh-keygen"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _MAX = 1 << 20
@@ -48,6 +65,42 @@ def _signers_present(raw: bytes) -> bool:
     return any(
         line.strip() and not line.lstrip().startswith(b"#") for line in raw.splitlines()
     )
+
+
+def signers_problem(raw: bytes) -> str | None:
+    """Exactly one entry: the literal principal, exactly the one namespace option
+    (no cert-authority, no wildcards, no other option), an allowed key type."""
+    lines = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and not line.lstrip().startswith(b"#")
+    ]
+    if not lines:
+        return "allowed_signers pins no signer, so no signature can verify"
+    if len(lines) != 1:
+        return "allowed_signers must contain exactly one signer line"
+    fields = lines[0].split()
+    if len(fields) < 4:
+        return "allowed_signers line is malformed"
+    principal, options, key_type, blob = fields[:4]
+    if principal != PRINCIPAL.encode():
+        return "allowed_signers principal is not the fixed E5 certifier principal"
+    if options != f'namespaces="{NAMESPACE}"'.encode():
+        return "allowed_signers options must be exactly the one fixed E5 namespace"
+    if key_type.decode("ascii", "replace") not in KEY_TYPES:
+        return "allowed_signers key type is not an allowed type"
+    if not _KEY_BLOB.fullmatch(blob):
+        return "allowed_signers key is malformed"
+    return None
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    found: dict[str, object] = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError("duplicate JSON key")
+        found[key] = value
+    return found
 
 
 def problems(
@@ -82,13 +135,17 @@ def problems(
     if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
         return ["e5_record_digest is not the sha256 of the E5 certification record"]
     try:
-        document = json.loads(raw)
-        files = {n: f["sha256"] for n, f in pins["files"].items()}
-        recorded = {n: f["sha256"] for n, f in document["files"].items()}
+        document = json.loads(raw, object_pairs_hook=_no_duplicate_keys)
+        certifies = document["certifies"]
         same = (
-            document["source_commit"] == pins["source_commit"]
-            and document["foundation_src_tree"] == pins["foundation_src_tree"]
-            and recorded == files
+            set(document) == {"schema", "certifies"}
+            and document["schema"] == SCHEMA
+            and set(certifies) == CERTIFIES_KEYS
+            and certifies["source_commit"] == pins["source_commit"]
+            and certifies["foundation_src_tree"] == pins["foundation_src_tree"]
+            and certifies["files"] == {n: f["sha256"] for n, f in pins["files"].items()}
+            and certifies["wheel_only_checks"]
+            == {n: f["sha256"] for n, f in pins["wheel_only_checks"].items()}
         )
     except (ValueError, KeyError, TypeError, AttributeError):
         return ["the E5 certification record or the pins are malformed"]
@@ -96,8 +153,9 @@ def problems(
         return [
             "the E5 certification record does not certify exactly the pinned source"
         ]
-    if not _signers_present(signers):
-        return ["allowed_signers pins no signer, so no signature can verify"]
+    problem = signers_problem(signers)
+    if problem:
+        return [problem]
     try:
         with tempfile.TemporaryDirectory(prefix="e5-cert-") as directory:
             signers_path = Path(directory) / "allowed_signers"

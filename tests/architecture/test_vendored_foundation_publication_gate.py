@@ -59,13 +59,23 @@ class World:
 
     def record_document(self) -> dict[str, Any]:
         return {
-            "schema": "e5-certification.v1",
-            "source_commit": self.pins["source_commit"],
-            "foundation_src_tree": self.pins["foundation_src_tree"],
-            "files": {
-                n: {"sha256": f["sha256"]} for n, f in self.pins["files"].items()
+            "schema": gate.SCHEMA,
+            "certifies": {
+                "source_commit": self.pins["source_commit"],
+                "foundation_src_tree": self.pins["foundation_src_tree"],
+                "files": {n: f["sha256"] for n, f in self.pins["files"].items()},
+                "wheel_only_checks": {
+                    n: f["sha256"] for n, f in self.pins["wheel_only_checks"].items()
+                },
             },
         }
+
+    def write_record_bytes(self, raw: bytes) -> None:
+        """A record whose exact bytes the test controls; digest and signature follow."""
+        record = self.base / gate.RECORD.name
+        record.write_bytes(raw)
+        self.pins["e5_record_digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+        _sign(self.base, self.key, record, gate.NAMESPACE)
 
     def write_record(
         self, document: dict[str, Any], namespace: str | None = None
@@ -133,16 +143,54 @@ def test_a_record_certifying_different_source_is_refused(world: World) -> None:
         ("foundation_src_tree", "1" * 40),
     ):
         document = world.record_document()
-        document[field] = value
+        document["certifies"][field] = value
         world.write_record(document)
         assert world.run().returncode == 1, field
     document = world.record_document()
-    first = next(iter(document["files"]))
-    document["files"][first]["sha256"] = "2" * 64
+    first = next(iter(document["certifies"]["files"]))
+    document["certifies"]["files"][first] = "2" * 64
     world.write_record(document)
     result = world.run()
     assert result.returncode == 1
     assert "does not certify exactly the pinned source" in result.stderr
+
+
+def test_the_record_must_bind_the_wheel_init_hash_too(world: World) -> None:
+    document = world.record_document()
+    document["certifies"]["wheel_only_checks"]["__init__.py"] = "4" * 64
+    world.write_record(document)
+    assert "does not certify exactly" in world.run().stderr
+    document = world.record_document()
+    del document["certifies"]["wheel_only_checks"]
+    world.write_record(document)
+    assert "does not certify exactly" in world.run().stderr
+
+
+def test_the_record_schema_and_shape_are_fixed(world: World) -> None:
+    for mutate in (
+        lambda d: d.update(schema="other.v1"),
+        lambda d: d.pop("schema"),
+        lambda d: d.update(extra="x"),
+        lambda d: d["certifies"].update(extra="x"),
+        lambda d: d.pop("certifies"),
+    ):
+        document = world.record_document()
+        mutate(document)
+        world.write_record(document)
+        assert world.run().returncode == 1
+
+
+def test_a_record_with_a_duplicate_json_key_is_refused(world: World) -> None:
+    good = json.dumps(world.record_document())
+    # a second, different `schema` first, the real one last: last-wins parsers admit it
+    world.write_record_bytes(('{"schema": "x", ' + good[1:]).encode())
+    result = world.run()
+    assert result.returncode == 1
+    assert "malformed" in result.stderr
+    world.write_record_bytes(b'{"schema": "a", "schema": "b"}')
+    assert "malformed" in world.run().stderr
+    world.write_record_bytes(b"[1, 2")
+    assert "malformed" in world.run().stderr
 
 
 def test_a_signature_by_another_key_or_namespace_is_refused(
@@ -210,6 +258,79 @@ def test_a_non_object_pin_file_and_an_unreadable_one_are_refused(
     assert gate.problems([]) != []
     result = _run(tmp_path / "absent.json", tmp_path)
     assert result.returncode == 2
+
+
+def _signer_line(world: World, **parts: str) -> str:
+    public = (world.key.parent / "key.pub").read_text("utf-8").split()
+    fields = {
+        "principal": gate.PRINCIPAL,
+        "options": f'namespaces="{gate.NAMESPACE}"',
+        "type": public[0],
+        "key": public[1],
+    }
+    fields.update(parts)
+    return " ".join(fields.values()) + "\n"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "two-lines",
+        "wrong-principal",
+        "wildcard-principal",
+        "no-options",
+        "cert-authority",
+        "extra-option",
+        "wildcard-namespace",
+        "other-namespace",
+        "two-namespaces",
+        "disallowed-key-type",
+        "rsa-key-type",
+        "malformed-key",
+        "too-short",
+    ],
+)
+def test_every_allowed_signers_violation_is_refused(world: World, case: str) -> None:
+    ns = f'namespaces="{gate.NAMESPACE}"'
+    line = {
+        "two-lines": _signer_line(world) + _signer_line(world),
+        "wrong-principal": _signer_line(world, principal="someone@dotmac.io"),
+        "wildcard-principal": _signer_line(world, principal="*@dotmac.io"),
+        "no-options": f"{gate.PRINCIPAL} " + _signer_line(world).split(" ", 2)[2],
+        "cert-authority": _signer_line(world, options=f"cert-authority,{ns}"),
+        "extra-option": _signer_line(world, options=f'{ns},valid-before="20991231"'),
+        "wildcard-namespace": _signer_line(world, options='namespaces="*"'),
+        "other-namespace": _signer_line(world, options='namespaces="other@x"'),
+        "two-namespaces": _signer_line(
+            world, options=f'namespaces="a@x,{gate.NAMESPACE}"'
+        ),
+        "disallowed-key-type": _signer_line(world, type="ssh-dss"),
+        "rsa-key-type": _signer_line(world, type="ssh-rsa"),
+        "malformed-key": _signer_line(world, key="not base64 !!"),
+        "too-short": f"{gate.PRINCIPAL} {ns}\n",
+    }[case]
+    (world.base / gate.ALLOWED_SIGNERS.name).write_text(line, encoding="utf-8")
+    result = world.run()
+    assert result.returncode == 1, result.stderr
+    assert "allowed_signers" in result.stderr
+
+
+def test_one_conformant_signer_line_with_a_comment_and_blank_lines_is_admitted(
+    world: World,
+) -> None:
+    line = _signer_line(world).rstrip("\n") + " ceremony key\n"
+    text = "# header\n\n" + line + "\n# trailer\n"
+    (world.base / gate.ALLOWED_SIGNERS.name).write_text(text, encoding="utf-8")
+    assert world.run().returncode == 0
+
+
+def test_the_allowed_key_types_are_exactly_the_four_named() -> None:
+    assert gate.KEY_TYPES == {
+        "ssh-ed25519",
+        "sk-ssh-ed25519@openssh.com",
+        "ecdsa-sha2-nistp256",
+        "sk-ecdsa-sha2-nistp256@openssh.com",
+    }
 
 
 def test_the_gate_runs_on_the_publication_path_and_not_in_ordinary_ci() -> None:
