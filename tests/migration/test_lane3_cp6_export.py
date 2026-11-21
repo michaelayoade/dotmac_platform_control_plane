@@ -132,7 +132,9 @@ class _Signer:
         return self._key._key.sign(data)  # type: ignore[no-any-return]
 
 
-def _enrol_and_activate(db: Session, *, seed: str, key_id: str) -> tuple[str, Any]:
+def _enrol_and_activate(
+    db: Session, *, seed: str, key_id: str, target_ref: str = "tgt-a"
+) -> tuple[str, Any]:
     """A presentation credential through the REAL owners: enrol, prove possession
     with the Kernel's own challenge, then Control activates."""
     from dotmac_kernel.licensing import (
@@ -143,7 +145,7 @@ def _enrol_and_activate(db: Session, *, seed: str, key_id: str) -> tuple[str, An
     key = SUPPORT.TransitKey(hashlib.sha256(seed.encode()).digest())
     credential = e10.enrol_presentation_credential(
         db,
-        target_ref="tgt-a",
+        target_ref=target_ref,
         key_id=key_id,
         public_key_b64url=e10._b64url(key.raw_public),
         command_id=f"c-enrol-{key_id}",
@@ -382,14 +384,21 @@ class _World:
             self.add_credential("presentation-key-1", "first", -60, +60)
 
     def add_credential(
-        self, key_id: str, seed: str, activated: float, revoked: float | None
+        self,
+        key_id: str,
+        seed: str,
+        activated: float,
+        revoked: float | None,
+        target_ref: str = "tgt-a",
     ) -> str:
         """Enrol, activate (possession proven) and, when `revoked` is given, revoke a
         presentation credential through Control; then place its window at the given
         offsets, in seconds, from the ledger instant. Control stamps its own clock;
         the window is pinned relative to the (frozen-clock) ledger row so the
         brackets under test are exact."""
-        credential, key = _enrol_and_activate(self.db, seed=seed, key_id=key_id)
+        credential, key = _enrol_and_activate(
+            self.db, seed=seed, key_id=key_id, target_ref=target_ref
+        )
         if revoked is not None:
             e10._revoke_credential(self.db, credential, f"c-revoke-{key_id}")
             self.db.commit()
@@ -951,3 +960,77 @@ def test_a_stored_fingerprint_that_is_not_the_keys_is_inconsistent(
     )
     db.execute(text("SET LOCAL session_replication_role = origin"))
     assert _refused(world) == "presentation-credential-inconsistent"
+
+
+# ── the target and purpose binding of the query ─────────────────────────────────
+
+
+def _register_other_target(db: Session) -> None:
+    from dotmac_deployment_control import RegisterTargetCommand, register_target
+
+    register_target(
+        db,
+        RegisterTargetCommand(
+            command_id="cmd-tgt-b",
+            target_ref="tgt-b",
+            subject_ref="s2",
+            product_code="p",
+            environment="test",
+            actor_ref="operator",
+        ),
+    )
+    db.commit()
+
+
+def _set_purpose(db: Session, credential: str, purpose: str) -> None:
+    db.execute(text("SET LOCAL session_replication_role = replica"))
+    db.execute(
+        text(
+            "UPDATE mod_deploy.target_credentials SET purpose = :p "
+            "WHERE id = CAST(:i AS uuid)"
+        ),
+        {"p": purpose, "i": credential},
+    )
+    db.execute(text("SET LOCAL session_replication_role = origin"))
+    db.commit()
+
+
+def test_a_credential_on_another_target_never_enters_the_export(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    before = world.export()[1]
+    _register_other_target(db)
+    # active at consumption, same purpose, same window, but ANOTHER target
+    world.add_credential("other-target-key", "other", -60, +60, target_ref="tgt-b")
+    assert world.export()[1] == before  # not ambiguous, not different
+    block = CP6.parse_cp6_export(before).presentation_credential
+    assert block.target_id == world.target_id and block.key_id == "presentation-key-1"
+
+
+def test_another_targets_credential_alone_is_absent_for_this_target(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case, credential=False)
+    _register_other_target(db)
+    world.add_credential("other-target-key", "other", -60, +60, target_ref="tgt-b")
+    assert _refused(world) == "presentation-credential-absent"
+
+
+def test_a_credential_of_another_purpose_never_enters_the_export(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    before = world.export()[1]
+    other = world.add_credential("other-purpose-key", "purpose", -60, +60)
+    _set_purpose(db, other, "dotmac.control.some-other-purpose.v1")
+    assert world.export()[1] == before
+
+
+def test_a_credential_of_another_purpose_alone_is_absent(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case, credential=False)
+    other = world.add_credential("other-purpose-key", "purpose", -60, +60)
+    _set_purpose(db, other, "dotmac.control.some-other-purpose.v1")
+    assert _refused(world) == "presentation-credential-absent"
