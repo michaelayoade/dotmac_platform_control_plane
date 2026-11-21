@@ -182,7 +182,8 @@ def test_the_wheel_is_the_pinned_foundation_and_not_the_checkout() -> None:
             "import dotmac_deployment_foundation.trusted_host_source as t, "
             "dotmac_deployment_foundation.errors as e, "
             "dotmac_deployment_foundation.digest as d, json;"
-            "print(json.dumps([t.__file__, e.__file__, d.__file__]))",
+            "import dotmac_deployment_foundation as f;"
+            "print(json.dumps([t.__file__, e.__file__, d.__file__, f.__file__]))",
         ],
         capture_output=True,
         text=True,
@@ -190,6 +191,12 @@ def test_the_wheel_is_the_pinned_foundation_and_not_the_checkout() -> None:
         cwd=str(HERE.parent),
     )
     paths = [Path(p) for p in json.loads(probe.stdout)]
+    init = paths.pop()
+    assert "site-packages" in init.parts
+    assert (
+        hashlib.sha256(init.read_bytes()).hexdigest()
+        == PINS["wheel_only_checks"]["__init__.py"]["sha256"]
+    ), "the wheel's package __init__ is not the E5 packet's"
     for name, path in zip(
         ("trusted_host_source.py", "errors.py", "digest.py"), paths, strict=True
     ):

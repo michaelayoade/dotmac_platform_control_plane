@@ -22,5 +22,13 @@
       "git_blob": "4c6433d59c744e644e9c38008faa6933dec76592",
       "sha256": "285274afba9093852949587aee9c46c161f97af7357294903f3a8d3704317688"
     }
+  },
+  "wheel_only_checks": {
+    "__init__.py": {
+      "source_path": "packages/dotmac-deployment-foundation/src/dotmac_deployment_foundation/__init__.py",
+      "git_blob": "2c4cb122f8d087698df90b86c8128669a147893d",
+      "sha256": "f941df892b99189a39ea01b22db66ed4106c77123b41fde0d3f5820a5053d4a9",
+      "why": "E5 packet hash of the Foundation package __init__; the differential job checks the built wheel carries it. Not vendored."
+    }
   }
 }

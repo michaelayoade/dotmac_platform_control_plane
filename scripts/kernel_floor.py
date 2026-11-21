@@ -443,18 +443,10 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "dotmac_kernel.audit": frozenset({"write_platform_audit_event"}),
-    # Lane 3 operator commands (`lane3_e10`, imported inside functions). First
-    # shipped in kernel 0.1.0a12 (the first tag whose `audit_actions.py` defines
-    # all four names; `git grep` over `dotmac-kernel-v0.1.0a*` in Starter), far
+    # `vendor_cp.audit_bootstrap` (the one process-audit bootstrap, which the
+    # Lane 3 operator commands also use). First shipped in kernel 0.1.0a12, far
     # below the composed maximum, so this raises nothing.
-    "dotmac_kernel.audit_actions": frozenset(
-        {
-            "AuditActionRegistry",
-            "AuditActionsNotInstalledError",
-            "active_audit_actions",
-            "install_audit_actions",
-        }
-    ),
+    "dotmac_kernel.audit_actions": frozenset({"active_audit_actions"}),
     # First shipped in 0.1.0a100, which IS the composed maximum, so it raises
     # nothing and needs no `ASSEMBLY_SYMBOL_FLOORS` entry (ADR-0016 cutover).
     "dotmac_kernel.api_documentation": frozenset(
@@ -509,10 +501,6 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
     "dotmac_kernel.messaging.platform_worker": frozenset(
         {"PlatformDeliveryTransport", "SessionFactory", "run_once"}
     ),
-    # `ModuleRegistry` first shipped in 0.1.0a12 (`modules.py` at that tag); the
-    # Lane 3 commands build the audit registry from the same manifests `create_app`
-    # uses. Below the composed maximum: no floor entry.
-    "dotmac_kernel.modules": frozenset({"ModuleRegistry"}),
     "dotmac_kernel.migrations": frozenset({"versions_dir"}),
     "dotmac_kernel.migrations.catalog": frozenset(
         {"ROLE_TABLE_PRIVILEGES_SQL", "TABLE_PRIVILEGES"}

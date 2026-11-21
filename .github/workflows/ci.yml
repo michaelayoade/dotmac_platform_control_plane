@@ -218,6 +218,8 @@ jobs:
       VENDORED_FOUNDATION_REQUIRED: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -242,13 +244,15 @@ jobs:
           test -z "$(git -C "$src" status --porcelain=v1 --untracked-files=all)"
           test "$(git -C "$src" rev-parse HEAD:packages/dotmac-deployment-foundation/src)" = "$FOUNDATION_SRC_TREE"
           python -m venv "$RUNNER_TEMP/foundation-venv"
-          "$RUNNER_TEMP/foundation-venv/bin/pip" install --quiet build
-          "$RUNNER_TEMP/foundation-venv/bin/python" -m build --wheel \
-            --outdir "$RUNNER_TEMP/foundation-wheel" \
+          # Build backend: hash-pinned poetry-core only, no index resolution at
+          # build time (--no-build-isolation, --no-deps).
+          "$RUNNER_TEMP/foundation-venv/bin/pip" install --quiet --require-hashes \
+            -r .github/vendored-foundation/build-requirements.txt
+          "$RUNNER_TEMP/foundation-venv/bin/pip" wheel --quiet --no-deps \
+            --no-build-isolation --wheel-dir "$RUNNER_TEMP/foundation-wheel" \
             "$src/packages/dotmac-deployment-foundation"
           "$RUNNER_TEMP/foundation-venv/bin/pip" install --quiet --no-deps \
             "$RUNNER_TEMP"/foundation-wheel/dotmac_deployment_foundation-*.whl
-          "$RUNNER_TEMP/foundation-venv/bin/pip" uninstall --yes --quiet build
           echo "FOUNDATION_WHEEL_PYTHON=$RUNNER_TEMP/foundation-venv/bin/python" >> "$GITHUB_ENV"
           echo "VENDORED_FOUNDATION_SOURCE_DIR=$src" >> "$GITHUB_ENV"
       - name: Vendored verifier equals the pin and the Foundation wheel
@@ -258,15 +262,7 @@ jobs:
             tests/unit/test_vendored_foundation_pins.py \
             tests/differential \
             --junitxml="$RUNNER_TEMP/vendored-differential.xml"
-          python - "$RUNNER_TEMP/vendored-differential.xml" <<'PY'
-          import sys
-          from xml.etree import ElementTree
-          cases = ElementTree.parse(sys.argv[1]).getroot().findall(".//testcase")
-          bad = [c.get("name") for c in cases if any(c.find(o) is not None for o in ("skipped", "failure", "error"))]
-          if bad or len(cases) < 12:
-              raise SystemExit(f"skipped/failed {bad} or only {len(cases)} cases ran")
-          print(f"{len(cases)} vendored-verifier cases passed, none skipped")
-          PY
+          python scripts/check_vendored_junit.py "$RUNNER_TEMP/vendored-differential.xml"
 
   # ── THE PIN, EXECUTED ────────────────────────────────────────────────────
   # `docs/operations/composition-census-2026-08-30.md` recorded the composed

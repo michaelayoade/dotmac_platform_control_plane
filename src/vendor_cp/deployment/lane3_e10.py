@@ -1056,27 +1056,13 @@ def ensure_audit_registry() -> None:
 
     Control's credential lifecycle writes an audit event, and the kernel refuses
     any write in a process that installed no registry (`create_app` installs one;
-    a CLI builds no app). Composed from the SAME manifests `create_app` would use,
-    never a hand-written list, and only if nothing is installed already.
+    a CLI builds no app). This delegates to the ONE process bootstrap
+    (`vendor_cp.audit_bootstrap`, composed from `vendor_cp.composition`), which
+    installs only when nothing is installed already: no second registry builder.
     """
-    from dotmac_kernel.audit_actions import (
-        AuditActionRegistry,
-        AuditActionsNotInstalledError,
-        active_audit_actions,
-        install_audit_actions,
-    )
+    from vendor_cp.audit_bootstrap import ensure_process_audit_actions
 
-    try:
-        active_audit_actions()
-        return
-    except AuditActionsNotInstalledError:
-        pass
-    from dotmac_kernel.modules import ModuleRegistry
-
-    from vendor_cp.assembly import build_spec
-
-    manifests = ModuleRegistry(build_spec().modules).startup_order()
-    install_audit_actions(AuditActionRegistry.from_manifests(manifests))
+    ensure_process_audit_actions()
 
 
 def _stdin_json(stdin: Any) -> dict[str, Any]:
