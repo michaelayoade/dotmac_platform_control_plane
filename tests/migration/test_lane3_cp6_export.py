@@ -1,6 +1,6 @@
 """CP-6: `lane3_record export`, parsed by Starter's own `parse_cp6_export`.
 
-The parser is Starter S8a's (#1103, vendored verbatim and pinned by sha256 in
+The parser is Starter's (S8b-2 #1128 @3a39f3fc, schema v2; vendored verbatim and pinned by sha256 in
 `tests/vendored/starter_lane3_cp6`): the E9 offline orchestrator's view of the
 export. Everything here runs on REAL Control a17 types and PostgreSQL: a genuinely
 signed `DispatchEnvelopeV1`, the registry's own enrolment rows, the
@@ -120,10 +120,66 @@ def db(case: Any) -> Any:
         yield session
 
 
+class _Signer:
+    """A possession-challenge signer for the presentation key."""
+
+    def __init__(self, key: Any, key_id: str, deployment_ref: str) -> None:
+        self._key = key
+        self.key_id = key_id
+        self.deployment_ref = deployment_ref
+
+    def sign(self, data: bytes) -> bytes:
+        return self._key._key.sign(data)  # type: ignore[no-any-return]
+
+
+def _enrol_and_activate(db: Session, *, seed: str, key_id: str) -> tuple[str, Any]:
+    """A presentation credential through the REAL owners: enrol, prove possession
+    with the Kernel's own challenge, then Control activates."""
+    from dotmac_kernel.licensing import (
+        DeploymentPossessionChallenge,
+        answer_possession_challenge,
+    )
+
+    key = SUPPORT.TransitKey(hashlib.sha256(seed.encode()).digest())
+    credential = e10.enrol_presentation_credential(
+        db,
+        target_ref="tgt-a",
+        key_id=key_id,
+        public_key_b64url=e10._b64url(key.raw_public),
+        command_id=f"c-enrol-{key_id}",
+    )
+    db.commit()
+    now = e10.store_now(db)
+    challenge = e10.presentation_challenge(
+        key_id=key_id, deployment_ref=HOST, challenge_id=f"chal-{key_id}", now=now
+    )
+    response = answer_possession_challenge(
+        DeploymentPossessionChallenge.from_wire(challenge),
+        signer=_Signer(key, key_id, HOST),
+    ).to_wire()
+    e10.activate_presentation_credential(
+        db,
+        credential_id=credential,
+        challenge=challenge,
+        response=response,
+        command_id=f"c-activate-{key_id}",
+        now=now,
+    )
+    db.commit()
+    return credential, key
+
+
 class _World:
     """Everything one export joins, built through the real owners."""
 
-    def __init__(self, db: Session, case: Any, *, released: bool = True) -> None:
+    def __init__(
+        self,
+        db: Session,
+        case: Any,
+        *,
+        released: bool = True,
+        credential: bool = True,
+    ) -> None:
         from dotmac_deployment_control import (
             DispatchEnvelopeV1,
             RegisterTargetCommand,
@@ -321,6 +377,50 @@ class _World:
             {"l": self.lease_id, "h": HOST},
         )
         db.commit()
+        self.credential_id: str | None = None
+        if credential:
+            self.add_credential("presentation-key-1", "first", -60, +60)
+
+    def add_credential(
+        self, key_id: str, seed: str, activated: float, revoked: float | None
+    ) -> str:
+        """Enrol, activate (possession proven) and, when `revoked` is given, revoke a
+        presentation credential through Control; then place its window at the given
+        offsets, in seconds, from the ledger instant. Control stamps its own clock;
+        the window is pinned relative to the (frozen-clock) ledger row so the
+        brackets under test are exact."""
+        credential, key = _enrol_and_activate(self.db, seed=seed, key_id=key_id)
+        if revoked is not None:
+            e10._revoke_credential(self.db, credential, f"c-revoke-{key_id}")
+            self.db.commit()
+        self.set_window(credential, activated=activated, revoked=revoked)
+        self.credential_id = self.credential_id or credential
+        self.credential_key = key
+        return credential
+
+    def set_window(
+        self,
+        credential: str,
+        *,
+        activated: float,
+        revoked: float | None,
+        retired: float | None = None,
+    ) -> None:
+        def at(offset: float | None) -> datetime | None:
+            return (
+                None if offset is None else self.consumed_at + timedelta(seconds=offset)
+            )
+
+        self.db.execute(text("SET LOCAL session_replication_role = replica"))
+        self.db.execute(
+            text(
+                "UPDATE mod_deploy.target_credentials SET activated_at = :a, "
+                "retired_at = :t, revoked_at = :r WHERE id = CAST(:i AS uuid)"
+            ),
+            {"a": at(activated), "t": at(retired), "r": at(revoked), "i": credential},
+        )
+        self.db.execute(text("SET LOCAL session_replication_role = origin"))
+        self.db.commit()
 
     def export(self) -> tuple[dict[str, Any], bytes]:
         document = record.build_export(
@@ -340,7 +440,7 @@ def test_the_export_parses_with_starters_own_parser_and_every_join_holds(
     document, payload = world.export()
     parsed = CP6.parse_cp6_export(payload)
 
-    assert document["schema"] == CP6.EXPORT_SCHEMA == "lane3.cp6-export.v1"
+    assert document["schema"] == CP6.EXPORT_SCHEMA == "lane3.cp6-export.v2"
     assert parsed.dispatch_id == world.dispatch_id and parsed.host_id == HOST
     # 1. the dispatch verifies against an INDEPENDENT pin, and the digest is Control's.
     pinned = CP6.PinnedIdentity("dispatch-key", "ed25519", DISPATCH_PUBLIC)
@@ -709,7 +809,7 @@ def test_two_candidate_roots_current_at_the_ledger_instant_are_a_refusal(
 def test_the_cp6_key_set_is_unchanged_by_the_candidate_selection(
     db: Session, case: Any
 ) -> None:
-    """The vendored Starter parser (pinned at #1103 @02a4e835) accepts the export
+    """The vendored Starter parser (pinned at #1128 @3a39f3fc) accepts the export
     and its root blocks carry exactly the keys it expects."""
     world = _World(db, case)
     document = world.export()[0]
@@ -729,3 +829,125 @@ def test_the_cp6_key_set_is_unchanged_by_the_candidate_selection(
         "revoked_at",
     }
     CP6.parse_cp6_export(record.render(document))
+
+
+# ── the presentation-credential block (CP6-CREDENTIAL-BLOCK-SPEC section 3) ─────────
+
+
+def test_the_block_is_the_credential_active_at_consumption_and_revoked_after(
+    db: Session, case: Any
+) -> None:
+    from dotmac_deployment_control import HOST_ADMISSION_PRESENTATION_PURPOSE
+
+    world = _World(db, case)
+    document, payload = world.export()
+    parsed = CP6.parse_cp6_export(payload)
+    block = parsed.presentation_credential
+    assert set(document["control"]) == {"dispatch", "ledger", "presentation_credential"}
+    assert block.target_id == world.target_id
+    assert (block.key_id, block.algorithm) == ("presentation-key-1", "ed25519")
+    assert (
+        block.purpose == HOST_ADMISSION_PRESENTATION_PURPOSE == CP6.PRESENTATION_PURPOSE
+    )
+    assert block.public_key == world.credential_key.raw_public
+    assert (
+        block.public_key_fingerprint
+        == "sha256:" + hashlib.sha256(block.public_key).hexdigest()
+    )
+    # C2: active AT consumption, revoked NOW (step 15 ran before the export).
+    assert block.status == "revoked"
+    assert block.activated_at <= parsed.ledger.created_at
+    assert block.revoked_at is not None and parsed.ledger.created_at < block.revoked_at
+    assert block.retired_at is None
+
+
+def test_the_export_is_v2_only_and_the_block_is_required_and_consistent(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    document = json.loads(world.export()[1])
+    v1 = {**document, "schema": "lane3.cp6-export.v1"}
+    with pytest.raises(CP6.Cp6ExportRefused):
+        CP6.parse_cp6_export(e10.canonical(v1))
+    stripped = json.loads(json.dumps(document))
+    del stripped["control"]["presentation_credential"]
+    with pytest.raises(CP6.Cp6ExportRefused):
+        CP6.parse_cp6_export(e10.canonical(stripped))
+    forged = json.loads(json.dumps(document))
+    forged["control"]["presentation_credential"]["public_key_fingerprint"] = (
+        "sha256:" + "9" * 64
+    )
+    with pytest.raises(CP6.Cp6ExportRefused):
+        CP6.parse_cp6_export(e10.canonical(forged))
+
+
+def _refused(world: _World) -> str:
+    with pytest.raises(e10.E10Refused) as caught:
+        world.export()
+    return str(caught.value.code)
+
+
+def test_no_credential_is_a_refusal_never_a_pick(db: Session, case: Any) -> None:
+    assert _refused(_World(db, case, credential=False)) == (
+        "presentation-credential-absent"
+    )
+
+
+def test_two_credentials_active_at_consumption_are_a_refusal(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    world.add_credential("presentation-key-2", "second", -30, +90)
+    assert _refused(world) == "presentation-credential-ambiguous"
+
+
+def test_a_credential_activated_after_consumption_does_not_count(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case, credential=False)
+    world.add_credential("presentation-key-1", "first", +60, +120)
+    assert _refused(world) == "presentation-credential-absent"
+
+
+def test_a_credential_revoked_before_consumption_does_not_count(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case, credential=False)
+    world.add_credential("presentation-key-1", "first", -120, -60)
+    assert _refused(world) == "presentation-credential-absent"
+
+
+def test_a_credential_rotated_out_before_consumption_does_not_count(
+    db: Session, case: Any
+) -> None:
+    """C3: the bracket includes `retired_at`, not `revoked_at` alone."""
+    world = _World(db, case)
+    assert world.credential_id is not None
+    world.set_window(world.credential_id, activated=-120, retired=-60, revoked=+60)
+    assert _refused(world) == "presentation-credential-absent"
+
+
+def test_a_credential_active_at_the_ledger_instant_exactly_is_the_boundary(
+    db: Session, case: Any
+) -> None:
+    """activated_at <= created counts; revoked_at = created does not (t < revoked)."""
+    world = _World(db, case, credential=False)
+    credential = world.add_credential("presentation-key-1", "first", 0, +60)
+    assert world.export()[0]["control"]["presentation_credential"]["key_id"] == (
+        "presentation-key-1"
+    )
+    world.set_window(credential, activated=-60, revoked=0)
+    assert _refused(world) == "presentation-credential-absent"
+
+
+def test_a_stored_fingerprint_that_is_not_the_keys_is_inconsistent(
+    db: Session, case: Any
+) -> None:
+    world = _World(db, case)
+    db.execute(text("SET LOCAL session_replication_role = replica"))
+    db.execute(
+        text("UPDATE mod_deploy.target_credentials SET public_key_fingerprint = :f"),
+        {"f": "sha256:" + "8" * 64},
+    )
+    db.execute(text("SET LOCAL session_replication_role = origin"))
+    assert _refused(world) == "presentation-credential-inconsistent"

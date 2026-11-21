@@ -15,13 +15,18 @@ It reads, in ONE `REPEATABLE READ, READ ONLY` transaction:
   consumption wrote (`scope = deployment.consume_dispatch_challenge.v1`, key = the
   bare dispatch id, status `executed`, Control's consumption fingerprint stored as
   bare hex);
+* (v2, CP6-CREDENTIAL-BLOCK-SPEC section 3) the host-admission PRESENTATION credential
+  Control's registry bound to the signed target: the one `mod_deploy.target_credentials`
+  row, public material only, that was active at the ledger row's `created_at` (it is
+  revoked NOW, by step 15, so "active now" is never asked). Zero rows or several is a
+  refusal, never a pick;
 * the `cp_lane3` half: the E10 receipt and its digest (THE `receipt_digest` of
   `lane3_e10`), its destruction stamp, the lease row the consumption fell under, the
   lease's release (or `null`), and both roots' standings (candidate and installed) as
   Control's enrolment rows.
 
 The shape is the one Starter's `lane3_cp6_export.parse_cp6_export` parses (schema
-`lane3.cp6-export.v1`); a test parses this command's output with that exact file,
+`lane3.cp6-export.v2`); a test parses this command's output with that exact file,
 vendored by digest. The document is canonical JSON (`lane3_e10.canonical`) and its
 sha256 is printed to stderr as `export_digest=`.
 
@@ -69,7 +74,7 @@ __all__ = [
 ]
 
 #: The schema identifier and size bound Starter's parser pins (`# CP-6 PIN`).
-EXPORT_SCHEMA: Final = "lane3.cp6-export.v1"
+EXPORT_SCHEMA: Final = "lane3.cp6-export.v2"
 MAX_EXPORT_BYTES: Final = 262144
 #: Control's consumption scope and the status of a consumed dispatch.
 CONSUME_SCOPE: Final = "deployment.consume_dispatch_challenge.v1"
@@ -194,6 +199,72 @@ def _ledger_block(
     }
 
 
+#: Control's host-admission presentation-credential rows: exactly the credential that
+#: was active at consumption (activated by then, not retired or revoked by then).
+#: Read-only, through the already-used owner DSN; no new grant, no write.
+_PRESENTATION_SQL: Final = (
+    "SELECT target_id::text AS target_id, key_id, algorithm, purpose, "
+    "public_key_b64, public_key_fingerprint, status, activated_at, retired_at, "
+    "revoked_at FROM mod_deploy.target_credentials "
+    "WHERE target_id = CAST(:target AS uuid) AND purpose = :purpose "
+    "AND activated_at IS NOT NULL AND activated_at <= :created "
+    "AND (retired_at IS NULL OR retired_at > :created) "
+    "AND (revoked_at IS NULL OR revoked_at > :created) "
+    "ORDER BY activated_at, id"
+)
+
+
+def _presentation_credential_block(
+    db: Any, target_id: str, created: datetime
+) -> dict[str, Any]:
+    """The presentation credential active at `created`, or a refusal."""
+    from dotmac_deployment_control import HOST_ADMISSION_PRESENTATION_PURPOSE
+    from dotmac_deployment_control.digests import PublicKeyFingerprintV1
+
+    rows = (
+        db.execute(
+            text(_PRESENTATION_SQL),
+            {
+                "target": target_id,
+                "purpose": HOST_ADMISSION_PRESENTATION_PURPOSE,
+                "created": created,
+            },
+        )
+        .mappings()
+        .all()
+    )
+    if not rows:
+        raise E10Refused("presentation-credential-absent")
+    if len(rows) != 1:
+        raise E10Refused("presentation-credential-ambiguous")
+    row = rows[0]
+    try:
+        if not isinstance(row["algorithm"], str) or not row["algorithm"]:
+            raise ValueError("algorithm")
+        key = _b64url_key(row["public_key_b64"])
+        derived = PublicKeyFingerprintV1.from_public_key_b64(key).canonical
+        if derived != row["public_key_fingerprint"]:
+            raise ValueError("fingerprint")
+    except Exception:  # noqa: BLE001 - one refusal for every inconsistency
+        raise E10Refused("presentation-credential-inconsistent") from None
+    return {
+        "target_id": row["target_id"],
+        "key_id": row["key_id"],
+        "algorithm": row["algorithm"],
+        "purpose": row["purpose"],
+        "public_key_b64url": key,
+        "public_key_fingerprint": row["public_key_fingerprint"],
+        "status": row["status"],
+        "activated_at": format_time(row["activated_at"]),
+        "retired_at": None
+        if row["retired_at"] is None
+        else format_time(row["retired_at"]),
+        "revoked_at": None
+        if row["revoked_at"] is None
+        else format_time(row["revoked_at"]),
+    }
+
+
 def build_export(db: Any, *, dispatch_id: str, host_id: str) -> dict[str, Any]:
     """The export document for one dispatch on one host, or a refusal."""
     dispatch_id = _dispatch_id(dispatch_id)
@@ -210,6 +281,9 @@ def build_export(db: Any, *, dispatch_id: str, host_id: str) -> dict[str, Any]:
     ).scalar_one()
     if not isinstance(created, datetime):
         raise E10Refused("ledger-row-not-consumed")
+    presentation = _presentation_credential_block(
+        db, str(statement["target_id"]), created
+    )
 
     destructions = (
         db.execute(
@@ -321,7 +395,11 @@ def build_export(db: Any, *, dispatch_id: str, host_id: str) -> dict[str, Any]:
         "schema": EXPORT_SCHEMA,
         "dispatch_id": dispatch_id,
         "host_id": host_id,
-        "control": {"dispatch": dispatch, "ledger": ledger},
+        "control": {
+            "dispatch": dispatch,
+            "ledger": ledger,
+            "presentation_credential": presentation,
+        },
         "cp_lane3": {
             "e10_receipt": receipt,
             "e10_receipt_digest": receipt_digest(receipt),

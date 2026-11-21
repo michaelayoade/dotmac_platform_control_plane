@@ -34,6 +34,8 @@ from lane3_host_source_admission import Ed25519AttestationVerifier
 __all__ = [
     "EXPORT_SCHEMA",
     "MAX_EXPORT_BYTES",
+    "PRESENTATION_PURPOSE",
+    "PresentationCredentialBlock",
     "Cp6Export",
     "Cp6ExportRefused",
     "DestructionBlock",
@@ -58,7 +60,15 @@ __all__ = [
 ]
 
 # CP-6 PIN: the schema identifier.
-EXPORT_SCHEMA: Final = "lane3.cp6-export.v1"
+#
+# v2 (CP6-CREDENTIAL-BLOCK-SPEC section 2): the closed `control.presentation_credential`
+# block. Starter is v2-only: a v1 document is refused on the schema string and on
+# the closed `_CONTROL` key set, and a v1 parser refuses v2 the same way.
+EXPORT_SCHEMA: Final = "lane3.cp6-export.v2"
+
+# CP-6 PIN (Control a17 `HOST_ADMISSION_PRESENTATION_PURPOSE`): the purpose of the
+# target credential that signs host-admission presentations.
+PRESENTATION_PURPOSE: Final = "dotmac.control.host-admission-presentation.v1"
 MAX_EXPORT_BYTES: Final = 262144
 
 _DIGEST: Final = re.compile(r"sha256:[0-9a-f]{64}")
@@ -199,6 +209,7 @@ class DispatchStatement:
     target_id: str
     target_ref: str
     execution_plan_digest: str
+    descriptor_digest: str
     purpose: str
     key_id: str
     algorithm: str
@@ -243,6 +254,7 @@ def verify_dispatch(
         target_id=statement["target_id"],
         target_ref=statement["target_ref"],
         execution_plan_digest=statement["execution_plan_digest"],
+        descriptor_digest=statement["descriptor_digest"],
         purpose=statement["purpose"],
         key_id=statement["key_id"],
         algorithm=statement["algorithm"],
@@ -270,7 +282,20 @@ def _canonical(document: Any) -> bytes:
 
 # CP-6 PIN: closed key sets of every block.
 _TOP: Final = {"schema", "dispatch_id", "host_id", "control", "cp_lane3"}
-_CONTROL: Final = {"dispatch", "ledger"}
+_CONTROL: Final = {"dispatch", "ledger", "presentation_credential"}
+_PRESENTATION: Final = {
+    "target_id",
+    "key_id",
+    "algorithm",
+    "purpose",
+    "public_key_b64url",
+    "public_key_fingerprint",
+    "status",
+    "activated_at",
+    "retired_at",
+    "revoked_at",
+}
+_CREDENTIAL_STATUSES: Final = {"pending", "active", "retired", "revoked"}
 _DISPATCH: Final = {"statement", "signature", "envelope_digest"}
 _LEDGER: Final = {
     "key",
@@ -347,6 +372,22 @@ class DispatchBlock:
     #: Unpadded base64url, as Control stores it.
     signature: str
     envelope_digest: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PresentationCredentialBlock:
+    """Control's `target_credentials` row for the presentation key (public only)."""
+
+    target_id: str
+    key_id: str
+    algorithm: str
+    purpose: str
+    public_key: bytes
+    public_key_fingerprint: str
+    status: str
+    activated_at: datetime
+    retired_at: datetime | None
+    revoked_at: datetime | None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -434,6 +475,7 @@ class Cp6Export:
     host_id: str
     dispatch: DispatchBlock
     ledger: LedgerBlock
+    presentation_credential: PresentationCredentialBlock
     receipt: ReceiptBlock
     destruction: DestructionBlock
     lease: LeaseBlock
@@ -550,6 +592,31 @@ def _root(value: Any) -> RootBlock:
         not_before=_time_text(block["not_before"]),
         not_after=_time_text(block["not_after"]),
         enrolled_at=_time(block["enrolled_at"]),
+        revoked_at=None if revoked is None else _time(revoked),
+    )
+
+
+def _presentation_credential(value: Any) -> PresentationCredentialBlock:
+    block = _object(value, _PRESENTATION)
+    raw = raw_public_key(block["public_key_b64url"])
+    fingerprint = _digest(block["public_key_fingerprint"])
+    if fingerprint != "sha256:" + hashlib.sha256(raw).hexdigest():
+        _refuse("presentation-fingerprint")
+    if type(block["status"]) is not str or (
+        block["status"] not in _CREDENTIAL_STATUSES
+    ):
+        _refuse("field")
+    retired, revoked = block["retired_at"], block["revoked_at"]
+    return PresentationCredentialBlock(
+        target_id=_uuid(block["target_id"]),
+        key_id=_token(block["key_id"]),
+        algorithm=_token(block["algorithm"]),
+        purpose=_token(block["purpose"]),
+        public_key=raw,
+        public_key_fingerprint=fingerprint,
+        status=block["status"],
+        activated_at=_time(block["activated_at"]),
+        retired_at=None if retired is None else _time(retired),
         revoked_at=None if revoked is None else _time(revoked),
     )
 
@@ -678,6 +745,9 @@ def parse_cp6_export(payload: bytes) -> Cp6Export:
         host_id=_token(top["host_id"]),
         dispatch=dispatch,
         ledger=ledger,
+        presentation_credential=_presentation_credential(
+            control["presentation_credential"]
+        ),
         receipt=receipt,
         destruction=destruction,
         lease=lease,
