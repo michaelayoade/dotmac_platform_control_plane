@@ -201,6 +201,73 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
 
+  # ── H1: THE VENDORED STEP-8 VERIFIER, AGAINST A FOUNDATION WHEEL ─────────
+  # PROVISIONAL-PENDING-E5. The image carries no `dotmac_deployment_foundation`
+  # (acceptance step 17), so step 8 verifies installed attestations with a copy of
+  # three Foundation files (`src/vendor_cp/vendored_foundation`, PINS.json). This
+  # job is what keeps that copy honest: it builds a Foundation WHEEL from the one
+  # Starter commit the pin names, installs it into a SEPARATE venv (CP's own
+  # environment never gains Foundation) and runs the same synthetic corpus through
+  # both, requiring identical accept/refuse results, codes, messages and digests.
+  # No database, no secrets beyond the kernel read token the poetry install needs.
+  vendored-verifier-differential:
+    runs-on: ubuntu-latest
+    env:
+      STARTER_COMMIT: e4f9a072684291ef15dab04cd99ebd6d4ce60762
+      FOUNDATION_SRC_TREE: 940cdf344b49d1b2bce16383978a7ee9ebc21460
+      VENDORED_FOUNDATION_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - name: Install (kernel from Forgejo)
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: poetry install
+      - name: Fetch exact Starter source for the Foundation wheel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_starter_mt
+          ref: e4f9a072684291ef15dab04cd99ebd6d4ce60762
+          path: .vendored-foundation-source
+          persist-credentials: false
+      - name: Build the Foundation wheel from the pinned commit into its own venv
+        run: |
+          set -euo pipefail
+          src="${GITHUB_WORKSPACE}/.vendored-foundation-source"
+          test "$(git -C "$src" rev-parse HEAD)" = "$STARTER_COMMIT"
+          test -z "$(git -C "$src" status --porcelain=v1 --untracked-files=all)"
+          test "$(git -C "$src" rev-parse HEAD:packages/dotmac-deployment-foundation/src)" = "$FOUNDATION_SRC_TREE"
+          python -m venv "$RUNNER_TEMP/foundation-venv"
+          "$RUNNER_TEMP/foundation-venv/bin/pip" install --quiet build
+          "$RUNNER_TEMP/foundation-venv/bin/python" -m build --wheel \
+            --outdir "$RUNNER_TEMP/foundation-wheel" \
+            "$src/packages/dotmac-deployment-foundation"
+          "$RUNNER_TEMP/foundation-venv/bin/pip" install --quiet --no-deps \
+            "$RUNNER_TEMP"/foundation-wheel/dotmac_deployment_foundation-*.whl
+          "$RUNNER_TEMP/foundation-venv/bin/pip" uninstall --yes --quiet build
+          echo "FOUNDATION_WHEEL_PYTHON=$RUNNER_TEMP/foundation-venv/bin/python" >> "$GITHUB_ENV"
+          echo "VENDORED_FOUNDATION_SOURCE_DIR=$src" >> "$GITHUB_ENV"
+      - name: Vendored verifier equals the pin and the Foundation wheel
+        run: |
+          set -euo pipefail
+          poetry run pytest -q -rs \
+            tests/unit/test_vendored_foundation_pins.py \
+            tests/differential \
+            --junitxml="$RUNNER_TEMP/vendored-differential.xml"
+          python - "$RUNNER_TEMP/vendored-differential.xml" <<'PY'
+          import sys
+          from xml.etree import ElementTree
+          cases = ElementTree.parse(sys.argv[1]).getroot().findall(".//testcase")
+          bad = [c.get("name") for c in cases if any(c.find(o) is not None for o in ("skipped", "failure", "error"))]
+          if bad or len(cases) < 12:
+              raise SystemExit(f"skipped/failed {bad} or only {len(cases)} cases ran")
+          print(f"{len(cases)} vendored-verifier cases passed, none skipped")
+          PY
+
   # ── THE PIN, EXECUTED ────────────────────────────────────────────────────
   # `docs/operations/composition-census-2026-08-30.md` recorded the composed
   # modules' declared kernel floors and then said the honest thing: "The floors

@@ -1,0 +1,26 @@
+{
+  "schema": "cp-vendored-foundation-pins.v1",
+  "status": "PROVISIONAL-PENDING-E5",
+  "note": "E5 is not certified; re-vendor and regenerate if any Foundation byte changes before certification.",
+  "source_repository": "michaelayoade/dotmac_starter_mt",
+  "source_commit": "e4f9a072684291ef15dab04cd99ebd6d4ce60762",
+  "foundation_src_tree": "940cdf344b49d1b2bce16383978a7ee9ebc21460",
+  "source_root": "packages/dotmac-deployment-foundation/src/dotmac_deployment_foundation",
+  "files": {
+    "errors.py": {
+      "source_path": "packages/dotmac-deployment-foundation/src/dotmac_deployment_foundation/errors.py",
+      "git_blob": "67393f55c980deca4400023d76cb3885364fea73",
+      "sha256": "76baffb8f125ed5d4bd393bacf6691cb34d2c3c716f8bedfad3812f6fe3a4a44"
+    },
+    "digest.py": {
+      "source_path": "packages/dotmac-deployment-foundation/src/dotmac_deployment_foundation/digest.py",
+      "git_blob": "12a5c5aa765a37ff184ee29bcfc474b43bcbcdaa",
+      "sha256": "93f10e4bf4f6a60840a2c7c2ead0ce3c5efe5b6d030f2e64d1cd82f13294e60c"
+    },
+    "trusted_host_source.py": {
+      "source_path": "packages/dotmac-deployment-foundation/src/dotmac_deployment_foundation/trusted_host_source.py",
+      "git_blob": "4c6433d59c744e644e9c38008faa6933dec76592",
+      "sha256": "285274afba9093852949587aee9c46c161f97af7357294903f3a8d3704317688"
+    }
+  }
+}

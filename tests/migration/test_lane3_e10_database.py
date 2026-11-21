@@ -369,8 +369,9 @@ def test_a_malformed_destruction_request_is_refused_before_any_write(
 def _installed(
     receipt: dict[str, Any], key: Any, dispatch_id: str, **override: Any
 ) -> dict[str, Any]:
-    """A signed I(D) over the receipt's incarnation, with the fields Foundation needs."""
-    from dotmac_deployment_foundation.trusted_host_source import (
+    """A signed I(D) over the receipt's incarnation, built with the VENDORED classes
+    (the same ones step 8 verifies with), so it needs no Foundation."""
+    from vendor_cp.vendored_foundation.trusted_host_source import (
         ATTESTATION_SCHEMA,
         INSTALLED_OBSERVATION_PURPOSE,
         AttestationEnvelopeV2,
@@ -508,14 +509,16 @@ def test_an_installed_attestation_that_is_not_this_incarnations_is_refused(
     assert _count(db, "SELECT count(*) FROM cp_lane3.e10_destructions") == 0
 
 
-def test_h1_step_eight_with_foundation_absent_is_a_clean_refusal_and_writes_nothing(
+def test_h1_step_eight_runs_with_foundation_off_the_import_path(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """H1 (a RULING is pending, so this pins today's behaviour and chooses no fix):
-    with Foundation off the import path, a destruction that carries an installed
-    attestation is refused `foundation-unavailable`, and nothing was written, not
-    even inside the open transaction (the refusal precedes the INSERT)."""
+    """H1 (ruled 2026-11-19): step 8 uses the vendored verifier, so with Foundation
+    off the import path, as in the image, a valid installed attestation is still
+    verified and recorded, and a forged one is still refused with nothing written."""
     outcome = _enrol(db, "host-a", 1, seed="host-a-1")
+    receipt = e10._receipt_row(db, outcome.receipt_ref)
+    dispatch_id = str(uuid.uuid4())
+    _dispatch_row(db, dispatch_id)
     # `None` in `sys.modules` makes every import of the name raise ImportError,
     # whether or not the real package is installed in this environment.
     for name in (
@@ -526,23 +529,22 @@ def test_h1_step_eight_with_foundation_absent_is_a_clean_refusal_and_writes_noth
         monkeypatch.setitem(sys.modules, name, None)
     with pytest.raises(ImportError):
         import dotmac_deployment_foundation.errors  # noqa: F401
+    forged = _installed(receipt, _key("someone-else"), dispatch_id)
     with pytest.raises(e10.E10Refused) as refused:
-        e10.record_destruction(
-            db,
-            {
-                "receipt_ref": outcome.receipt_ref,
-                "evidence_digest": "sha256:" + "b" * 64,
-                "recorded_by": "operator",
-                "installed": {"any": "mapping"},
-            },
-        )
-    assert refused.value.code == "foundation-unavailable"
-    # no write, even before the transaction is rolled back
-    assert _count(db, "SELECT count(*) FROM cp_lane3.e10_destructions") == 0
+        _destroy_only(db, outcome.receipt_ref, installed=forged)
+    assert refused.value.code == "installed-attestation-signature"
     db.rollback()
     assert _count(db, "SELECT count(*) FROM cp_lane3.e10_destructions") == 0
-    # the destroy-only form never needed Foundation and is unaffected
-    assert _destroy_only(db, outcome.receipt_ref) is not None
+    installed = _installed(receipt, _key("host-a-1"), dispatch_id)
+    assert _destroy_only(db, outcome.receipt_ref, installed=installed) is not None
+    assert (
+        _count(
+            db,
+            "SELECT count(*) FROM cp_lane3.e10_destructions "
+            "WHERE installed_attestation_digest IS NOT NULL",
+        )
+        == 1
+    )
 
 
 def test_an_installed_attestation_signed_by_another_key_is_refused(db: Session) -> None:

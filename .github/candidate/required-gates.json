@@ -15,6 +15,7 @@
   "gates": [
     "check",
     "postgres",
+    "vendored-verifier-differential",
     "image",
     "kernel-pin",
     "Governance pin is a real approved revision",

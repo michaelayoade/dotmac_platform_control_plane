@@ -721,13 +721,17 @@ def _verify_installed(
     try:
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        from dotmac_deployment_foundation.errors import SpecError
-        from dotmac_deployment_foundation.trusted_host_source import (
-            AttestationEnvelopeV2,
-            attestation_envelope_digest,
-        )
     except ImportError:
-        raise E10Refused("foundation-unavailable") from None
+        raise E10Refused("cryptography-unavailable") from None
+    # H1 (CP #266): the Foundation verifier is VENDORED byte for byte, pinned
+    # PROVISIONAL-PENDING-E5 (`vendor_cp/vendored_foundation/PINS.json`), so step 8
+    # runs from the image, which carries no `dotmac_deployment_foundation`.
+    from vendor_cp.vendored_foundation.errors import SpecError
+    from vendor_cp.vendored_foundation.trusted_host_source import (
+        AttestationEnvelopeV2,
+        attestation_envelope_digest,
+    )
+
     try:
         envelope = AttestationEnvelopeV2.from_mapping(installed)
     except SpecError:
