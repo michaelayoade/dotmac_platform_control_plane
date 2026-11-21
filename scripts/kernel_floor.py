@@ -406,6 +406,8 @@ def composed_distribution_maximum() -> tuple[str, str]:
 ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
     "dotmac_kernel": frozenset(
         {
+            "AuditActionRegistry",
+            "AuditActionsNotInstalledError",
             "BadRequestError",
             "Base",
             "CapabilityCatalogue",
@@ -433,6 +435,7 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
             "create_app",
             "currency",
             "hash_password",
+            "install_audit_actions",
             "models_platform",
             "settings_models",
             "uuid_pk",

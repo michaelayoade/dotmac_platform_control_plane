@@ -7,13 +7,9 @@ control plane.
 
 from __future__ import annotations
 
-from dotmac_kernel.features import FeatureManifest
+from dataclasses import replace
 
+from vendor_cp.provisioning.declaration import declaration
 from vendor_cp.provisioning.router import router
 
-feature = FeatureManifest(
-    name="provisioning",
-    routers=[router],
-    core=False,
-    enabled_by_default=True,
-)
+feature = replace(declaration, routers=[router])

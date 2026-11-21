@@ -6,14 +6,9 @@ commercial domain (the Commercial Agreements adapter pins them).
 
 from __future__ import annotations
 
-from dotmac_kernel.features import FeatureManifest
+from dataclasses import replace
 
+from vendor_cp.offers.declaration import declaration
 from vendor_cp.offers.router import router
 
-feature = FeatureManifest(
-    name="offers",
-    routers=[router],
-    audit_actions=("vendor.offer_version.published",),
-    core=True,
-    enabled_by_default=True,
-)
+feature = replace(declaration, routers=[router])
