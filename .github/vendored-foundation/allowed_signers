@@ -1,0 +1,9 @@
+# Allowed signers for the E5 certification record of the vendored Foundation source
+# (require_certified_vendored_pins.py; namespace and principal are constants there).
+#
+# EMPTY ON PURPOSE. No certifier key is pinned anywhere this repository can cite:
+# Starter's Gate 2 offline-verifier policy (docs/inventories/lane3-offline-verifier-policy.json)
+# is `unenrolled` with an empty signer set. Michael's public key is added here, in
+# the same change that commits e5-certification.json and its .sig at E5, as one line:
+#   e5-certifier@dotmac.io namespaces="dotmac-vendored-foundation-e5-certification-v1@dotmac.io" ssh-ed25519 <public key>
+# Until then publication refuses everything.

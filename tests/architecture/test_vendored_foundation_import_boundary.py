@@ -25,10 +25,35 @@ def _module_name(path: Path) -> str:
     return ".".join(parts)
 
 
+def _docstring_ids(tree: ast.AST) -> set[int]:
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body:
+            first = body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                found.add(id(first.value))
+    return found
+
+
 def importers_of_vendored(source: str, module: str, is_package: bool = False) -> bool:
     """Whether `source` (module `module`) imports the vendored package, any form."""
     pkg = module if is_package else module.rpartition(".")[0]
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    docstrings = _docstring_ids(tree)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and "vendored_foundation" in node.value
+        ):
+            # importlib / __import__ by string, in any spelling, absolute or relative
+            return True
         if isinstance(node, ast.Import):
             if any(
                 a.name == PACKAGE or a.name.startswith(PACKAGE + ".")
@@ -79,6 +104,16 @@ def test_the_boundary_detector_can_still_fail() -> None:
     assert importers_of_vendored(
         "from .vendored_foundation import errors", "vendor_cp", True
     )
+    for source in (
+        "import importlib\n"
+        'importlib.import_module("vendor_cp.vendored_foundation.errors")',
+        '__import__("vendor_cp.vendored_foundation")',
+        "import importlib\n"
+        'importlib.import_module(".vendored_foundation", "vendor_cp")',
+        "import importlib\n"
+        'importlib.import_module(f"vendor_cp.vendored_foundation.{x}")',
+    ):
+        assert importers_of_vendored(source, "vendor_cp.web.x"), source
     for source in (
         "import vendor_cp.vendored_foundation_notes",
         "from dotmac_deployment_foundation import errors",
