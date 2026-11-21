@@ -1,0 +1,12 @@
+{
+  "files": {
+    "lane3_cp6_export.py": {
+      "sha256": "78eb01ea3fe555b9bf3164a0f961e8bdc8a91b8875dd76a8f129e6dc908b16cf",
+      "source_path": "scripts/lane3_cp6_export.py"
+    }
+  },
+  "note": "Vendored VERBATIM, by sha256. The CP-6 pin is decided jointly before either PR merges: when #1103 changes this file, re-vendor it from the new head and update this file in the same change; this test then proves CP's export still parses.",
+  "source_commit": "02a4e835d7b0146b5d5b1730d4c11353d9a5f68a",
+  "source_pr": "S8a #1103 head (OPEN, DRAFT; the CP-6 schema is PROVISIONAL on the Starter side)",
+  "source_repository": "michaelayoade/dotmac_starter_mt"
+}

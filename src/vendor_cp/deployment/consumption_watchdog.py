@@ -62,6 +62,7 @@ from typing import Any, Final
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
+from vendor_cp.deployment import lease_role_spec
 from vendor_cp.deployment.consumption_role_spec import (
     revocation_sql,
     verification_sql,
@@ -74,6 +75,7 @@ from vendor_cp.deployment.target_refusals import (
 
 __all__ = [
     "ADMIN_DSN_ENV",
+    "KINDS",
     "BLOCKING_SECONDS",
     "EXIT_CLEAN",
     "EXIT_FAILED",
@@ -92,6 +94,11 @@ __all__ = [
 ]
 
 ADMIN_DSN_ENV: Final = "CONSUMPTION_WATCHDOG_DATABASE_URL"
+#: The roles this watchdog guards. Both are per-run roles of the same ceremony
+#: with the same tripwires; only their revocation statements differ (the lease
+#: role holds no ledger policy, only function grants and a binding). The pre-E11
+#: design (3.1) adds the lease role; the default stays the consumption role.
+KINDS: Final = ("consumption", "lease")
 IDLE_IN_TRANSACTION_SECONDS: Final = 30
 TRANSACTION_SECONDS: Final = 120
 STATEMENT_SECONDS: Final = 10
@@ -141,14 +148,27 @@ def role_exists(session: Any, role: str) -> bool:
     return bool(session.execute(text(_EXISTS_SQL), {"role": role}).scalar())
 
 
-def revoke(session_factory: Callable[[], Any], role: str) -> tuple[int, int, int]:
+def _statements(role: str, kind: str) -> tuple[tuple[str, ...], str]:
+    if kind == "lease":
+        return lease_role_spec.revocation_sql(role), lease_role_spec.verification_sql(
+            role
+        )
+    if kind == "consumption":
+        return revocation_sql(role), verification_sql(role)
+    raise ValueError("unknown role kind")
+
+
+def revoke(
+    session_factory: Callable[[], Any], role: str, kind: str = "consumption"
+) -> tuple[int, int, int]:
     """The full ordered revocation, then the read-back counts.
 
     Every step is attempted even if an earlier one errors (the aim is that nothing
     remains), each in its own transaction. Returns `(roles, sessions, policies)`
     remaining; the caller treats anything but zeros as a failure.
     """
-    for statement in revocation_sql(role):
+    revocation, verification = _statements(role, kind)
+    for statement in revocation:
         session = session_factory()
         try:
             connection = session.connection()
@@ -162,7 +182,7 @@ def revoke(session_factory: Callable[[], Any], role: str) -> tuple[int, int, int
             session.close()
     session = session_factory()
     try:
-        row = session.connection().exec_driver_sql(verification_sql(role)).one()
+        row = session.connection().exec_driver_sql(verification).one()
         session.rollback()
         return int(row[0]), int(row[1]), int(row[2])
     finally:
@@ -184,12 +204,13 @@ def revoke_until_clean(
     sleep: Callable[[float], None] = time.sleep,
     out: Callable[[str], None] = print,
     attempts: int = REVOKE_ATTEMPTS,
+    kind: str = "consumption",
 ) -> bool:
     """Revoke, read back, and retry with bounded backoff until nothing remains."""
     delay = 1.0
     for attempt in range(1, attempts + 1):
         try:
-            counts: tuple[int, int, int] | None = revoke(session_factory, role)
+            counts: tuple[int, int, int] | None = revoke(session_factory, role, kind)
         except Exception:
             counts = None
         if counts == (0, 0, 0):
@@ -213,6 +234,7 @@ def run(
     clock: Callable[[], float] = time.monotonic,
     out: Callable[[str], None] = print,
     install_signals: bool = True,
+    kind: str = "consumption",
 ) -> int:
     """Watch until the deadline, tripping on any violation. Always ends revoked.
 
@@ -286,7 +308,9 @@ def run(
             try:
                 for signum in SIGNALS if install_signals else ():
                     signal.signal(signum, signal.SIG_IGN)
-                clean = revoke_until_clean(session_factory, role, sleep=sleep, out=out)
+                clean = revoke_until_clean(
+                    session_factory, role, sleep=sleep, out=out, kind=kind
+                )
                 break
             except _Interrupted:
                 continue
@@ -299,7 +323,8 @@ def run(
     else:
         say(
             "watchdog: REVOCATION INCOMPLETE; the role may still be alive. "
-            "Revoke it by hand NOW (consumption_role_spec revoke, then verify)"
+            "Revoke it by hand NOW (consumption_role_spec or lease_role_spec revoke, "
+            "then verify)"
         )
         code = EXIT_UNCLEAN
     for old_signum, handler in previous.items():
@@ -312,6 +337,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True)
+    parser.add_argument("--kind", choices=KINDS, required=True)
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument(
         "--deadline-seconds", type=float, default=MAX_ROLE_TTL.total_seconds()
@@ -347,6 +373,7 @@ def main(
             args.role,
             deadline_seconds=args.deadline_seconds,
             interval=max(0.5, args.interval),
+            kind=args.kind,
         )
     except FoundationBindingsUnavailable as refusal:
         print(f"watchdog refused: {refusal.code}", file=sys.stderr)

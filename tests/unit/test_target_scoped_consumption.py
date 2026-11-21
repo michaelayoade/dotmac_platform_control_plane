@@ -191,6 +191,7 @@ class _CatalogueSession:
             scope._COLUMNS_SQL: [],
             scope._SEQUENCES_SQL: [],
             scope._FUNCTIONS_SQL: 0,
+            scope._LANE3_SQL: 0,
             scope._RLS_SQL: (True, False),
             scope._POLICIES_SQL: list(_GOOD_POLICIES),
         }
@@ -382,6 +383,32 @@ def test_owning_an_object_refuses() -> None:
 
 def test_an_executable_security_definer_function_refuses() -> None:
     assert _code(_CatalogueSession(FUNCTIONS_SQL=1)) is _OVER
+
+
+@pytest.mark.parametrize("held", [1, 2, 9])
+def test_any_privilege_in_the_lane3_store_refuses(held: int) -> None:
+    """Pre-E11 design 3.5: the target's role holds NOTHING in `cp_lane3`."""
+    assert _code(_CatalogueSession(LANE3_SQL=held)) is _OVER
+
+
+def test_the_lane3_question_names_every_kind_of_privilege() -> None:
+    sql = scope._LANE3_SQL
+    assert "'cp_lane3'" in sql
+    for needle in (
+        "has_schema_privilege(:role, n.oid, 'USAGE')",
+        "has_schema_privilege(:role, n.oid, 'CREATE')",
+        "'SELECT'",
+        "'INSERT'",
+        "'UPDATE'",
+        "'DELETE'",
+        "'TRUNCATE'",
+        "'REFERENCES'",
+        "'TRIGGER'",
+        "has_any_column_privilege",
+        "has_sequence_privilege",
+        "has_function_privilege(:role, p.oid, 'EXECUTE')",
+    ):
+        assert needle in sql, needle
 
 
 @pytest.mark.parametrize(

@@ -98,6 +98,12 @@ jobs:
             --branch main \
             --expect-head "${{ steps.select.outputs.current_main }}"
 
+      # The vendored Foundation verifier is pinned PROVISIONAL until E5 certifies
+      # it (src/vendor_cp/vendored_foundation/PINS.json). Publication refuses
+      # that; the unpublished PR-head image and ordinary CI are not gated here.
+      - name: Refuse publication while the vendored Foundation pin is provisional
+        run: python3 .github/candidate/require_certified_vendored_pins.py
+
       # ── 3. Build ONE local candidate. Nothing is pushed by this step. ───
       - name: Build the candidate
         env:

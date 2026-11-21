@@ -34,7 +34,8 @@ Layers:
    administrative read-only connection, for a named role. It refuses on role
    attributes, any role membership, database/schema CREATE, owned objects,
    privileges beyond the contract (schema-qualified, table AND column level,
-   sequences), executable SECURITY DEFINER functions, a missing expiry beyond
+   sequences), executable SECURITY DEFINER functions, ANY privilege in the Lane 3
+   lease-store schema `cp_lane3`, a missing expiry beyond
    4 hours, and missing connection/timeout/logging limits.
 
 The grant sets below ARE the contract `docs/design/scoped-consumption-role.md`
@@ -253,6 +254,36 @@ _FUNCTIONS_SQL: Final = (
     "WHERE p.prosecdef AND "
     + _SYSTEM_SCHEMA_PREDICATE
     + " AND has_function_privilege(:role, p.oid, 'EXECUTE')"
+)
+
+#: ANY privilege in the Lane 3 lease-store schema (`cp_lane3`, v023): schema
+#: USAGE or CREATE, a table privilege or a column privilege of any kind, a
+#: sequence privilege, or EXECUTE on any function. The consumption role holds
+#: NONE: a compromised target must not be able to read, extend or clear a lease
+#: (pre-E11 design 3.5). Counted, so a NULL cannot read as "none".
+_LANE3_SQL: Final = (
+    "SELECT "  # noqa: S608 - constants only
+    "(SELECT count(*) FROM pg_namespace n WHERE n.nspname = 'cp_lane3' "
+    "AND (has_schema_privilege(:role, n.oid, 'USAGE') "
+    "OR has_schema_privilege(:role, n.oid, 'CREATE'))) + "
+    "(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'cp_lane3' AND c.relkind IN ('r','p','v','m','f') AND ("
+    "has_table_privilege(:role, c.oid, 'SELECT') "
+    "OR has_table_privilege(:role, c.oid, 'INSERT') "
+    "OR has_table_privilege(:role, c.oid, 'UPDATE') "
+    "OR has_table_privilege(:role, c.oid, 'DELETE') "
+    "OR has_table_privilege(:role, c.oid, 'TRUNCATE') "
+    "OR has_table_privilege(:role, c.oid, 'REFERENCES') "
+    "OR has_table_privilege(:role, c.oid, 'TRIGGER') "
+    "OR has_any_column_privilege(:role, c.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))"
+    ") + "
+    "(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'cp_lane3' AND c.relkind = 'S' AND ("
+    "has_sequence_privilege(:role, c.oid, 'USAGE') "
+    "OR has_sequence_privilege(:role, c.oid, 'SELECT') "
+    "OR has_sequence_privilege(:role, c.oid, 'UPDATE'))) + "
+    "(SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+    "WHERE n.nspname = 'cp_lane3' AND has_function_privilege(:role, p.oid, 'EXECUTE'))"
 )
 
 _RLS_SQL: Final = (
@@ -495,6 +526,7 @@ def prove_scoped_role(
         columns = ask(_COLUMNS_SQL).all()
         sequences = ask(_SEQUENCES_SQL).all()
         definers = ask(_FUNCTIONS_SQL).scalar()
+        lane3 = ask(_LANE3_SQL).scalar()
         rls = ask(_RLS_SQL).one_or_none()
         policies = ask(_POLICIES_SQL).all()
     except FoundationBindingsUnavailable:
@@ -586,6 +618,12 @@ def prove_scoped_role(
     if definers != 0:
         raise _refuse(
             "the consumption role can execute a SECURITY DEFINER function", over
+        )
+    if lane3 != 0:
+        raise _refuse(
+            "the consumption role holds a privilege in the Lane 3 lease store "
+            "(cp_lane3); it must hold none",
+            over,
         )
 
     for name, use, select, update in ((str(r[1]), r[2], r[3], r[4]) for r in sequences):

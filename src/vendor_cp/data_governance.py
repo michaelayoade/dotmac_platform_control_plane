@@ -282,6 +282,49 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "current public identity activation state, rebuilt from retained git key "
         "events; no private key material",
     ),
+    # ── `cp_lane3`, the Lane 3 lease store and E10 receipts (v023) ───────
+    _retain(
+        "cp_lane3",
+        "e10_receipts",
+        "the per-VM-incarnation E10 receipt (Q2-A): written only by the ceremony "
+        "command on the owner DSN; v023 refuses UPDATE, DELETE and TRUNCATE; "
+        "no online role holds any privilege in the schema",
+    ),
+    _retain(
+        "cp_lane3",
+        "e10_destructions",
+        "the destruction stamp of an incarnation key, one per receipt, `destroyed_at` "
+        "set by trigger from the database clock; v023 refuses UPDATE, DELETE and "
+        "TRUNCATE",
+    ),
+    _retain(
+        "cp_lane3",
+        "run_bindings",
+        "the ceremony's statement that one lease role may act for one host and run; "
+        "append-only evidence of who was bound to what, and inert once the role is "
+        "gone",
+    ),
+    _gauge(
+        "cp_lane3",
+        "host_current_lease",
+        "the row-lock point and the pointer to each host's current lease, replaced "
+        "by UPDATE inside `cp_lane3.acquire`; never removed (v023 triggers). The "
+        "record is `host_leases`, which is retained",
+    ),
+    _retain(
+        "cp_lane3",
+        "host_leases",
+        "every lease ever granted: the host's mutation history. v023 refuses UPDATE, "
+        "DELETE and TRUNCATE, with one exception: the one-time NULL to value bind "
+        "of the lease document",
+    ),
+    _retain(
+        "cp_lane3",
+        "host_lease_releases",
+        "the terminal release of a lease and whether the host was mutated, one per "
+        "lease, `released_at` set by trigger from the database clock; v023 refuses "
+        "UPDATE, DELETE and TRUNCATE",
+    ),
     # ── `public`, kernel lineage ─────────────────────────────────────────
     _retain(
         "public",
@@ -544,8 +587,10 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "attestation_current_roots",
         "the rebuildable current-root projection over attestation enrolments and "
         "closures. Revocation removes a stale pointer rather than evidence; the "
-        "append-only source tables remain, and no mounted path reaches that "
-        "repair or revocation write today",
+        "append-only source tables remain. The one path that does so is the "
+        "operator command `lane3_e10 revoke` (step 15, the owner DSN in Michael's "
+        "session), which calls Control's `revoke_root`; no mounted path reaches "
+        "it, and no path at all reaches the repair write",
     ),
     _retain(
         "mod_deploy",
@@ -882,6 +927,13 @@ class Reachability(StrEnum):
     NOT_COMPOSED = "not_composed"
     #: Runs against a disposable rehearsal database, never a production one.
     REHEARSAL_ONLY = "rehearsal_only"
+    #: An operator command on the OWNER DSN, in an operator's session: not mounted,
+    #: not scheduled, never an online role. Only a `SUPERSEDED_IN_PLACE` gauge may
+    #: be the target (it is replaced or cleared, never a record), and the set of
+    #: such sites is ratcheted EXACTLY by
+    #: `tests/architecture/test_no_automated_hard_deletion.py`, whose static and
+    #: runtime premises prove no online entrypoint can load the command.
+    OPERATOR_COMMAND = "operator_command"
 
 
 @dataclass(frozen=True, slots=True)
@@ -900,6 +952,17 @@ class DeletionSite:
     def __post_init__(self) -> None:
         if not self.premise.strip():
             raise ValueError(f"{self.module}.{self.symbol}: a site needs a premise")
+        if self.reachability is Reachability.OPERATOR_COMMAND:
+            policy = POLICY_BY_TABLE.get(self.target)
+            if policy is None or policy.disposition is not (
+                Disposition.SUPERSEDED_IN_PLACE
+            ):
+                raise ValueError(
+                    f"{self.module}.{self.symbol} is an operator command and its "
+                    f"target {self.target!r} is not classified SUPERSEDED_IN_PLACE: "
+                    "an operator command may clear a derived gauge, never a record"
+                )
+            return
         if self.reachability is not Reachability.ONLINE_MOUNTED:
             return
         policy = POLICY_BY_TABLE.get(self.target)
@@ -1027,10 +1090,14 @@ DELETION_SITES: Final[tuple[DeletionSite, ...]] = (
         module="dotmac_deployment_control.attestation_trust_registry",
         symbol="revoke_root",
         target="mod_deploy.attestation_current_roots",
-        reachability=Reachability.NOT_COMPOSED,
-        premise="as `repair_current_root`: revocation clears only the derived "
-        "current-root pointer and the same guard refuses any syntactic seam "
-        "reference or exact symbol literal before a mounted path can reach it",
+        reachability=Reachability.OPERATOR_COMMAND,
+        premise="called only by `vendor_cp.deployment.lane3_e10.ControlRegistry` "
+        "from the `revoke` operator command (step 15, owner DSN, Michael's "
+        "session). Control a17 inserts the append-only closure row FIRST and then "
+        "deletes only the pointer that still names that fingerprint; the target is "
+        "a rebuildable gauge. Held by static and runtime premises in "
+        "`test_no_automated_hard_deletion.py` and by the exact a17 pin: a repin "
+        "must re-review that order and that condition",
     ),
     DeletionSite(
         distribution="dotmac-deployment-control",

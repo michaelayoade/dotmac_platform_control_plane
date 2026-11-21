@@ -188,8 +188,26 @@ def test_the_thresholds_match_the_sql_and_the_design() -> None:
 def test_the_command_needs_its_admin_credential(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert watchdog.main(["--role", "run_x"], {}) == watchdog.EXIT_FAILED
+    args = ["--role", "run_x", "--kind", "consumption"]
+    assert watchdog.main(args, {}) == watchdog.EXIT_FAILED
     assert watchdog.ADMIN_DSN_ENV in capsys.readouterr().err
+
+
+def test_the_kind_is_required_so_a_lease_role_is_never_watched_as_a_consumption_role(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No default: a missing `--kind` used to mean `consumption`, which would watch
+    (and on a trip revoke) a lease role with the wrong statements."""
+    with pytest.raises(SystemExit) as exited:
+        watchdog.main(["--role", "run_x"], {watchdog.ADMIN_DSN_ENV: "x"})
+    assert exited.value.code == 2
+    assert "--kind" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        watchdog.main(["--role", "run_x", "--kind", "other"], {})
+    for kind in watchdog.KINDS:
+        assert watchdog.main(["--role", "run_x", "--kind", kind], {}) == (
+            watchdog.EXIT_FAILED
+        )
 
 
 # ── signals and the revocation retry (review F1) ────────────────────────────
@@ -526,7 +544,10 @@ def test_the_command_refuses_a_dsn_without_a_bounded_connect_timeout(
         base + "?connect_timeout=abc",
     ):
         assert (
-            watchdog.main(["--role", "run_x"], {watchdog.ADMIN_DSN_ENV: dsn})
+            watchdog.main(
+                ["--role", "run_x", "--kind", "consumption"],
+                {watchdog.ADMIN_DSN_ENV: dsn},
+            )
             == watchdog.EXIT_FAILED
         )
         err = capsys.readouterr().err

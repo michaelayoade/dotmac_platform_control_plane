@@ -23,7 +23,7 @@ SOURCE = "registry.invalid/cp@sha256:" + "a" * 64
 TARGET = "registry.invalid/cp@sha256:" + "b" * 64
 REVISION = "c" * 40
 TARGET_REVISION = "d" * 40
-HEADS = ("dc_0014", "v022_deploy_agent")
+HEADS = ("dc_0014", "v023_lane3_store")
 
 
 def descriptor(image: str, revision: str) -> bytes:

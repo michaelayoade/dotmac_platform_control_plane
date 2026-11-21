@@ -406,6 +406,8 @@ def composed_distribution_maximum() -> tuple[str, str]:
 ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
     "dotmac_kernel": frozenset(
         {
+            "AuditActionRegistry",
+            "AuditActionsNotInstalledError",
             "BadRequestError",
             "Base",
             "CapabilityCatalogue",
@@ -433,6 +435,7 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
             "create_app",
             "currency",
             "hash_password",
+            "install_audit_actions",
             "models_platform",
             "settings_models",
             "uuid_pk",
@@ -440,6 +443,10 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "dotmac_kernel.audit": frozenset({"write_platform_audit_event"}),
+    # `vendor_cp.audit_bootstrap` (the one process-audit bootstrap, which the
+    # Lane 3 operator commands also use). First shipped in kernel 0.1.0a12, far
+    # below the composed maximum, so this raises nothing.
+    "dotmac_kernel.audit_actions": frozenset({"active_audit_actions"}),
     # First shipped in 0.1.0a100, which IS the composed maximum, so it raises
     # nothing and needs no `ASSEMBLY_SYMBOL_FLOORS` entry (ADR-0016 cutover).
     "dotmac_kernel.api_documentation": frozenset(
@@ -466,7 +473,19 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
     "dotmac_kernel.idempotency": frozenset(
         {"IdempotentOutcome", "execute_once_platform", "fingerprint_of"}
     ),
-    "dotmac_kernel.licensing": frozenset({"LicenceKeyRing"}),
+    # `LicenceKeyRing` is the licence-issuance ring. The three deployment-possession
+    # names (Lane 3 presentation-credential proof of possession) were first
+    # shipped in 0.1.0a9 (`DeploymentPossessionChallenge`, `DeploymentVerificationKey`
+    # and `verify_possession` all appear in the a9 tag's `licensing.py`), below the
+    # composed maximum: no floor entry.
+    "dotmac_kernel.licensing": frozenset(
+        {
+            "DeploymentPossessionChallenge",
+            "DeploymentVerificationKey",
+            "LicenceKeyRing",
+            "verify_possession",
+        }
+    ),
     "dotmac_kernel.messaging": frozenset(
         {
             "ClaimedPlatformEvent",

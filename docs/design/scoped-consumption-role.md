@@ -141,7 +141,7 @@ is executable by PUBLIC and PostgreSQL has no negative privilege. `log_statement
 `temp_file_limit`, `CONNECTION LIMIT` and `VALID UNTIL` are enforceable and are set above.
 The bound on locking is the watchdog:
 
-    CONSUMPTION_WATCHDOG_DATABASE_URL=... python -m vendor_cp.deployment.consumption_watchdog --role NAME
+    CONSUMPTION_WATCHDOG_DATABASE_URL=... python -m vendor_cp.deployment.consumption_watchdog --role NAME --kind consumption
 
 Each second it checks whether any backend of the role holds an advisory lock, has been
 idle in a transaction for over 30 s, has had a transaction open for over 120 s, has run

@@ -93,7 +93,18 @@ def require_version() -> str:
 
 @contextmanager
 def platform_db() -> Iterator[Session]:
-    """The one platform session, borrowed from the kernel for one command."""
+    """The one platform session, with this assembly's write vocabulary ready."""
+    try:
+        from vendor_cp.audit_bootstrap import ensure_process_audit_actions
+
+        ensure_process_audit_actions()
+    except Exception:
+        # Imports/configuration can include input values in their exceptions.
+        # Fail before opening a session, exposing only this fixed verdict.
+        raise refuse(
+            "execution.failed",
+            "the process audit vocabulary could not be installed",
+        ) from None
     try:
         from dotmac_kernel.db import platform_session
     except Exception as error:  # noqa: BLE001 - reported, never swallowed
