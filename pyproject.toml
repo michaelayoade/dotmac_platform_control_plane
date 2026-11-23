@@ -224,9 +224,12 @@ PyYAML = "6.0.2"
 line-length = 88
 target-version = "py312"
 src = ["src", "tests"]
-# Vendored byte-for-byte from the reviewed kit-v5 and pinned by sha256 in
-# a2_native_qualification/c4/PINS: it must not be reformatted or edited.
-extend-exclude = ["a2_native_qualification/c4/a2_recovery_observe_container.py"]
+# Vendored byte-for-byte and pinned by sha256 (a2_native_qualification/c4/PINS and
+# observer/PINS): these must not be reformatted or edited.
+extend-exclude = [
+  "a2_native_qualification/c4/a2_recovery_observe_container.py",
+  "a2_native_qualification/observer/a2-observer-secret.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "S"]

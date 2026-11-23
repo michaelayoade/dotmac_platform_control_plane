@@ -330,8 +330,8 @@ jobs:
           role="a2_recovery_observer_${role_suffix}"
           psql_() { docker compose -f cp-src/docker-compose.test.yml exec -T postgres psql -U postgres -d vendor_cp_test -v ON_ERROR_STOP=1 "$@"; }
           fail() {
-            printf '{"status":"FAIL","stage":"%s","script":"a2_recovery_observe_container.py"}\n' "$1" > "$out/recovery-observe-native.json"
-            echo "recovery_observe_native: FAIL at $1"
+            python3 -I -c 'import json,sys; json.dump({"status":"FAIL","stage":sys.argv[1],"detail":sys.argv[2],"script":"a2_recovery_observe_container.py"}, open(sys.argv[3],"w"), sort_keys=True)' "$1" "${2:-}" "$out/recovery-observe-native.json"
+            echo "recovery_observe_native: FAIL at $1 ${2:-}"
             exit 0
           }
           # 1. The vendored script must equal the pinned kit-v5 bytes.
@@ -341,7 +341,7 @@ jobs:
           #    in the migrated real schema, with Control's own test doubles.
           (cd control-src && poetry install --no-interaction >/dev/null 2>&1 \
             && PYTHONPATH="$PWD" poetry run python "$c4/seed.py" \
-              "postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test" > "$work/coords.json") || fail seed
+              "postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test" > "$work/coords.json" 2> "$work/seed.err") || fail seed "$(grep -E '^[A-Za-z_.]*(Error|Exception)' "$work/seed.err" | head -1 | cut -c1-240)"
           read -r ROLLOUT_REF PLAN_ID C1 C2 < <(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["rollout_ref"], d["plan_id"], d["rollout_command_id"], d["dispatch_command_id"])' "$work/coords.json") || fail coords
           # 3. Create the observer role exactly as REVIEW-P2-L1 r3 C5 specifies.
           umask 077
@@ -367,6 +367,8 @@ jobs:
           # Names-only drop, as r3 specifies (the CI database is disposable anyway).
           psql_ -c "REVOKE ALL ON mod_deploy.rollouts, mod_deploy.rollout_attempts, mod_deploy.rollout_attempt_settlements, public.platform_idempotency_records FROM ${role}; REVOKE USAGE ON SCHEMA mod_deploy, public FROM ${role}; REVOKE CONNECT ON DATABASE vendor_cp_test FROM ${role}; DROP ROLE ${role};" >/dev/null 2>&1 || true
           exit 0
+      - name: Observer SQL native proof (vendored snippet and templates, N=999)
+        run: bash a2_native_qualification/observer/run.sh
       - name: Write the receipt
         if: always()
         run: |
@@ -385,6 +387,7 @@ jobs:
             --pytest-rc "${PYTEST_RC:-255}" \
             --wheelhouse-manifest "$RUNNER_TEMP/out/wheelhouse-manifest.json" \
             --ci-runs "$RUNNER_TEMP/out/ci-runs.json" \
+            --observer-sql-result "$RUNNER_TEMP/out/observer-sql-native.json" \
             --observe-result "$RUNNER_TEMP/out/recovery-observe-native.json" \
             --control-junit "$RUNNER_TEMP/out/control-junit.xml" \
             --recovery-junit "$RUNNER_TEMP/out/recovery-junit.xml" \

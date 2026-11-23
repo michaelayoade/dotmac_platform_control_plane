@@ -1,0 +1,47 @@
+-- a2 recovery observer role (C5) names-only read-back, per-run template. Substitution: <N> only.
+-- Read-only (SELECT). Run with psql -A -t (no \pset lines: they would print status text). psql variable: :"dbname". Output: `check|true` or `check|false` rows;
+-- every row must read true. No secret and no value is selected.
+SELECT 'role_exists|' || (count(*) = 1)::text FROM pg_roles WHERE rolname = 'a2_recovery_observer_r<N>';
+SELECT 'canlogin_and_no_super_createdb_createrole_replication_bypassrls|' ||
+  (rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls)::text
+  FROM pg_roles WHERE rolname = 'a2_recovery_observer_r<N>';
+SELECT 'connlimit_is_2|' || (rolconnlimit = 2)::text FROM pg_roles WHERE rolname = 'a2_recovery_observer_r<N>';
+SELECT 'valid_until_set|' || (rolvaliduntil IS NOT NULL)::text FROM pg_roles WHERE rolname = 'a2_recovery_observer_r<N>';
+SELECT 'rolconfig_exactly_four|' ||
+  (rolconfig IS NOT NULL AND cardinality(rolconfig) = 4 AND
+    (SELECT bool_and(x = ANY (rolconfig)) FROM unnest(ARRAY[
+      'default_transaction_read_only=on', 'statement_timeout=5s', 'lock_timeout=2s',
+      'idle_in_transaction_session_timeout=10s']) AS x))::text
+  FROM pg_roles WHERE rolname = 'a2_recovery_observer_r<N>';
+SELECT 'table_grants_exactly_four_select|' || (count(*) = 4 AND bool_and(privilege_type = 'SELECT'))::text
+  FROM information_schema.role_table_grants WHERE grantee = 'a2_recovery_observer_r<N>';
+SELECT 'granted_tables_are_the_four|' || (coalesce(array_agg(table_schema || '.' || table_name ORDER BY table_schema, table_name), ARRAY[]::text[]) =
+  ARRAY['mod_deploy.rollout_attempt_settlements', 'mod_deploy.rollout_attempts', 'mod_deploy.rollouts', 'public.platform_idempotency_records'])::text
+  FROM information_schema.role_table_grants WHERE grantee = 'a2_recovery_observer_r<N>';
+SELECT 'no_column_privileges|' || (count(*) = 0)::text FROM information_schema.column_privileges WHERE grantee = 'a2_recovery_observer_r<N>';
+SELECT 'no_role_memberships|' || (count(*) = 0)::text
+  FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'a2_recovery_observer_r<N>';
+SELECT 'no_create_on_database|' || (NOT has_database_privilege('a2_recovery_observer_r<N>', :'dbname', 'CREATE'))::text;
+SELECT 'no_create_on_mod_deploy|' || (NOT has_schema_privilege('a2_recovery_observer_r<N>', 'mod_deploy', 'CREATE'))::text;
+SELECT 'no_create_on_public|' || (NOT has_schema_privilege('a2_recovery_observer_r<N>', 'public', 'CREATE'))::text;
+SELECT 'no_select_on_any_other_mod_deploy_table|' || (count(*) = 0)::text
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'mod_deploy' AND c.relkind IN ('r', 'p', 'v', 'm')
+    AND c.relname NOT IN ('rollouts', 'rollout_attempts', 'rollout_attempt_settlements')
+    AND has_table_privilege('a2_recovery_observer_r<N>', c.oid, 'SELECT');
+SELECT 'no_write_on_the_four_tables|' || (count(*) = 0)::text
+  FROM (VALUES ('mod_deploy.rollouts'), ('mod_deploy.rollout_attempts'), ('mod_deploy.rollout_attempt_settlements'),
+        ('public.platform_idempotency_records')) AS t(name)
+  WHERE has_table_privilege('a2_recovery_observer_r<N>', t.name, 'INSERT')
+     OR has_table_privilege('a2_recovery_observer_r<N>', t.name, 'UPDATE')
+     OR has_table_privilege('a2_recovery_observer_r<N>', t.name, 'DELETE')
+     OR has_table_privilege('a2_recovery_observer_r<N>', t.name, 'TRUNCATE');
+SELECT 'no_select_on_other_public_relations|' || (count(*) = 0)::text
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND c.relname != 'platform_idempotency_records'
+    AND has_table_privilege('a2_recovery_observer_r<N>', c.oid, 'SELECT');
+SELECT 'no_execute_on_security_definer_functions|' || (count(*) = 0)::text
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE p.prosecdef AND n.nspname IN ('mod_deploy', 'public', 'cp_lane3', 'cp_deploy_lease')
+    AND has_function_privilege('a2_recovery_observer_r<N>', p.oid, 'EXECUTE');

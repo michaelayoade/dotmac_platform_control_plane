@@ -1,0 +1,10 @@
+-- a2 recovery observer role (C5) drop, per-run template. Substitution: <N> only.
+-- psql variable supplied at run time: :"dbname".
+BEGIN;
+REVOKE ALL ON mod_deploy.rollouts, mod_deploy.rollout_attempts,
+  mod_deploy.rollout_attempt_settlements, public.platform_idempotency_records
+  FROM a2_recovery_observer_r<N>;
+REVOKE USAGE ON SCHEMA mod_deploy, public FROM a2_recovery_observer_r<N>;
+REVOKE CONNECT ON DATABASE :"dbname" FROM a2_recovery_observer_r<N>;
+DROP ROLE a2_recovery_observer_r<N>;
+COMMIT;

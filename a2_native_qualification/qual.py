@@ -256,6 +256,13 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
         else {"status": "FAIL", "stage": "not_run"}
     )
     judged.append({"id": "recovery_observe_native", **observe})
+    sql_path = Path(args.observer_sql_result)
+    observer_sql = (
+        json.loads(sql_path.read_text(encoding="utf-8"))
+        if sql_path.is_file()
+        else {"status": "FAIL", "stage": "not_run"}
+    )
+    judged.append({"id": "observer_sql_native", **observer_sql})
     log = Path(args.log)
     return {
         "schema": PG_SCHEMA,
@@ -291,6 +298,7 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
             "cp_image_id": args.cp_image_id,
         },
         "recovery_observe_native": observe,
+        "observer_sql_native": observer_sql,
         "recovery_contract": {
             "suite": recovery["suite"],
             "cp_repository": args.cp_repo,
@@ -389,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         "foundation-commit",
         "recovery-junit", "wheelhouse-manifest", "control-junit", "ci-runs",
         "observe-result",
+        "observer-sql-result",
         "recovery-cp-commit", "recovery-parity",
     ):  # fmt: skip
         pg.add_argument(f"--{flag}", required=True)

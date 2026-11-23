@@ -170,6 +170,8 @@ class ReceiptTests(unittest.TestCase):
                         str(tmp / "absent3.json"),
                         "--ci-runs",
                         str(tmp / "absent5.json"),
+                        "--observer-sql-result",
+                        str(tmp / "absent7.json"),
                         "--observe-result",
                         str(tmp / "absent6.json"),
                         "--control-junit",
@@ -201,6 +203,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertIn("r.json", sums)
         self.assertEqual(doc["recovery_contract"]["status"], "FAIL")
         self.assertEqual(doc["recovery_observe_native"]["status"], "FAIL")
+        self.assertEqual(doc["observer_sql_native"]["status"], "FAIL")
         self.assertEqual(
             {s["id"]: s["status"] for s in doc["scenarios"]}[
                 "a_standing_withdrawal_locking"
@@ -312,6 +315,54 @@ class C4Tests(unittest.TestCase):
         self.assertFalse(all(self.c4.judge_observation("not json").values()))
         good["original_authorization"] = {}
         self.assertFalse(all(self.c4.judge_observation(json.dumps(good)).values()))
+
+
+class ObserverResultTests(unittest.TestCase):
+    def setUp(self) -> None:
+        sys.path.insert(0, str(HERE / "observer"))
+        import observer_result
+
+        self.m = observer_result
+        self.stages = {s: "0" for s in observer_result.STAGES}
+        self.login = {
+            "select_four_tables_ok": True,
+            "select_deployment_plans_refused": True,
+            "insert_rollouts_refused": True,
+            "read_only_switched_off": True,
+            "insert_still_refused_after_read_only_off": True,
+            "tls_session": True,
+        }
+
+    def test_all_true_passes(self) -> None:
+        r = self.m.judge(
+            self.stages, ["a|true", "b|true"], self.login, ["role_absent|true"]
+        )
+        self.assertEqual(r["status"], "PASS")
+
+    def test_one_false_readback_row_fails_and_is_named(self) -> None:
+        r = self.m.judge(
+            self.stages,
+            ["a|true", "no_execute_on_security_definer_functions|false"],
+            self.login,
+            ["role_absent|true"],
+        )
+        self.assertEqual(r["status"], "FAIL")
+        self.assertIn(
+            "readback_no_execute_on_security_definer_functions", r["failed_checks"]
+        )
+
+    def test_missing_pieces_fail(self) -> None:
+        self.assertEqual(
+            self.m.judge(self.stages, [], self.login, ["role_absent|true"])["status"],
+            "FAIL",
+        )
+        self.assertEqual(
+            self.m.judge(self.stages, ["a|true"], {}, ["role_absent|true"])["status"],
+            "FAIL",
+        )
+        self.assertEqual(
+            self.m.judge(self.stages, ["a|true"], self.login, [])["status"], "FAIL"
+        )
 
 
 class BaoGuardTests(unittest.TestCase):

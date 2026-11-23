@@ -1,0 +1,7 @@
+# Vendored from .cutover-private/cp-generic-deploy-20261122/a2-gates/observer/ (final, pending diff-check).
+# The workflow refuses to run unless these digests match the bytes here.
+0380398a21b18aba21d3f10c9a67f8b450e176a297e1e0049217d33ea172c7ce  a2-observer-absence.sql.tmpl
+b87822722a8e4dcfa200c947e1ad62254790d67b662f1383b61847d4a4047139  a2-observer-create.sql.tmpl
+1e8e2ee6368b1bbe6a66bce54a8c3a534e77a136c6d3e3d031e7f419919f23a0  a2-observer-drop.sql.tmpl
+ff78f7e52f9839f992869a9e4d9b2b57c70ab93094f0f20241a1afdc619f4746  a2-observer-readback.sql.tmpl
+261ab8bc3a6f66fddb01244eef21f22ca58bad6fae2e2ce6af05c356136fbae4  a2-observer-secret.py
