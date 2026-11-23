@@ -69,6 +69,10 @@ ROUTER_REPLAYED = {
     "nonce_ledger": "test_router_refuses_a_nonce_replay / test_kernel_nonce_ledger_*",
     "denied_public_keys": "test_denied_public_keys_*",
     "keys": "used to sign by every test here",
+    "materials": (
+        "test_target_api_consumption.py::test_router_replays_materials_vectors"
+        " and ::test_mirror_materials_vectors"
+    ),
 }
 #: Pure functions of the contract, replayed against the mirror.
 MIRROR_REPLAYED = {
@@ -89,8 +93,6 @@ NOT_CP_SERVER = {
     "target_binding": "Control registration: OpenBao namespace-env",
     "value_vectors": "agent + Control: secret-shaped value refusal",
 }
-#: Replayed in the consumption commit (materials endpoint).
-PENDING_CONSUMPTION_COMMIT = {"materials"}
 
 
 def test_vector_file_is_vendored_byte_identical_and_pinned() -> None:
@@ -101,11 +103,7 @@ def test_vector_file_is_vendored_byte_identical_and_pinned() -> None:
 
 def test_every_vector_group_is_accounted_for() -> None:
     accounted = (
-        set(ROUTER_REPLAYED)
-        | set(MIRROR_REPLAYED)
-        | METADATA
-        | set(NOT_CP_SERVER)
-        | PENDING_CONSUMPTION_COMMIT
+        set(ROUTER_REPLAYED) | set(MIRROR_REPLAYED) | METADATA | set(NOT_CP_SERVER)
     )
     assert set(V) == accounted
 
@@ -287,13 +285,18 @@ def test_router_replays_request_check_ok() -> None:
         (call, _), *rest = handlers.calls
         assert not rest
         want = row["coordinates"]
-        assert call.coordinates.credential_id == want["credential_id"]
-        assert call.coordinates.dispatch_id == want["dispatch_id"]
-        assert call.coordinates.route == want["route"]
-        assert call.coordinates.target_ref == want["target_ref"]
-        assert call.coordinates.signed_message.decode() == want["signed_message_utf8"]
-        assert call.coordinates.nonce_ledger_key == want["nonce_ledger_key"]
-        assert nonces.spent == {want["nonce_ledger_key"]}
+        got = {
+            "credential_id": call.coordinates.credential_id,
+            "dispatch_id": call.coordinates.dispatch_id,
+            "route": call.coordinates.route,
+            "target_ref": call.coordinates.target_ref,
+            "signed_message_utf8": call.coordinates.signed_message.decode(),
+            "nonce_ledger_key": call.coordinates.nonce_ledger_key,
+        }
+        # some rows pin only a subset of the coordinates (the case-insensitive
+        # header row pins the target); every pinned one must match
+        assert want.items() <= got.items(), row
+        assert nonces.spent == {call.coordinates.nonce_ledger_key}
 
 
 def test_router_replays_request_check_refused() -> None:

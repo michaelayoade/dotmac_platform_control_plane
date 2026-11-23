@@ -15,10 +15,18 @@ from vendor_cp.deployment.target_api.auth import (
     TargetRequestAuthenticator,
     database_store_now,
 )
-from vendor_cp.deployment.target_api.handlers import (
-    NotImplementedHandlers,
-    TargetHandlers,
+from vendor_cp.deployment.target_api.consumption import (
+    ConsumptionBackend,
+    ConsumptionService,
+    MaterialsHandler,
+    MaterialsSource,
+    ObservationHandler,
+    ObservationSink,
+    TargetApiHandlers,
+    UnwiredBackend,
 )
+from vendor_cp.deployment.target_api.credentials import ControlObservationSink
+from vendor_cp.deployment.target_api.handlers import TargetHandlers
 from vendor_cp.deployment.target_api.response_signing import load_response_signer
 from vendor_cp.deployment.target_api.router import TargetApiRuntime, build_router
 
@@ -32,11 +40,17 @@ def install_runtime(
     directory: CredentialDirectory,
     sessions: Callable[[], AbstractContextManager[Session]],
     handlers: TargetHandlers | None = None,
+    backend: ConsumptionBackend | None = None,
+    materials: MaterialsSource | None = None,
+    observations: ObservationSink | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> TargetApiRuntime:
     """Compose the production runtime: Kernel nonce ledger, DB clock, config key.
 
     The authenticator keeps its default denied-key set; nothing here can lower it.
+    Without a composed `backend` (resolve, attestation re-verification, lease
+    check, finalizer) consumption refuses closed; without a `materials` source
+    the materials endpoint refuses. Observations go to Control's own ingestion.
     """
     global _runtime
     env = os.environ if environ is None else environ
@@ -48,7 +62,12 @@ def install_runtime(
             limiter=SlidingWindowRateLimiter(),
         ),
         signer=load_response_signer(env),
-        handlers=handlers or NotImplementedHandlers(),
+        handlers=handlers
+        or TargetApiHandlers(
+            consumption=ConsumptionService(backend or UnwiredBackend()),
+            materials=MaterialsHandler(materials),
+            observations=ObservationHandler(observations or ControlObservationSink()),
+        ),
         sessions=sessions,
     )
     return _runtime

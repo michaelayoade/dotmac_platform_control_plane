@@ -70,9 +70,12 @@ def test_the_target_api_has_no_database_dsn_engine_or_foundation_import() -> Non
             "create_engine",
             "sessionmaker",
             "dotmac_deployment_foundation",
-            "DATABASE_URL",
         ):
             assert forbidden not in text, (path.name, forbidden)
+        # `client.py` NAMES the database settings (it is the tripwire that refuses
+        # them); no other module may mention one.
+        if path.name != "client.py":
+            assert "DATABASE_URL" not in text, path.name
 
 
 def test_lane_5b_does_not_compose_the_router_into_any_profile() -> None:
