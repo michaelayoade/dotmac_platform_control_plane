@@ -150,3 +150,61 @@ The authorization expiry may not exceed the 4 hour role window.
   socket; the allowlisting relay cuts it to the two sign paths.
 - Starter ADR-0009 needs an amendment ("remote non-exportable signing custody is not
   dereferencing"). That is a Starter docs PR, deliberately not part of this change.
+
+## Source-only dispatch recovery
+
+The separately named policy and token role are both `cp-a2-recovery-dispatch`.
+They are rendered, never applied here:
+
+```sh
+python -m vendor_cp.deployment.transit_custody recovery-policy --config FILE
+python -m vendor_cp.deployment.transit_custody recovery-role --bound-cidr CIDR
+python -m vendor_cp.deployment.transit_custody recovery-role-readback --bound-cidr CIDR
+```
+
+Recovery permits update on the configured dispatch key only. The policy requires
+`input` and `key_version`, restricts the latter to 1, and allows no other
+parameters. The fixed role has one use and retains the normal non-orphan,
+nonrenewable service, no-default-policy, single measured source address and
+600-second maximum limits. The recovery custody builder refuses authorization
+and a second dispatch call; its client burns its single use before upstream I/O.
+The normal two-use renderer, role and builder retain their behavior.
+
+The existing materials producer exposes `recover-dispatch --recovery-request
+FILE --recovery-request-sha256 SHA256 --out-dir DIR --custody transit --custody-config FILE`. The token uses the
+existing stdin transport. FILE is a bounded strict JSON projection with exactly
+`original_request`, `resume_expectation`, `session_id`, `not_before`, `deadline`.
+The original request carries exactly the `IssueDispatchRequest` fields; its
+plan UUID and expiry are strings. The expectation uses Control's public mapping
+contract and includes the exact original signed authorization. The parser
+requires an absolute protected file path and the preapproved lowercase raw-byte
+SHA256 digest. It opens every path component without symlinks, checks root/current
+owner protection, a singly linked bounded regular file, read-to-EOF and stable
+identity/metadata on the same descriptor, then compares those actual bytes to the
+approved digest before JSON parsing or token reading. The digest must come from
+the approved projection; hashing the current mutable file is not approval. Shape,
+coordinates and the active bounded window are also checked before token reading.
+
+The protected caller must first bind every original host, incarnation,
+enrolment and controller fingerprint input, the session, and source/evidence
+references to the approved external recovery manifest. A signed Control
+authorization does not attest those CP host inputs. This projection is neither
+that approval nor native fault provenance. No signing, provisioning or delivery
+authority follows from parsing it.
+
+`recover_dispatch_materials` verifies the original authorization, requests the
+original rollout through the existing approval seam with an authorization
+signer that always refuses, and commits that replay. Dispatch enters a fresh
+approval hold through the existing seam and retains the same transaction until
+its commit. Control owns the atomic resume preconditions and fresh checks under
+its existing locks. CP's bound dispatch signer uses Control's public unsigned
+statement validator and exact canonical bytes, current UTC, actual distribution
+version and the session bounds before forwarding one sign. Output shares the
+normal assembly and create-only writer; callers supply a fresh output directory
+and retain failures without automatic retry.
+
+The new Control API is qualified against sibling source only until a reviewed
+release is adopted. Release pins are unchanged. Installed artifact/schema,
+native standing/expiry/concurrency, real policy-role enforcement, audit/revocation,
+exact-session signing approval and operational acceptance remain separate gates;
+see `conformance/recovery_source/README.md` for the offline scope.
