@@ -214,6 +214,7 @@ def build_runtime(
     handlers: TargetHandlers | None = None,
     denied: frozenset[str] | None = None,
     limiter: SlidingWindowRateLimiter | None = None,
+    session: Any = None,
 ) -> TargetApiRuntime:
     """`denied=frozenset()` lets the replay admit the vector file's published
     request key; production composition (`install_runtime`) never passes it."""
@@ -231,7 +232,7 @@ def build_runtime(
         ),
         signer=SeedSigner(response_seed),
         handlers=handlers or RecordingHandlers(),
-        sessions=lambda: nullcontext(None),  # type: ignore[arg-type,return-value]
+        sessions=lambda: nullcontext(session),
     )
 
 

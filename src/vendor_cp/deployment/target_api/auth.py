@@ -222,6 +222,9 @@ class AuthenticatedCall:
     coordinates: c.RequestCoordinates
     store_now: datetime
     store_now_stamp: str
+    #: The raw bytes the signature covered, for a handler that must hand them on
+    #: unparsed (an observation envelope is verified over its exact bytes).
+    body: bytes = b""
 
 
 class TargetRequestAuthenticator:
@@ -312,6 +315,7 @@ class TargetRequestAuthenticator:
             coordinates=coordinates,
             store_now=store_now,
             store_now_stamp=stamp,
+            body=body,
         )
 
     def _key_is_denied(self, public_key_b64u: str) -> bool:

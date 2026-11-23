@@ -21,9 +21,10 @@ callers'; this module fixes the BYTES that are signed.
 
 Everything below the imports is a transcription of Control's functions with one
 substitution: `sha256` comes from `hashlib` instead of Control's
-`RequestBodyDigestV1` (CP a17 has no such type). Materials helpers
-(`plan_snapshot_digest`, `check_materials_shape`, secrets-namespace helpers) are
-target-side concerns and are not mirrored.
+`RequestBodyDigestV1` (CP a17 has no such type). The materials helpers
+(`plan_snapshot_digest`, `check_materials_shape`, ...) are mirrored for the
+materials endpoint, which validates what it emits; the secrets-namespace
+helpers are Control's and are not.
 """
 
 from __future__ import annotations
@@ -128,6 +129,7 @@ _DISPATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _NONCE = re.compile(r"[0-9a-f]{32}")
 _STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _B64URL = re.compile(r"[A-Za-z0-9_-]*")
+_CANONICAL_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _FORBIDDEN_PATH_CHARS = frozenset("%?#\\ \t\r\n\x00")
 
 
@@ -718,3 +720,141 @@ def classify_unsigned_response(status: int) -> str:
     if status in (413, 429) or 500 <= status <= 599:
         return "cp_unreachable"
     return "response_signature_invalid"
+
+
+# ── Materials ───────────────────────────────────────────────────────────────
+
+
+def plan_snapshot_digest(plan_snapshot: Mapping[str, Any]) -> str:
+    """`sha256(canonical_json(plan_snapshot))`, as `sha256:<hex>`."""
+    canonical = json.dumps(dict(plan_snapshot), sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def primary_image(plan_snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The primary service's image: the one the plan binding NAMES.
+
+    The binding carries `primary_service`; there is no fallback to "the only
+    image", so a snapshot that names nothing (or an unknown service) is refused.
+    """
+    binding = plan_snapshot.get("deploy_binding")
+    if not isinstance(binding, Mapping):
+        raise TargetApiError("the plan snapshot has no deploy binding")
+    service = binding.get("primary_service")
+    chosen = [
+        image
+        for image in (binding.get("images") or [])
+        if isinstance(service, str) and service and image.get("service") == service
+    ]
+    if len(chosen) != 1:
+        raise TargetApiError("the plan binding names no single primary image")
+    primary: Mapping[str, Any] = chosen[0]
+    return primary
+
+
+def plan_roles(plan_snapshot: Mapping[str, Any]) -> list[tuple[str, bool]]:
+    """`(role, single_use)` for secret_id minting, from the SIGNED plan only."""
+    binding = plan_snapshot.get("deploy_binding")
+    rows = binding.get("roles") if isinstance(binding, Mapping) else None
+    if not isinstance(rows, list):
+        raise TargetApiError("the plan binding carries no roles")
+    out: list[tuple[str, bool]] = []
+    for row in rows:
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != {"role", "single_use"}
+            or not isinstance(row["role"], str)
+            or not _SEGMENT.fullmatch(row["role"])
+            or type(row["single_use"]) is not bool
+        ):
+            raise TargetApiError("a plan role is exactly {role, single_use}")
+        out.append((row["role"], row["single_use"]))
+    if [r for r, _ in out] != sorted({r for r, _ in out}):
+        raise TargetApiError("plan roles are unique and sorted")
+    return out
+
+
+def expected_app_image(plan_snapshot: Mapping[str, Any]) -> str:
+    """`app_image` must equal the primary service's `planned_repository@digest`."""
+    image = primary_image(plan_snapshot)
+    return f"{image['planned_repository']}@{image['planned_digest']}"
+
+
+def archive_name(service: str, digest: str) -> str:
+    """The transfer archive, derived: `<service>-<digest hex>.oci.tar`."""
+    if not _SEGMENT.fullmatch(service) or _CANONICAL_DIGEST.fullmatch(digest) is None:
+        raise TargetApiError("an archive name needs a service and a sha256 digest")
+    return f"{service}-{digest.split(':', 1)[1]}.oci.tar"
+
+
+def check_materials_shape(document: Mapping[str, Any]) -> None:
+    """The structural contract of the materials document (not its signatures).
+
+    The agent separately verifies the dispatch envelope under the
+    enrolment-pinned identity; this fixes what the document may contain and
+    cross-checks every unsigned field against the signed statement and the plan
+    snapshot, so no CP-supplied value can differ from what Control signed.
+    """
+    if not isinstance(document, Mapping):
+        raise TargetApiError("materials are a mapping")
+    forbidden = sorted(set(document) & MATERIALS_FORBIDDEN_KEYS)
+    if forbidden:
+        raise TargetApiError(f"materials carry removed keys: {', '.join(forbidden)}")
+    if not set(document) <= MATERIALS_KEYS:
+        raise TargetApiError("materials carry an unknown key")
+    if document.get("schema") != MATERIALS_SCHEMA:
+        raise TargetApiError(f"materials schema is {MATERIALS_SCHEMA}")
+    missing = sorted(MATERIALS_ALWAYS - set(document))
+    if missing:
+        raise TargetApiError(f"materials need {', '.join(missing)}")
+    target_ref = document["target_ref"]
+    product, environment, _host = _check_target_ref(target_ref)
+    parse_stamp(document["store_now"])
+    pending = document["pending"]
+    if type(pending) is not bool:
+        raise TargetApiError("pending is a boolean")
+    present = set(document) & MATERIALS_PENDING
+    if not pending:
+        if present:
+            raise TargetApiError("nothing is pending: no dispatch fields may appear")
+        return
+    if present != MATERIALS_PENDING:
+        raise TargetApiError("a pending document carries the whole dispatch")
+    envelope, snapshot = document["dispatch_envelope"], document["plan_snapshot"]
+    if not isinstance(envelope, Mapping) or not isinstance(snapshot, Mapping):
+        raise TargetApiError("the envelope and the snapshot are mappings")
+    statement = envelope.get("statement")
+    if not isinstance(statement, Mapping) or not STATEMENT_KEYS <= set(statement):
+        raise TargetApiError("the envelope carries no signed statement")
+    if not isinstance(document["dispatch_id"], str) or not _DISPATCH_ID.fullmatch(
+        document["dispatch_id"]
+    ):
+        raise TargetApiError("dispatch_id is well formed")
+    for key, expected in (
+        ("dispatch_id", document["dispatch_id"]),
+        ("target_ref", target_ref),
+        ("product_code", product),
+        ("environment", environment),
+        ("plan_digest", plan_snapshot_digest(snapshot)),
+    ):
+        if statement.get(key) != expected:
+            raise TargetApiError(f"the signed statement's {key} differs")
+    for key, expected in (
+        ("target_ref", target_ref),
+        ("product_code", product),
+        ("environment", environment),
+    ):
+        if snapshot.get(key) != expected:
+            raise TargetApiError(f"the plan snapshot's {key} differs")
+    params = document["params"]
+    if not isinstance(params, list) or any(
+        not isinstance(row, Mapping)
+        or set(row) != {"name", "material", "type", "value"}
+        for row in params
+    ):
+        raise TargetApiError("params are a list of {name, material, type, value}")
+    plan_roles(snapshot)
+    if document["app_image"] != expected_app_image(snapshot):
+        raise TargetApiError(
+            "app_image is not the primary service's planned_repository@planned_digest"
+        )
