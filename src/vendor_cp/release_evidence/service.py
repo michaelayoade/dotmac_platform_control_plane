@@ -242,26 +242,27 @@ def _existing_attestation(
     artifact: ReleaseArtifact,
     digest: str,
     uri: str,
+    kind: AttestationKind = AttestationKind.PRODUCT_MANIFEST,
 ) -> ArtifactAttestation | None:
     attestations = list(
         db.scalars(
             select(ArtifactAttestation).where(
                 ArtifactAttestation.artifact_id == artifact.id,
-                ArtifactAttestation.attestation_kind
-                == AttestationKind.PRODUCT_MANIFEST.value,
+                ArtifactAttestation.attestation_kind == kind.value,
             )
         )
     )
+    label = kind.value.replace("_", "-")
     if not attestations:
         return None
     if len(attestations) != 1:
         raise ReleaseEvidenceConflict(
-            "catalogued artifact has ambiguous product-manifest attestations"
+            f"catalogued artifact has ambiguous {label} attestations"
         )
     attestation = attestations[0]
     if attestation.digest != digest or attestation.uri != uri:
         raise ReleaseEvidenceConflict(
-            "catalogued product-manifest attestation conflicts with supplied evidence"
+            f"catalogued {label} attestation conflicts with supplied evidence"
         )
     return attestation
 
@@ -304,6 +305,7 @@ def _attest_or_replay(
     artifact: ReleaseArtifact,
     digest: str,
     uri: str,
+    kind: AttestationKind = AttestationKind.PRODUCT_MANIFEST,
 ) -> tuple[ArtifactAttestation, bool]:
     # Serialize all product-manifest decisions for one artifact. A row lock is
     # deliberately unavailable: Release Catalog gives platform_api SELECT and
@@ -319,9 +321,11 @@ def _attest_or_replay(
                 "SELECT pg_advisory_xact_lock("
                 "hashtextextended(CAST(:identity AS text), 0))"
             ),
-            {"identity": f"product_manifest:{artifact.id}"},
+            {"identity": f"{kind.value}:{artifact.id}"},
         )
-    attestation = _existing_attestation(db, artifact=artifact, digest=digest, uri=uri)
+    attestation = _existing_attestation(
+        db, artifact=artifact, digest=digest, uri=uri, kind=kind
+    )
     if attestation is not None:
         return attestation, True
     try:
@@ -329,7 +333,7 @@ def _attest_or_replay(
             attestation = attest_artifact(
                 db,
                 artifact_id=artifact.id,
-                attestation_kind=AttestationKind.PRODUCT_MANIFEST,
+                attestation_kind=kind,
                 uri=uri,
                 digest=digest,
             )
@@ -339,6 +343,7 @@ def _attest_or_replay(
             artifact=artifact,
             digest=digest,
             uri=uri,
+            kind=kind,
         )
         if attestation is None:
             raise

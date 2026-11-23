@@ -36,27 +36,21 @@ from urllib.parse import urldefrag
 from uuid import UUID
 
 from dotmac_kernel import write_platform_audit_event
-from dotmac_kernel.db import conflict_savepoint
 from dotmac_kernel.idempotency import (
     IdempotentOutcome,
     execute_once_platform,
     fingerprint_of,
 )
 from dotmac_release_catalog import (
-    ArtifactAttestation,
     AttestationKind,
     Digest,
-    ReleaseArtifact,
-    attest_artifact,
     pinned_reference,
 )
-from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from vendor_cp.release_evidence.service import (
-    ReleaseEvidenceConflict,
     ReleaseEvidenceError,
+    _attest_or_replay,
     _existing_artifact,
     _publish_or_replay,
 )
@@ -197,68 +191,6 @@ def _fingerprint(command: DeployUnitEvidenceCommand) -> str:
     )
 
 
-def _existing_attestation(
-    db: Session, *, artifact: ReleaseArtifact, digest: str, uri: str
-) -> ArtifactAttestation | None:
-    attestations = list(
-        db.scalars(
-            select(ArtifactAttestation).where(
-                ArtifactAttestation.artifact_id == artifact.id,
-                ArtifactAttestation.attestation_kind
-                == AttestationKind.DEPLOY_UNIT.value,
-            )
-        )
-    )
-    if not attestations:
-        return None
-    if len(attestations) != 1:
-        raise ReleaseEvidenceConflict(
-            "catalogued artifact has ambiguous deploy-unit attestations"
-        )
-    attestation = attestations[0]
-    if attestation.digest != digest or attestation.uri != uri:
-        raise ReleaseEvidenceConflict(
-            "catalogued deploy-unit attestation conflicts with supplied evidence"
-        )
-    return attestation
-
-
-def _attest_or_replay(
-    db: Session, *, artifact: ReleaseArtifact, digest: str, uri: str
-) -> tuple[ArtifactAttestation, bool]:
-    # Same serialisation as the product-manifest path: platform_api has SELECT
-    # and INSERT only, so a row lock is unavailable and an advisory transaction
-    # lock keeps two different descriptors from being admitted concurrently.
-    if db.get_bind().dialect.name == "postgresql":
-        db.execute(
-            text(
-                "SELECT pg_advisory_xact_lock("
-                "hashtextextended(CAST(:identity AS text), 0))"
-            ),
-            {"identity": f"deploy_unit:{artifact.id}"},
-        )
-    attestation = _existing_attestation(db, artifact=artifact, digest=digest, uri=uri)
-    if attestation is not None:
-        return attestation, True
-    try:
-        with conflict_savepoint(db):
-            attestation = attest_artifact(
-                db,
-                artifact_id=artifact.id,
-                attestation_kind=AttestationKind.DEPLOY_UNIT,
-                uri=uri,
-                digest=digest,
-            )
-    except IntegrityError:
-        attestation = _existing_attestation(
-            db, artifact=artifact, digest=digest, uri=uri
-        )
-        if attestation is None:
-            raise
-        return attestation, True
-    return attestation, False
-
-
 def _check_descriptor(command: DeployUnitEvidenceCommand) -> None:
     payload = command.deploy_unit
     if not payload or len(payload) > MAX_DEPLOY_UNIT_BYTES:
@@ -308,13 +240,14 @@ def record_deploy_unit_evidence(
             artifact=artifact,
             digest=command.deploy_unit_digest,
             uri=uri,
+            kind=AttestationKind.DEPLOY_UNIT,
         )
         semantic_replay = artifact_replayed and attestation_replayed
         if not semantic_replay:
             write_platform_audit_event(
                 session,
                 actor_admin_id=command.actor_admin_id,
-                action=AUDIT_ACTION,
+                action="vendor.release_evidence.deploy_unit_attested",
                 entity_type="release_artifact",
                 entity_id=str(artifact.id),
                 details={

@@ -73,9 +73,28 @@ def parse_release_ref(release_ref: str) -> tuple[str, str]:
 
 
 def _default_session_scope() -> AbstractContextManager[Session]:
-    from dotmac_kernel.db import platform_session
+    # The one existing platform-session borrower (`dotmac_kernel.db` importers
+    # are a ratcheted inventory that is being retired, so no new one is added).
+    # Its refusals are CLI-shaped; here any failure means "cannot answer".
+    from vendor_cp.cli.runtime import platform_db
 
-    return platform_session()
+    return _Guarded(platform_db())
+
+
+class _Guarded:
+    def __init__(self, inner: AbstractContextManager[Session]) -> None:
+        self._inner = inner
+
+    def __enter__(self) -> Session:
+        try:
+            return self._inner.__enter__()
+        except Exception:
+            raise ReleaseDescriptorUnavailableError(
+                "the catalogue database is unavailable"
+            ) from None
+
+    def __exit__(self, *exc: object) -> bool | None:
+        return self._inner.__exit__(*exc)  # type: ignore[arg-type]
 
 
 def _default_store() -> DeployUnitStore:

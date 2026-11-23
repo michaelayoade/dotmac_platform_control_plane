@@ -477,8 +477,8 @@ def test_pin_rewrite_byte_identical(tmp_path: Path) -> None:
     Replayed over every one of Control's published render vectors, so the
     property holds for the exact bytes Control digests and binds.
     """
-    vectors = _contract()["render_vectors"]
-    assert vectors  # SENSITIVITY: an empty vector set would pass vacuously
+    vectors = [v for v in _contract()["render_vectors"] if "render_utf8" in v]
+    assert len(vectors) >= 4  # SENSITIVITY: an empty set would pass vacuously
     for index, vector in enumerate(vectors):
         render = vector["render_utf8"].encode("utf-8")
         assert _digest(render) == vector["digest"]

@@ -680,11 +680,16 @@ def test_m4_profile_publishes_control_surface_and_preserves_bootstrap_routes() -
     bootstrap = _route_signatures(
         assembly.build_spec(deployment_profile(PRODUCTION_BOOTSTRAP))
     )
-    control = {s for s in signatures if s[0].startswith(DEPLOYMENT_CONTROL_PREFIX)}
+    # Control a18 mounts its screens at several prefixes (deployments,
+    # deployment-sets, deploy-settings, arrivals), so select by owner, not path.
+    control = {s for s in signatures if ":deployment_control:" in s[2]}
     # SENSITIVITY: the surface is really there, not an empty comparison.
     assert control, sorted(signatures)
     assert signatures - control == bootstrap
-    assert not {s for s in bootstrap if s[0].startswith(DEPLOYMENT_CONTROL_PREFIX)}
+    assert not {s for s in bootstrap if ":deployment_control:" in s[2]}
+    # Platform-admin session only: every Control route is a web:platform_admin
+    # route, none is a target-signed or bearer API route.
+    assert all(s[2].startswith("web:platform_admin:") for s in control), control
     paths = {signature[0] for signature in signatures}
     # Neither the frozen agent API nor a target-signed router rides along.
     assert not _under(paths, "/platform/deploy/")

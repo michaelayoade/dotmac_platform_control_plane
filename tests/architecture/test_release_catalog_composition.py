@@ -72,6 +72,7 @@ def test_vendor_ingestion_adapter_owns_its_audit_vocabulary() -> None:
     manifests = {manifest.name: manifest for manifest in build_spec().modules}
     assert manifests["release_evidence"].audit_actions == (
         "vendor.release_evidence.catalogued",
+        "vendor.release_evidence.deploy_unit_attested",
     )
 
 
