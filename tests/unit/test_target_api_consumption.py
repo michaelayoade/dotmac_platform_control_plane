@@ -9,6 +9,7 @@ OWN decisions (ownership, replay, ordering, refusals) are what is under test.
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta
@@ -74,14 +75,14 @@ class FakeBackend:
         resolution_id: str = "res-1",
         lease_ok: bool = True,
         reverify: ConsumptionRefused | None = None,
-        finalize: ConsumptionRefused | None = None,
+        commit_consumption: ConsumptionRefused | None = None,
         resolve_refusal: ConsumptionRefused | None = None,
     ) -> None:
         self.target_ref = target_ref
         self.resolution_id = resolution_id
         self.lease_ok = lease_ok
         self.reverify = reverify
-        self.finalize_refusal = finalize
+        self.finalize_refusal = commit_consumption
         self.resolve_refusal = resolve_refusal
         self.calls: list[str] = []
         self.finalized = 0
@@ -118,7 +119,7 @@ class FakeBackend:
         self.calls.append("covers")
         return self.lease_ok
 
-    def finalize(
+    def commit_consumption(
         self,
         db: Session,
         *,
@@ -126,7 +127,7 @@ class FakeBackend:
         request: Mapping[str, object],
         store_now: datetime,
     ) -> Mapping[str, object]:
-        self.calls.append("finalize")
+        self.calls.append("commit_consumption")
         if self.finalize_refusal:
             raise self.finalize_refusal
         self.finalized += 1
@@ -214,7 +215,7 @@ def test_consume_commits_once_and_returns_the_marker(db: Session) -> None:
         "consumption_ref": "control-dispatch:dispatch-0001"
     }
     # the design's order: re-resolve, re-verify, covers, then the composer
-    assert backend.calls == ["resolve", "reverify", "covers", "finalize"]
+    assert backend.calls == ["resolve", "reverify", "covers", "commit_consumption"]
 
 
 def test_second_consume_409_marker(db: Session) -> None:
@@ -237,7 +238,7 @@ def test_consume_requires_covering_lease(db: Session) -> None:
     response = rig.post("consume", _CONSUME)
     assert response.status_code == 409
     assert response.json()["error"] == "no_covering_lease"
-    assert "finalize" not in backend.calls
+    assert "commit_consumption" not in backend.calls
     assert backend.finalized == 0
     # and nothing was recorded: a later covered attempt consumes
     backend.lease_ok = True
@@ -269,7 +270,7 @@ def test_consume_refuses_when_the_attestation_pair_does_not_reverify(
 def test_consume_surfaces_the_finalizers_refusals_and_records_nothing(
     db: Session, code: str
 ) -> None:
-    backend = FakeBackend(finalize=ConsumptionRefused(code))
+    backend = FakeBackend(commit_consumption=ConsumptionRefused(code))
     rig = Rig(backend, db)
     response = rig.post("consume", _CONSUME)
     assert response.status_code == 409
@@ -424,13 +425,14 @@ def _client(
     )
 
 
+_NONCE_COUNTER = itertools.count(1000)
+
+
 class _Nonces:
-    def __init__(self) -> None:
-        self.n = 1000
+    """Unique across every client in the process: a reused nonce is a replay."""
 
     def __call__(self) -> str:
-        self.n += 1
-        return f"{self.n:032x}"
+        return f"{next(_NONCE_COUNTER):032x}"
 
 
 def test_client_round_trip_resolve_consume_replay(db: Session) -> None:

@@ -63,7 +63,7 @@ class _Backend:
     ) -> bool:
         return True
 
-    def finalize(
+    def commit_consumption(
         self,
         db: Session,
         *,

@@ -38,14 +38,14 @@ barrier. Until a composition supplies them the default backend refuses closed
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, Protocol
 
 from dotmac_kernel.idempotency import execute_once_platform
-from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
-from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from vendor_cp.deployment.target_api import contract as c
@@ -112,7 +112,7 @@ class ConsumptionBackend(Protocol):
         store_now: datetime,
     ) -> bool: ...
 
-    def finalize(
+    def commit_consumption(
         self,
         db: Session,
         *,
@@ -149,7 +149,7 @@ class UnwiredBackend:
     ) -> bool:
         raise self._refuse()
 
-    def finalize(
+    def commit_consumption(
         self,
         db: Session,
         *,
@@ -197,14 +197,25 @@ def _ledger_key(dispatch_id: str) -> str:
     return f"control-dispatch:{dispatch_id}"
 
 
+#: The Kernel's platform ledger, read by scope and key. A raw statement, not the
+#: ORM class, because the executable surface imports only kernel names a declared
+#: floor covers (`scripts/kernel_floor.py`), and this reads one row of a table the
+#: kernel documents (`execute_once_platform`'s "platform catalog table").
+_LEDGER_READ: Final = text(
+    "SELECT result FROM platform_idempotency_records "
+    "WHERE scope = :scope AND key = :key"
+)
+
+
 def _committed(db: Session, dispatch_id: str) -> Mapping[str, Any] | None:
-    row = db.execute(
-        select(PlatformIdempotencyRecord).where(
-            PlatformIdempotencyRecord.scope == CONSUME_LEDGER_SCOPE,
-            PlatformIdempotencyRecord.key == _ledger_key(dispatch_id),
-        )
+    stored = db.execute(
+        _LEDGER_READ,
+        {"scope": CONSUME_LEDGER_SCOPE, "key": _ledger_key(dispatch_id)},
     ).scalar_one_or_none()
-    return None if row is None else dict(row.result or {})
+    if stored is None:
+        return None
+    result = json.loads(stored) if isinstance(stored, str) else stored
+    return dict(result) if isinstance(result, dict) else None
 
 
 class ConsumptionService:
@@ -271,7 +282,7 @@ class ConsumptionService:
 
         def effect(session: Session) -> Mapping[str, object]:
             marker = dict(
-                self._backend.finalize(
+                self._backend.commit_consumption(
                     session,
                     resolution=resolution,
                     request=request,
