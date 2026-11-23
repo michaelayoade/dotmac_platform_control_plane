@@ -8,5 +8,8 @@ feature = FeatureManifest(
     name="release_evidence",
     core=True,
     enabled_by_default=True,
-    audit_actions=("vendor.release_evidence.catalogued",),
+    audit_actions=(
+        "vendor.release_evidence.catalogued",
+        "vendor.release_evidence.deploy_unit_attested",
+    ),
 )

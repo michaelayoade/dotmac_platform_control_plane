@@ -163,6 +163,13 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "catalogue exact product release evidence",
     ),
     Owner(
+        "release record-deploy-unit",
+        "vendor_cp.release_evidence.deploy_unit",
+        "record_deploy_unit_evidence",
+        True,
+        "catalogue a release's exact deploy-unit.toml as a deploy_unit attestation",
+    ),
+    Owner(
         "release pins",
         "vendor_cp.config",
         "load_vendor_settings",

@@ -425,6 +425,47 @@ def release_record(args: argparse.Namespace) -> Result:
         )
 
 
+def release_record_deploy_unit(args: argparse.Namespace) -> Result:
+    """Catalogue one release's exact deploy-unit.toml (an attended CP write)."""
+    from vendor_cp.config import vendor_settings
+    from vendor_cp.release_evidence.deploy_unit import (
+        DeployUnitEvidenceCommand,
+        DirectoryDeployUnitStore,
+        record_deploy_unit_evidence,
+    )
+
+    deploy_unit = read_bytes(args.deploy_unit_path, what="deploy-unit descriptor")
+    with platform_db() as db:
+        outcome = record_deploy_unit_evidence(
+            db,
+            DeployUnitEvidenceCommand(
+                command_id=args.command_id,
+                product_code=args.product_code,
+                product_version=args.product_version,
+                artifact_digest=args.artifact_digest,
+                artifact_ref=args.artifact_ref,
+                source_revision=args.source_revision,
+                descriptor_path=args.descriptor_path,
+                deploy_unit_digest=args.deploy_unit_digest,
+                deploy_unit=deploy_unit,
+                actor_admin_id=None,
+                operator_ref=args.operator_ref,
+            ),
+            document_store=DirectoryDeployUnitStore(
+                root=vendor_settings.product_manifest_directory / "deploy-units"
+            ),
+        )
+        return Result(
+            command="release record-deploy-unit",
+            data={"replayed": outcome.replayed},
+            references={
+                "artifact_id": str(outcome.artifact_id),
+                "attestation_id": str(outcome.attestation_id),
+                "deploy_unit_uri": outcome.deploy_unit_uri,
+            },
+        )
+
+
 def release_pins(args: argparse.Namespace) -> Result:
     from vendor_cp.config import load_vendor_settings
 
@@ -1198,5 +1239,6 @@ __all__ = [
     "release_catalogue",
     "release_pins",
     "release_record",
+    "release_record_deploy_unit",
     "withdrawal_conflicts_list",
 ]

@@ -164,6 +164,10 @@ FULL: Final[str] = "full"
 PRODUCTION_BOOTSTRAP: Final[str] = "production-bootstrap"
 PRODUCTION_KEYLESS_V1: Final[str] = "production-keyless-v1"
 PRODUCTION_COMPOSED_V1: Final[str] = "production-composed-v1"
+#: The M4 profile: production-bootstrap plus the Deployment Control operator
+#: surface, platform-admin session only. Opt-in and DECLARED, NOT ADOPTED: no
+#: deploy script, candidate input or acceptance step names it.
+PRODUCTION_DEPLOY_CONTROL_V1: Final[str] = "production-deploy-control-v1"
 
 #: The route fields a manifest can carry, and — for the kernel this assembly
 #: composes — the complete set of places a mounted route can come from. See the
@@ -467,6 +471,38 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "provisioning laboratory remain withheld. Version 1 declares this "
             "surface decision; deployment-specific configuration, endpoint "
             "TLS/domain evidence and explicit live adoption remain separate gates."
+        ),
+    ),
+    VendorDeploymentProfile(
+        code=PRODUCTION_DEPLOY_CONTROL_V1,
+        version="1",
+        withheld_surfaces=frozenset(
+            {"deploy_agent", "licence_delivery", "offers", "provisioning"}
+        ),
+        surface_inventory=(
+            "accounts",
+            "allocations",
+            "console",
+            "contracts",
+            "deployment_control",
+            "readiness",
+            "vendor_approvals",
+            "withdrawal_conflicts",
+        ),
+        laboratory=False,
+        production_accepted=True,
+        rationale=(
+            "The M4 profile (build-once generic deploy, P-CP1): an opt-in "
+            "production composition based on production-bootstrap version 6, "
+            "adding only the Deployment Control operator surface, which Control "
+            "a18 extends with the typed params form, deployment sets and the "
+            "legacy-policy settings. Every route is platform-admin session only "
+            "(the composed platform_admin facet, ADR-0014); a target-signed "
+            "route is a different owner and is NOT part of this version. The "
+            "frozen deploy-agent API, licence delivery, offers and the "
+            "provisioning laboratory stay withheld. Version 1 declares the "
+            "surface decision only: it is not adopted by any deploy script, and "
+            "adoption is its own governed act after CP149 step 9."
         ),
     ),
     VendorDeploymentProfile(

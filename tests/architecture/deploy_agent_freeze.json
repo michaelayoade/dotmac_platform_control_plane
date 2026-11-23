@@ -1,0 +1,34 @@
+{
+  "files": {
+    "alembic/versions/v022_deploy_agent.py": "393894127a4a1a73fc007805e96c2f8aa442d194c368f05fb90617f3ab576b18",
+    "src/vendor_cp/deploy_agent/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/vendor_cp/deploy_agent/candidates.py": "454ab342be2b8421750e6670674686ac3db6a8e88b7704ade3171042d4b97d4e",
+    "src/vendor_cp/deploy_agent/contracts.py": "46265d48169c7d01e3f99c2315b3ea073c5c9f0868b74745b06c6deb6d91dedf",
+    "src/vendor_cp/deploy_agent/feature.py": "5442b61bbba144a6dd579fd421ea8048313e6cf778886d9bdee12086f0b6912a",
+    "src/vendor_cp/deploy_agent/gate_admission.py": "0ec0cf15f034e7e2652f060315a0e88ded3e93d40373e0274994e32c40335333",
+    "src/vendor_cp/deploy_agent/gate_evidence.py": "c31e854d0fb69c161808910c5cd7561c6211ee0bcd5c0f88ccaa5226b72c9d3a",
+    "src/vendor_cp/deploy_agent/keys.py": "2e31dc434b26bdfbc12db83ec9ba4f08d274aa2cce48e8175ab312f9609145fd",
+    "src/vendor_cp/deploy_agent/ledger.py": "918552c58225a1ce11b310427730a88e85819021a89a2029f9a336b3d3abe59a",
+    "src/vendor_cp/deploy_agent/models.py": "3e0056fe14c2c2de985c77fb0db70e36f30f1d59a8db5feb0bf1efa8981d6e65",
+    "src/vendor_cp/deploy_agent/projection.py": "015b7ae00d3b3b7141d024469ebff2b660be14c2dc41fd0f3ed613e9e3b940b6",
+    "src/vendor_cp/deploy_agent/router.py": "b4276891c14faec3961409b469bf9f333eae5833845f9b0020550ebf8c5a5700",
+    "src/vendor_cp/deploy_agent/runtime.py": "a66cd81b488d243e48caa01d92fad4e47cb21ba6b445371cf797aa8c60e52258",
+    "src/vendor_cp/deploy_agent/service.py": "a5ad4f9a20e83ac9691f382210e76c8b5a48622b9103855e4d7582d1afe45e90"
+  },
+  "importers_outside_package": [
+    "src/vendor_cp/assembly.py",
+    "src/vendor_cp/cli/commands.py",
+    "src/vendor_cp/cli/owners.py",
+    "src/vendor_cp/deployment/cp_catalogue.py",
+    "src/vendor_cp/deployment/cp_transition.py",
+    "src/vendor_cp/deployment/cp_transition_host.py",
+    "src/vendor_cp/deployment/descriptor_binding.py",
+    "src/vendor_cp/deployment/transition_evidence.py",
+    "src/vendor_cp/deployment/transition_operator.py",
+    "src/vendor_cp/deployment/transition_request.py",
+    "src/vendor_cp/migrations.py",
+    "src/vendor_cp/production_secrets.py"
+  ],
+  "ruling": "M1 (2026-11-22): the CP deploy_agent is single-product, staging-only and FROZEN; multi-product desired state is Control's, launch is the Starter dotmac-deploy-agent's. Changing this file is the visible act of unfreezing it.",
+  "schema": "vendor_cp.deploy_agent_freeze/1"
+}

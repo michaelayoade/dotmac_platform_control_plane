@@ -261,6 +261,27 @@ def build_parser() -> _Parser:
         record.add_argument(flag, required=True)
     record.set_defaults(handler=commands.release_record)
 
+    record_deploy_unit = _command(
+        release_sub,
+        "release",
+        "record-deploy-unit",
+        "catalogue a release's exact deploy-unit.toml as a deploy_unit attestation",
+    )
+    for flag in (
+        "--command-id",
+        "--product-code",
+        "--product-version",
+        "--artifact-digest",
+        "--artifact-ref",
+        "--source-revision",
+        "--descriptor-path",
+        "--deploy-unit-digest",
+        "--deploy-unit-path",
+        "--operator-ref",
+    ):
+        record_deploy_unit.add_argument(flag, required=True)
+    record_deploy_unit.set_defaults(handler=commands.release_record_deploy_unit)
+
     pins = _command(release_sub, "release", "pins", "show the configured release pins")
     pins.set_defaults(handler=commands.release_pins)
 

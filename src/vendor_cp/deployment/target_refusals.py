@@ -40,6 +40,15 @@ class TargetRefusal(StrEnum):
     CONTROL_SECURITY_REFUSED = "control_security_install_refused"
     CUSTODY_NOT_CONFIGURED = "custody_not_configured"
     MATERIALS_REFUSED = "materials_refused"
+    #: Build-once generic deploy (P-CP1 5a): the params.env / legacy-file checks.
+    PARAMS_ENV_MALFORMED = "params_env_malformed"
+    PARAMS_ENV_DIGEST_MISMATCH = "params_env_digest_mismatch"
+    DOTENV_PRESENT = "dotenv_present"
+    COMPOSE_OVERRIDE_PRESENT = "compose_override_present"
+    LEGACY_ENV_SHA_MISMATCH = "legacy_env_sha_mismatch"
+    LEGACY_ENV_NOT_BOUND = "legacy_env_not_bound"
+    LEGACY_ENV_MISSING = "legacy_env_missing"
+    IMAGE_SOURCE_INVALID = "image_source_invalid"
 
 
 class FoundationBindingsUnavailable(RuntimeError):

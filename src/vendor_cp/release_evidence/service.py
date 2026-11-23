@@ -58,6 +58,26 @@ class ReleaseEvidenceConflict(ConflictError):
     """Immutable catalogue evidence already says something different."""
 
 
+class ReleaseIdentity(Protocol):
+    """The immutable container-image identity every evidence command carries.
+
+    The artifact helpers below read only these five attributes, so one
+    publish-or-replay implementation serves the product-manifest command and the
+    deploy-unit command alike (see `vendor_cp.release_evidence.deploy_unit`).
+    """
+
+    @property
+    def product_code(self) -> str: ...
+    @property
+    def product_version(self) -> str: ...
+    @property
+    def artifact_digest(self) -> str: ...
+    @property
+    def artifact_ref(self) -> str: ...
+    @property
+    def source_revision(self) -> str: ...
+
+
 class ProductManifestStore(Protocol):
     """Hold canonical bytes and return the immutable URI recorded for them."""
 
@@ -173,9 +193,7 @@ def _fingerprint(command: ProductReleaseEvidenceCommand) -> str:
     )
 
 
-def _existing_artifact(
-    db: Session, command: ProductReleaseEvidenceCommand
-) -> ReleaseArtifact | None:
+def _existing_artifact(db: Session, command: ReleaseIdentity) -> ReleaseArtifact | None:
     by_digest = db.scalar(
         select(ReleaseArtifact).where(ReleaseArtifact.digest == command.artifact_digest)
     )
@@ -250,7 +268,7 @@ def _existing_attestation(
 
 def _publish_or_replay(
     db: Session,
-    command: ProductReleaseEvidenceCommand,
+    command: ReleaseIdentity,
     *,
     artifact_digest: Digest,
     artifact_ref: str,
@@ -430,6 +448,7 @@ def ingest_product_release_evidence(
 
 __all__ = [
     "DirectoryProductManifestStore",
+    "ReleaseIdentity",
     "ProductManifestStore",
     "ProductReleaseEvidenceCommand",
     "ProductReleaseEvidenceResult",

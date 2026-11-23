@@ -236,3 +236,62 @@ def test_required_ci_workflow_pins_the_same_source_commit() -> None:
         "poetry run pytest -q conformance/test_d16_source_verifier_real_foundation.py"
         in workflow
     )
+
+
+# ── P-CP1 5a: Foundation a2's REAL pin rewrite (build-once generic deploy) ──
+#
+# Appended here, not a new file, because the D16 source-verifier invocation is
+# the one database-free conformance run (`conftest.py`) and already holds the
+# pinned, immutable Foundation checkout. The unit golden copy of this function
+# lives in `tests/unit/test_deploy_unit_effects.py`.
+
+_PIN_APP_IMAGE = "127.0.0.1:5000/team/app@sha256:" + "1" * 64
+_PIN_RENDER = f"APP_IMAGE={_PIN_APP_IMAGE}\nWORKERS=2\nZED=z\n".encode()
+
+
+@pytest.fixture(scope="module")
+def compose_host(checkout: Path) -> Any:
+    package_src = checkout / "packages/dotmac-deployment-foundation/src"
+    original_path = sys.path[:]
+    original_bytecode = sys.dont_write_bytecode
+    try:
+        sys.path.insert(0, str(package_src))
+        sys.dont_write_bytecode = True
+        return importlib.import_module(
+            "dotmac_deployment_foundation.providers.compose_host"
+        )
+    finally:
+        sys.path[:] = original_path
+        sys.dont_write_bytecode = original_bytecode
+
+
+def _effects_for(module: Any, env_file: Path) -> Any:
+    # The property under test is one method, so build the instance without its
+    # constructor and give it only the attribute that method reads.
+    effects = module.ComposeHostEffects.__new__(module.ComposeHostEffects)
+    effects._env_file = env_file
+    return effects
+
+
+def test_real_pin_rewrite_is_byte_identical_and_only_the_mode_changes(
+    compose_host: Any, tmp_path: Path
+) -> None:
+    target = tmp_path / "params.env"
+    target.write_bytes(_PIN_RENDER)
+    target.chmod(0o400)
+    _effects_for(compose_host, target)._write_env_value("APP_IMAGE", _PIN_APP_IMAGE)
+    assert target.read_bytes() == _PIN_RENDER
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_real_pin_rewrite_changes_a_different_pin(
+    compose_host: Any, tmp_path: Path
+) -> None:
+    """SENSITIVITY: the rewrite does write, so byte-identity is not vacuous."""
+    target = tmp_path / "params.env"
+    target.write_bytes(_PIN_RENDER)
+    other = "127.0.0.1:5000/team/app@sha256:" + "2" * 64
+    _effects_for(compose_host, target)._write_env_value("APP_IMAGE", other)
+    assert target.read_bytes() == _PIN_RENDER.replace(
+        _PIN_APP_IMAGE.encode(), other.encode()
+    )

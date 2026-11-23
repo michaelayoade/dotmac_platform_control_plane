@@ -18,6 +18,11 @@ from vendor_cp.migrations import composed_version_locations
 
 ROOT = Path(__file__).resolve().parents[2]
 
+#: PROVISIONAL pins (see `pyproject.toml`): the heads of Starter #1145 and
+#: Control #76 at the time of this draft. Full 40-hex revisions only.
+CATALOG_A6_PROVISIONAL_REV = "b7bf47b9e0f07b439e5cdc2060fc30d53137a870"
+CONTROL_A18_PROVISIONAL_REV = "014301966a02cbbf7185bd67dfe85893c0cbfbe0"
+
 
 def test_shared_dependencies_are_exact_published_pins() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
@@ -28,9 +33,14 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
     # Every authority module pin is asserted. Only the release catalogue was, which is
     # how the entitlement-allocation pin could have drifted to a range or to a
     # path dependency without a single test noticing.
+    # PROVISIONAL (P-CP1 5a, draft): catalog a6 and Control a18 are unreleased,
+    # so each is a git pin to the head of its open PR. The release re-pin
+    # restores the `version` + `source = "forgejo"` form below for BOTH, and
+    # this test fails on a mutable reference so the draft cannot drift.
     assert dependencies["dotmac-release-catalog"] == {
-        "version": "0.1.0a4",
-        "source": "forgejo",
+        "git": "https://github.com/michaelayoade/dotmac_starter_mt.git",
+        "rev": CATALOG_A6_PROVISIONAL_REV,
+        "subdirectory": "packages/dotmac-release-catalog",
     }
     assert dependencies["dotmac-entitlement-allocation"] == {
         "version": "0.1.0a6",
@@ -41,8 +51,8 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
         "source": "forgejo",
     }
     assert dependencies["dotmac-deployment-control"] == {
-        "version": "0.1.0a17",
-        "source": "forgejo",
+        "git": "https://github.com/michaelayoade/dotmac_deployment_control.git",
+        "rev": CONTROL_A18_PROVISIONAL_REV,
     }
     assert dependencies["dotmac-commercial-agreements"] == {
         "version": "0.1.0a4",

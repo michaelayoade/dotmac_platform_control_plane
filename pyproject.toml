@@ -65,7 +65,14 @@ dotmac-kernel = { version = "0.1.0a100", extras = [
 # does, and an a3 module fails it correctly: the declaration and the database
 # disagree. a4 moves both tables to `platform_tables`, which is what makes the
 # declaration true (`dotmac_starter_mt` ADR-0023).
-dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
+#
+# PROVISIONAL (P-CP1 lane 5a, draft): catalog 0.1.0a6 is UNRELEASED. It adds
+# `AttestationKind.DEPLOY_UNIT` (Starter PR #1145). Until it is published to the
+# index this is a git pin to that PR's head, and it is re-pinned to the released
+# `0.1.0a6` (`version = "0.1.0a6", source = "forgejo"`, lock via the protected
+# `kernel-lock.yml`) before anything can merge. The a4 evidence above stays the
+# last RELEASED pin. `rl_0002` (index DDL, no table change) arrives with it.
+dotmac-release-catalog = { git = "https://github.com/michaelayoade/dotmac_starter_mt.git", rev = "b7bf47b9e0f07b439e5cdc2060fc30d53137a870", subdirectory = "packages/dotmac-release-catalog" }
 # The allocation authority under ADR-0006. Vendor migration `v014` checked the
 # greenfield premise, dropped the empty local tables and retired their writer;
 # Vendor retains only its typed assembly adapter. Exact-pinned from the private
@@ -177,7 +184,14 @@ dotmac-approvals = { version = "0.1.0a8", source = "forgejo" }
 # This pin is not deployment authorization: the a98 -> a100 kernel move and the
 # dc_0003..dc_0016 and ap_0003 migrations still owe a rehearsal against a
 # RESTORED isolated database before they reach the running deployment.
-dotmac-deployment-control = { version = "0.1.0a17", source = "forgejo" }
+#
+# PROVISIONAL (P-CP1 lane 5a, draft): Control 0.1.0a18 is UNRELEASED (build-once
+# generic deploy contract, Control PR #76, declared and unpublished). Until it is
+# published this is a git pin to that PR's head, and it is re-pinned to the
+# released `0.1.0a18` (`version = "0.1.0a18", source = "forgejo"`, lock via the
+# protected `kernel-lock.yml`) before anything can merge. a18 adds `dc_0017`; it
+# owes the same restored-database rehearsal as the a15..a17 migrations.
+dotmac-deployment-control = { git = "https://github.com/michaelayoade/dotmac_deployment_control.git", rev = "014301966a02cbbf7185bd67dfe85893c0cbfbe0" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
