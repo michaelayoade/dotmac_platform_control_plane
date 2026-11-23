@@ -6,7 +6,7 @@
     }
   },
   "note": "Vendored VERBATIM, by sha256. The CP-6 pin is decided jointly before either PR merges: when the Starter PR changes this file, re-vendor it from the new head and update this file in the same change; this test then proves CP's export still parses.",
-  "source_commit": "3a39f3fc628b9a6ceacb7c36bc21b96a7c1a5833",
+  "source_commit": "daa576f2bccd5283153c21a0571d0077624bdb6f",
   "source_pr": "S8b-2 #1128 head (OPEN, DRAFT; the CP-6 schema is PROVISIONAL on the Starter side: lane3.cp6-export.v2). source_commit becomes the Starter merge sha at CP6-CREDENTIAL-BLOCK-SPEC step 5; only this file changes then.",
   "source_repository": "michaelayoade/dotmac_starter_mt"
 }
