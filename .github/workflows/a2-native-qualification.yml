@@ -42,7 +42,7 @@ permissions:
 
 env:
   CP_REF_DEFAULT: 8e469b2fea9a007988c3815d138875c6df82aa11
-  CONTROL_REF_DEFAULT: d5a9f39b898e50240d5151899bf24c4c9fa51f91
+  CONTROL_REF_DEFAULT: 3bd99c2ce19b287f22f9ff8ad92907b4e45324c8
   # CP draft #272 (recovery source): carries conformance/recovery_source/test_contract.py.
   RECOVERY_CP_REF: 73f88f1c82e0001d456ce787ba2176c27c1111fe
   # The Starter commit CP #269's own Lane 3 step pins for the Foundation import.
@@ -130,6 +130,25 @@ jobs:
           test "$(git -C foundation-src rev-parse HEAD)" = "$FOUNDATION_REF"
           echo "QUAL_WORKFLOW_SHA256=$(sha256sum .github/workflows/a2-native-qualification.yml | cut -d' ' -f1)" >> "$GITHUB_ENV"
           echo "OUT_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+      - name: Cite the Control and CP source CI runs (ids and outcomes only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out"
+          cite() {
+            gh api "repos/$1/actions/runs?head_sha=$2&per_page=20" \
+              --jq '[.workflow_runs[] | select(.name=="CI")] | sort_by(.created_at) | last // {} | {repository: "'"$1"'", head_sha: "'"$2"'", run_id: (.id // null), status: (.status // "none"), conclusion: (.conclusion // null)}' \
+              2>/dev/null || echo '{"repository":"'"$1"'","head_sha":"'"$2"'","run_id":null,"status":"lookup_failed","conclusion":null}'
+          }
+          {
+            echo '{"control":'; cite michaelayoade/dotmac_deployment_control "$CONTROL_COMMIT"
+            echo ',"cp_recovery":'; cite michaelayoade/dotmac_platform_control_plane "$RECOVERY_CP_COMMIT"
+            echo ',"cp_lease":'; cite michaelayoade/dotmac_platform_control_plane "$CP_COMMIT"
+            echo '}'
+          } > "$out/ci-runs.json"
+          python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$out/ci-runs.json"
       - name: Build the Control wheel
         run: |
           set -euo pipefail
@@ -311,6 +330,7 @@ jobs:
             --server-version "${PG_SERVER_VERSION:-unknown}" --postgres-image "${PG_IMAGE:-unknown}" \
             --pytest-rc "${PYTEST_RC:-255}" \
             --wheelhouse-manifest "$RUNNER_TEMP/out/wheelhouse-manifest.json" \
+            --ci-runs "$RUNNER_TEMP/out/ci-runs.json" \
             --control-junit "$RUNNER_TEMP/out/control-junit.xml" \
             --recovery-junit "$RUNNER_TEMP/out/recovery-junit.xml" \
             --recovery-cp-commit "$RECOVERY_CP_COMMIT" \

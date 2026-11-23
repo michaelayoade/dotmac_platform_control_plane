@@ -228,6 +228,17 @@ def wheelhouse_block(path: Path) -> dict[str, Any]:
     return {"status": "PRESENT", **doc, "offline_install_verified": True}
 
 
+def ci_runs_block(path: Path) -> dict[str, Any]:
+    """Source CI runs (Control, CP) cited by id; ids/status/conclusion only."""
+    if not path.is_file():
+        return {"status": "UNAVAILABLE"}
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    for run in doc.values():
+        if not isinstance(run, dict):
+            raise SystemExit("malformed ci runs file")
+    return doc
+
+
 def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
     scenarios = load_scenarios(Path(args.scenarios))
     junit = Path(args.junit)
@@ -284,6 +295,7 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
             if Path(args.recovery_junit).is_file()
             else None,
         },
+        "source_ci_runs": ci_runs_block(Path(args.ci_runs)),
         "runtime_wheelhouse": wheelhouse_block(Path(args.wheelhouse_manifest)),
         "control_native_pg": {
             "note": "Control tests ran from the Control source checkout at the named "
@@ -367,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         "control-wheel-name", "control-wheel-sha256", "cp-image-id", "parity",
         "server-version", "postgres-image", "pytest-rc", "foundation-repo",
         "foundation-commit",
-        "recovery-junit", "wheelhouse-manifest", "control-junit",
+        "recovery-junit", "wheelhouse-manifest", "control-junit", "ci-runs",
         "recovery-cp-commit", "recovery-parity",
     ):  # fmt: skip
         pg.add_argument(f"--{flag}", required=True)

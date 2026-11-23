@@ -168,6 +168,8 @@ class ReceiptTests(unittest.TestCase):
                         "1",
                         "--wheelhouse-manifest",
                         str(tmp / "absent3.json"),
+                        "--ci-runs",
+                        str(tmp / "absent5.json"),
                         "--control-junit",
                         str(tmp / "absent4.json"),
                         "--recovery-junit",

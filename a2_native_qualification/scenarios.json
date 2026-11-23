@@ -38,7 +38,8 @@
       "tests": [],
       "control_tests": [
         "tests/test_deployment_control_native_pg_platform_isolation.py::test_native_pg_dispatch_only_recovery_on_the_same_coordinates_succeeds_exactly_once",
-        "tests/test_deployment_control_native_pg_platform_isolation.py::test_native_pg_concurrent_dispatch_only_recovery_has_exactly_one_winner"
+        "tests/test_deployment_control_native_pg_platform_isolation.py::test_native_pg_concurrent_dispatch_only_recovery_has_exactly_one_winner",
+        "tests/test_deployment_control_native_pg_platform_isolation.py::test_native_pg_recovery_racing_a_withdrawal_committed_first_is_refused"
       ]
     },
     {
