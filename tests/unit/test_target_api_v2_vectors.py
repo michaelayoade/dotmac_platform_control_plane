@@ -48,7 +48,7 @@ V2_FILE = (
     / "target_api"
     / ("target_api_v2.json")
 )
-PINNED_V2_SHA256 = "2ffcccdc2e74054ef6ff1496671c951aceaecc70e41de17b75545c4768d4c2a4"
+PINNED_V2_SHA256 = "95756ba1d9a1e4c12cafef82ba4fb7e343c29c677772087bec2dd3bbc5374988"
 V2: dict[str, Any] = json.loads(V2_FILE.read_bytes())
 KEY = V2["agent_observation"]["key"]
 _RESPONSE_SEED = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8"
@@ -58,6 +58,7 @@ ROUTER_REPLAYED = {
     "binding": "test_resolve_replays_the_binding_vectors_with_control_plan_key_names",
 }
 LATER_OR_OTHER_OWNER = {
+    "job_arg_schema": "Control + agent: dispatched_job argument schema and io",
     "attestation_pair": "consume backend, once #270 pins an a18 with the pair verifier",
     "constants": "lease constants and endpoints_added: lane 5c (lease API)",
     "lease_body_vectors": "lane 5c",
@@ -256,7 +257,7 @@ def test_resolve_replays_the_binding_vectors_with_control_plan_key_names(
     assert set(body["dispatched_job"]) >= {"argv", "materials", "name", "params"}
     assert body["plan_image"]["source"] == "present"
 
-    serving = V2["binding"]["serving"]["deploy"]
+    serving = V2["binding"]["serving"]
     deploy = _resolve(db, serving["operation"], serving["snapshot"]).json()
     assert deploy["operation"] == "deploy"
     assert "dispatched_job" not in deploy and "plan_image" not in deploy

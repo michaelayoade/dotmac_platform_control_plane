@@ -98,8 +98,7 @@
       ],
       "reconcile": [
         "reconciled",
-        "failed",
-        "not_needed"
+        "failed"
       ]
     },
     "limits": {
@@ -126,21 +125,53 @@
         "wire_utf8": "{\"signature\":\"bAEuHTh5zyBLScMfoqGK2pjxtQXZllgTviir9NSp_W8VwZPIQCO7dGz5CZl1Q-FUjPukaNVObMbYKQS9vgvgBQ\",\"statement\":{\"details\":{},\"dispatch_id\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"cred-0001\",\"kind\":\"deploy\",\"observed_at\":\"2026-12-01T10:05:00Z\",\"outcome\":\"succeeded\",\"reason\":\"\",\"schema\":\"dotmac.agent-observation/2\",\"target_ref\":\"dotmac-erp-v2/production/host-a\"}}"
       },
       {
-        "report_id": "agent:reconcile:00000000-0000-4000-8000-000000000001",
-        "signature_b64u": "-nTOsopB8MxuKMr22yC_bnKbPi30QbWqq_RWtHyDTPCHZtvfF3iFQIh9njWiLdZYrDPNghiLA1f8VYV_zPrwDA",
-        "signed_bytes_hex": "7b2264657461696c73223a7b7d2c2264697370617463685f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031222c226b65795f6964223a22637265642d30303031222c226b696e64223a227265636f6e63696c65222c226f627365727665645f6174223a22323032362d31322d30315431303a30353a30305a222c226f7574636f6d65223a227265636f6e63696c6564222c22726561736f6e223a226c656173652065787069726564222c22736368656d61223a22646f746d61632e6167656e742d6f62736572766174696f6e2f32222c227461726765745f726566223a22646f746d61632d6572702d76322f70726f64756374696f6e2f686f73742d61227d",
+        "report_id": "agent:reconcile:00000000-0000-4000-8000-000000000001:2026-12-01T10:05:00Z",
+        "signature_b64u": "GVe63XCCtgGEfQqaal0IjrpmdhOyfv6uKSkvbs-zIL11r8Cq0XaFhlLin5Y7vReBfklQWj7Ir-SWxTt6xuEEAA",
+        "signed_bytes_hex": "7b2264657461696c73223a7b22636f6e66696775726564223a5b22617070225d2c22636f6e7461696e657273223a5b7b22696d6167655f6964223a227368613235363a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c22696d6167655f726566223a223132372e302e302e313a353030302f7465616d2f617070407368613235363a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c226e616d65223a22617070222c227265706f5f64696765737473223a5b223132372e302e302e313a353030302f7465616d2f617070407368613235363a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131225d7d5d2c22657870697265645f64697370617463685f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030306531227d2c2264697370617463685f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031222c226b65795f6964223a22637265642d30303031222c226b696e64223a227265636f6e63696c65222c226f627365727665645f6174223a22323032362d31322d30315431303a30353a30305a222c226f7574636f6d65223a227265636f6e63696c6564222c22726561736f6e223a226f62736572766564222c22736368656d61223a22646f746d61632e6167656e742d6f62736572766174696f6e2f32222c227461726765745f726566223a22646f746d61632d6572702d76322f70726f64756374696f6e2f686f73742d61227d",
+        "statement": {
+          "details": {
+            "configured": [
+              "app"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "dispatch_id": "00000000-0000-4000-8000-000000000001",
+          "key_id": "cred-0001",
+          "kind": "reconcile",
+          "observed_at": "2026-12-01T10:05:00Z",
+          "outcome": "reconciled",
+          "reason": "observed",
+          "schema": "dotmac.agent-observation/2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        },
+        "wire_utf8": "{\"signature\":\"GVe63XCCtgGEfQqaal0IjrpmdhOyfv6uKSkvbs-zIL11r8Cq0XaFhlLin5Y7vReBfklQWj7Ir-SWxTt6xuEEAA\",\"statement\":{\"details\":{\"configured\":[\"app\"],\"containers\":[{\"image_id\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"image_ref\":\"127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"name\":\"app\",\"repo_digests\":[\"127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111\"]}],\"expired_dispatch_id\":\"00000000-0000-4000-8000-0000000000e1\"},\"dispatch_id\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"cred-0001\",\"kind\":\"reconcile\",\"observed_at\":\"2026-12-01T10:05:00Z\",\"outcome\":\"reconciled\",\"reason\":\"observed\",\"schema\":\"dotmac.agent-observation/2\",\"target_ref\":\"dotmac-erp-v2/production/host-a\"}}"
+      },
+      {
+        "report_id": "agent:reconcile:00000000-0000-4000-8000-000000000001:2026-12-01T10:05:00Z",
+        "signature_b64u": "6JxcI3lWs599FQ3UNguMpYS48-37ZE2MRU1Kr6QGxRMx6ddVtFlrq7e_wPb3tlwB1zc4pUS7lPTwwf9tkRJXBA",
+        "signed_bytes_hex": "7b2264657461696c73223a7b7d2c2264697370617463685f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031222c226b65795f6964223a22637265642d30303031222c226b696e64223a227265636f6e63696c65222c226f627365727665645f6174223a22323032362d31322d30315431303a30353a30305a222c226f7574636f6d65223a226661696c6564222c22726561736f6e223a22646f636b657220756e726561636861626c65222c22736368656d61223a22646f746d61632e6167656e742d6f62736572766174696f6e2f32222c227461726765745f726566223a22646f746d61632d6572702d76322f70726f64756374696f6e2f686f73742d61227d",
         "statement": {
           "details": {},
           "dispatch_id": "00000000-0000-4000-8000-000000000001",
           "key_id": "cred-0001",
           "kind": "reconcile",
           "observed_at": "2026-12-01T10:05:00Z",
-          "outcome": "reconciled",
-          "reason": "lease expired",
+          "outcome": "failed",
+          "reason": "docker unreachable",
           "schema": "dotmac.agent-observation/2",
           "target_ref": "dotmac-erp-v2/production/host-a"
         },
-        "wire_utf8": "{\"signature\":\"-nTOsopB8MxuKMr22yC_bnKbPi30QbWqq_RWtHyDTPCHZtvfF3iFQIh9njWiLdZYrDPNghiLA1f8VYV_zPrwDA\",\"statement\":{\"details\":{},\"dispatch_id\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"cred-0001\",\"kind\":\"reconcile\",\"observed_at\":\"2026-12-01T10:05:00Z\",\"outcome\":\"reconciled\",\"reason\":\"lease expired\",\"schema\":\"dotmac.agent-observation/2\",\"target_ref\":\"dotmac-erp-v2/production/host-a\"}}"
+        "wire_utf8": "{\"signature\":\"6JxcI3lWs599FQ3UNguMpYS48-37ZE2MRU1Kr6QGxRMx6ddVtFlrq7e_wPb3tlwB1zc4pUS7lPTwwf9tkRJXBA\",\"statement\":{\"details\":{},\"dispatch_id\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"cred-0001\",\"kind\":\"reconcile\",\"observed_at\":\"2026-12-01T10:05:00Z\",\"outcome\":\"failed\",\"reason\":\"docker unreachable\",\"schema\":\"dotmac.agent-observation/2\",\"target_ref\":\"dotmac-erp-v2/production/host-a\"}}"
       },
       {
         "report_id": "agent:job:00000000-0000-4000-8000-000000000001",
@@ -163,6 +194,289 @@
         "wire_utf8": "{\"signature\":\"RPiuCoXVeX8NseZ4E-amb1aDXpST4x_wAvU3tI-Gt9RwH7KF5g7BJUuXqRaNF4W3ybVkWY9s0n1ef11poP4XAg\",\"statement\":{\"details\":{\"accessor_prefix\":\"abcd1234\",\"exit_code\":1},\"dispatch_id\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"cred-0001\",\"kind\":\"job\",\"observed_at\":\"2026-12-01T10:05:00Z\",\"outcome\":\"failed\",\"reason\":\"exit 1\",\"schema\":\"dotmac.agent-observation/2\",\"target_ref\":\"dotmac-erp-v2/production/host-a\"}}"
       }
     ],
+    "reconcile_decisions": {
+      "cases": [
+        {
+          "decision": "reconciled",
+          "details": {
+            "configured": [
+              "app",
+              "worker"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              },
+              {
+                "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "name": "worker",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": false,
+          "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "every configured container runs the expired plan's digest"
+        },
+        {
+          "decision": "reconciled",
+          "details": {
+            "configured": [
+              "app"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": true,
+          "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "the expired plan's digest wins even if the dispatch was consumed"
+        },
+        {
+          "decision": "not_needed",
+          "details": {
+            "configured": [
+              "app",
+              "worker"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                ]
+              },
+              {
+                "image_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "name": "worker",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": false,
+          "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "all run the last committed digest and the dispatch was never consumed"
+        },
+        {
+          "decision": null,
+          "details": {
+            "configured": [
+              "app"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": true,
+          "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "all run the last committed digest but the dispatch WAS consumed"
+        },
+        {
+          "decision": null,
+          "details": {
+            "configured": [
+              "app",
+              "worker"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              },
+              {
+                "image_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "name": "worker",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": false,
+          "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "one container runs a digest from neither"
+        },
+        {
+          "decision": null,
+          "details": {
+            "configured": [
+              "app",
+              "worker"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              },
+              {
+                "image_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "name": "worker",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": false,
+          "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "a mix of expired and committed digests"
+        },
+        {
+          "decision": null,
+          "details": {
+            "configured": [
+              "app",
+              "worker"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": false,
+          "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "a configured container the agent did not observe"
+        },
+        {
+          "decision": null,
+          "details": {
+            "configured": [],
+            "containers": [],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": false,
+          "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "nothing is configured"
+        },
+        {
+          "decision": null,
+          "details": {
+            "configured": [
+              "app"
+            ],
+            "containers": [
+              {
+                "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "image_ref": "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "name": "app",
+                "repo_digests": [
+                  "127.0.0.1:5000/team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              }
+            ],
+            "expired_dispatch_id": "00000000-0000-4000-8000-0000000000e1"
+          },
+          "expired_dispatch_consumed": false,
+          "expired_dispatch_id": "another-dispatch",
+          "expired_plan_digests": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          ],
+          "last_committed_digests": [
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "name": "details that name another dispatch"
+        }
+      ],
+      "rule": "The agent reports facts: outcome `reconciled` (the host was observed completely) or `failed` (it could not be); it never sends `not_needed`. Control DECIDES from `details` ({expired_dispatch_id, configured[], containers[{name, image_ref, image_id, repo_digests}]}): every configured container on a digest of the expired plan -> marker `reconciled`; all on the last committed digest and the expired dispatch never consumed -> marker `not_needed`; anything else -> no marker (attended restore-and-fix-forward). A marker is asked for only when the host's latest lease row is expired_unreleased."
+    },
     "refused_parse": [
       {
         "body_hex": "7b2273746174656d656e74223a7b7d2c227369676e6174757265223a2278222c227369676e6174757265223a2279227d",
@@ -237,7 +551,7 @@
         "wire_utf8": "{\"signature\":\"X3HIPq39X-ATbESadYdPg7XqWtWdomCJIzZ7uqTAQeDFyRe7P8avPmQQnan2hhwjDGr95Z0w7LMdzuXOr0jcBw\",\"statement\":{\"details\":{},\"dispatch_id\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"cred-9999\",\"kind\":\"deploy\",\"observed_at\":\"2026-12-01T10:05:00Z\",\"outcome\":\"succeeded\",\"reason\":\"\",\"schema\":\"dotmac.agent-observation/2\",\"target_ref\":\"dotmac-erp-v2/production/host-a\"}}"
       }
     ],
-    "rule": "One ingestion path, owned by Control: `record_observation` parses the envelope, selects the ENROLLED credential by statement.key_id, verifies the Ed25519 signature over the statement's canonical JSON bytes under that credential's key, and requires statement.target_ref to equal the credential's target. The statement is {schema, kind, dispatch_id, target_ref, key_id, outcome, reason, details, observed_at}; the report id is `agent:<kind>:<dispatch_id>`. Kind deploy|reconcile|job must agree with the dispatch's plan operation (job <=> run_job; deploy <=> deploy/rollback; reconcile settles an expired lease of any). An accepted observation changes no desired or observed state: it is attributable evidence.",
+    "rule": "One ingestion path, owned by Control: `record_observation` parses the envelope, selects the ENROLLED credential by statement.key_id, verifies the Ed25519 signature over the statement's canonical JSON bytes under that credential's key, and requires statement.target_ref to equal the credential's target. The statement is {schema, kind, dispatch_id, target_ref, key_id, outcome, reason, details, observed_at}; the report id is `agent:<kind>:<dispatch_id>` (a reconcile appends `:<observed_at>` so a failed one can be retried). Kind deploy|reconcile|job must agree with the dispatch's plan operation (job <=> run_job; deploy <=> deploy/rollback; reconcile settles an expired lease of any). An accepted observation changes no desired or observed state: it is attributable evidence.",
     "schema": "dotmac.agent-observation/2"
   },
   "attestation_pair": {
@@ -2141,22 +2455,31 @@
           "companion_order": null,
           "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
           "dispatched_job": {
+            "apply_class": true,
             "argv": [
               "python",
               "-m",
               "erp_v2.importer",
               "execute",
               "--receipt",
-              "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+              "/job/out/receipt.json",
               "--manifest",
-              "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+              "/job/in/manifest.json",
               "--apply"
+            ],
+            "inputs": [
+              {
+                "flag": "--manifest",
+                "path": "/job/in/manifest.json",
+                "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+              }
             ],
             "materials": [
               "LEGACY_DATABASE_URL",
               "MIGRATION_DATABASE_URL"
             ],
             "name": "import_execute",
+            "output_dir": "/job/out",
             "params": {
               "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
               "ERP_IMPORT_APPLY_OK": "1",
@@ -2166,7 +2489,7 @@
             "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
             "role": "import",
             "single_use": true,
-            "timeout_seconds": 3000,
+            "timeout_seconds": 2400,
             "window": {
               "closes_at": "2026-12-31T00:00:00Z",
               "window_id": "window-1"
@@ -2188,14 +2511,40 @@
           ],
           "jobs": [
             {
+              "apply_command": false,
               "args": [
                 {
+                  "apply_choices": [],
+                  "apply_mode": false,
                   "choices": [],
                   "flag": "--receipt",
+                  "io": "output",
                   "max_length": 240,
-                  "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                  "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                   "required": true,
                   "type": "path"
+                },
+                {
+                  "apply_choices": [],
+                  "apply_mode": false,
+                  "choices": [],
+                  "flag": "--manifest",
+                  "io": "input",
+                  "max_length": 240,
+                  "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "required": false,
+                  "type": "path"
+                },
+                {
+                  "apply_choices": [],
+                  "apply_mode": true,
+                  "choices": [],
+                  "flag": "--apply",
+                  "io": null,
+                  "max_length": 240,
+                  "pattern": null,
+                  "required": false,
+                  "type": "bool"
                 }
               ],
               "command": [
@@ -2214,11 +2563,11 @@
                 "import_approved"
               ],
               "role": "import",
-              "timeout_seconds": 3000
+              "timeout_seconds": 2400
             }
           ],
-          "lease_max_seconds": 3120,
-          "lease_ttl_seconds": 3120,
+          "lease_max_seconds": 2520,
+          "lease_ttl_seconds": 2520,
           "legacy": null,
           "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
           "primary_service": "dotmac-erp-v2",
@@ -2269,14 +2618,40 @@
             "job_binding_names": [],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2295,7 +2670,7 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
             "lease_max_seconds": 3120,
@@ -2352,14 +2727,40 @@
             "job_binding_names": [],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2378,7 +2779,7 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
             "lease_max_seconds": 3120,
@@ -2420,22 +2821,31 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -2445,7 +2855,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -2467,14 +2877,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2493,11 +2929,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -2538,14 +2974,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2564,11 +3026,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -2593,22 +3055,31 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -2618,7 +3089,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -2640,14 +3111,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2666,11 +3163,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -2710,14 +3207,40 @@
             "job_binding_names": [],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2736,7 +3259,7 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
             "lease_max_seconds": 3120,
@@ -2793,14 +3316,40 @@
             "job_binding_names": [],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2819,7 +3368,7 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
             "lease_max_seconds": 3120,
@@ -2876,14 +3425,40 @@
             "job_binding_names": [],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2902,7 +3477,7 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
             "lease_max_seconds": 10801,
@@ -2959,14 +3534,40 @@
             "job_binding_names": [],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -2985,7 +3586,7 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
             "lease_max_seconds": 599,
@@ -3027,22 +3628,31 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -3052,7 +3662,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3074,14 +3684,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3100,10 +3736,10 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
+            "lease_max_seconds": 2520,
             "lease_ttl_seconds": 900,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
@@ -3129,22 +3765,31 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -3154,7 +3799,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3176,14 +3821,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3202,11 +3873,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
             "lease_max_seconds": 3600,
-            "lease_ttl_seconds": 3120,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -3231,29 +3902,38 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "import_approved": "1"
               },
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3275,14 +3955,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3301,11 +4007,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -3330,29 +4036,38 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_IMPORT_APPROVED": 1
               },
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3374,14 +4089,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3400,11 +4141,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -3429,22 +4170,31 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -3454,7 +4204,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": null,
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3476,14 +4226,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3502,11 +4278,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -3531,12 +4307,21 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -3546,7 +4331,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3568,14 +4353,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3594,11 +4405,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -3623,22 +4434,31 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "B",
                 "A"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -3648,7 +4468,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3670,14 +4490,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3696,11 +4542,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -3725,22 +4571,31 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -3750,7 +4605,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3772,14 +4627,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3798,11 +4679,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -3827,22 +4708,31 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
               ],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -3852,7 +4742,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3874,14 +4764,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -3900,11 +4816,11 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -3925,8 +4841,8 @@
         }
       },
       {
-        "code": "job_shape",
-        "name": "a dispatched job with a stray key",
+        "code": "job_inputs",
+        "name": "an input without its digest",
         "operation": "run_job",
         "snapshot": {
           "deploy_binding": {
@@ -3934,23 +4850,25 @@
             "companion_order": null,
             "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
             "dispatched_job": {
+              "apply_class": true,
               "argv": [
                 "python",
                 "-m",
                 "erp_v2.importer",
                 "execute",
                 "--receipt",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/receipt.json",
+                "/job/out/receipt.json",
                 "--manifest",
-                "/var/lib/dotmac/erp-v2/job-work/import_execute/manifest.json",
+                "/job/in/manifest.json",
                 "--apply"
               ],
-              "extra": 1,
+              "inputs": [],
               "materials": [
                 "LEGACY_DATABASE_URL",
                 "MIGRATION_DATABASE_URL"
               ],
               "name": "import_execute",
+              "output_dir": "/job/out",
               "params": {
                 "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
                 "ERP_IMPORT_APPLY_OK": "1",
@@ -3960,7 +4878,7 @@
               "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
               "role": "import",
               "single_use": true,
-              "timeout_seconds": 3000,
+              "timeout_seconds": 2400,
               "window": {
                 "closes_at": "2026-12-31T00:00:00Z",
                 "window_id": "window-1"
@@ -3982,14 +4900,40 @@
             ],
             "jobs": [
               {
+                "apply_command": false,
                 "args": [
                   {
+                    "apply_choices": [],
+                    "apply_mode": false,
                     "choices": [],
                     "flag": "--receipt",
+                    "io": "output",
                     "max_length": 240,
-                    "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                     "required": true,
                     "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
                   }
                 ],
                 "command": [
@@ -4008,11 +4952,1118 @@
                   "import_approved"
                 ],
                 "role": "import",
-                "timeout_seconds": 3000
+                "timeout_seconds": 2400
               }
             ],
-            "lease_max_seconds": 3120,
-            "lease_ttl_seconds": 3120,
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
+            "legacy": null,
+            "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "primary_service": "dotmac-erp-v2",
+            "product_toml_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "roles": [],
+            "secrets_environment": "prod",
+            "secrets_namespace": "erp"
+          },
+          "environment": "production",
+          "plan_purpose": "foundation_execution",
+          "product_code": "dotmac-erp-v2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        }
+      },
+      {
+        "code": "job_inputs",
+        "name": "a digest on an output",
+        "operation": "run_job",
+        "snapshot": {
+          "deploy_binding": {
+            "active_binding_names": [],
+            "companion_order": null,
+            "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "dispatched_job": {
+              "apply_class": true,
+              "argv": [
+                "python",
+                "-m",
+                "erp_v2.importer",
+                "execute",
+                "--receipt",
+                "/job/out/receipt.json",
+                "--manifest",
+                "/job/in/manifest.json",
+                "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                },
+                {
+                  "flag": "--receipt",
+                  "path": "/job/out/receipt.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
+              "materials": [
+                "LEGACY_DATABASE_URL",
+                "MIGRATION_DATABASE_URL"
+              ],
+              "name": "import_execute",
+              "output_dir": "/job/out",
+              "params": {
+                "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
+                "ERP_IMPORT_APPLY_OK": "1",
+                "ERP_IMPORT_APPROVED": "1",
+                "ERP_PAYROLL_NET_PAYABLE_ACCOUNT_REF": "acct.net-payable"
+              },
+              "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
+              "role": "import",
+              "single_use": true,
+              "timeout_seconds": 2400,
+              "window": {
+                "closes_at": "2026-12-31T00:00:00Z",
+                "window_id": "window-1"
+              }
+            },
+            "images": [
+              {
+                "planned_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "planned_repository": "127.0.0.1:5000/team/app",
+                "release_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "release_repository": "registry.example.test/team/app",
+                "service": "dotmac-erp-v2",
+                "source": "present"
+              }
+            ],
+            "job_binding_names": [
+              "LEGACY_DATABASE_URL",
+              "MIGRATION_DATABASE_URL"
+            ],
+            "jobs": [
+              {
+                "apply_command": false,
+                "args": [
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--receipt",
+                    "io": "output",
+                    "max_length": 240,
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": true,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "-m",
+                  "erp_v2.importer",
+                  "execute"
+                ],
+                "materials": [
+                  "LEGACY_DATABASE_URL",
+                  "MIGRATION_DATABASE_URL"
+                ],
+                "name": "import_execute",
+                "params": [
+                  "import_apply_ok",
+                  "import_approved"
+                ],
+                "role": "import",
+                "timeout_seconds": 2400
+              }
+            ],
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
+            "legacy": null,
+            "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "primary_service": "dotmac-erp-v2",
+            "product_toml_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "roles": [],
+            "secrets_environment": "prod",
+            "secrets_namespace": "erp"
+          },
+          "environment": "production",
+          "plan_purpose": "foundation_execution",
+          "product_code": "dotmac-erp-v2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        }
+      },
+      {
+        "code": "job_inputs",
+        "name": "an input path outside /job/in",
+        "operation": "run_job",
+        "snapshot": {
+          "deploy_binding": {
+            "active_binding_names": [],
+            "companion_order": null,
+            "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "dispatched_job": {
+              "apply_class": true,
+              "argv": [
+                "python",
+                "-m",
+                "erp_v2.importer",
+                "execute",
+                "--receipt",
+                "/job/out/receipt.json",
+                "--manifest",
+                "/job/in/manifest.json",
+                "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/etc/passwd",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
+              "materials": [
+                "LEGACY_DATABASE_URL",
+                "MIGRATION_DATABASE_URL"
+              ],
+              "name": "import_execute",
+              "output_dir": "/job/out",
+              "params": {
+                "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
+                "ERP_IMPORT_APPLY_OK": "1",
+                "ERP_IMPORT_APPROVED": "1",
+                "ERP_PAYROLL_NET_PAYABLE_ACCOUNT_REF": "acct.net-payable"
+              },
+              "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
+              "role": "import",
+              "single_use": true,
+              "timeout_seconds": 2400,
+              "window": {
+                "closes_at": "2026-12-31T00:00:00Z",
+                "window_id": "window-1"
+              }
+            },
+            "images": [
+              {
+                "planned_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "planned_repository": "127.0.0.1:5000/team/app",
+                "release_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "release_repository": "registry.example.test/team/app",
+                "service": "dotmac-erp-v2",
+                "source": "present"
+              }
+            ],
+            "job_binding_names": [
+              "LEGACY_DATABASE_URL",
+              "MIGRATION_DATABASE_URL"
+            ],
+            "jobs": [
+              {
+                "apply_command": false,
+                "args": [
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--receipt",
+                    "io": "output",
+                    "max_length": 240,
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": true,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "-m",
+                  "erp_v2.importer",
+                  "execute"
+                ],
+                "materials": [
+                  "LEGACY_DATABASE_URL",
+                  "MIGRATION_DATABASE_URL"
+                ],
+                "name": "import_execute",
+                "params": [
+                  "import_apply_ok",
+                  "import_approved"
+                ],
+                "role": "import",
+                "timeout_seconds": 2400
+              }
+            ],
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
+            "legacy": null,
+            "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "primary_service": "dotmac-erp-v2",
+            "product_toml_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "roles": [],
+            "secrets_environment": "prod",
+            "secrets_namespace": "erp"
+          },
+          "environment": "production",
+          "plan_purpose": "foundation_execution",
+          "product_code": "dotmac-erp-v2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        }
+      },
+      {
+        "code": "job_inputs",
+        "name": "an input path with ..",
+        "operation": "run_job",
+        "snapshot": {
+          "deploy_binding": {
+            "active_binding_names": [],
+            "companion_order": null,
+            "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "dispatched_job": {
+              "apply_class": true,
+              "argv": [
+                "python",
+                "-m",
+                "erp_v2.importer",
+                "execute",
+                "--receipt",
+                "/job/out/receipt.json",
+                "--manifest",
+                "/job/in/manifest.json",
+                "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/../etc",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
+              "materials": [
+                "LEGACY_DATABASE_URL",
+                "MIGRATION_DATABASE_URL"
+              ],
+              "name": "import_execute",
+              "output_dir": "/job/out",
+              "params": {
+                "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
+                "ERP_IMPORT_APPLY_OK": "1",
+                "ERP_IMPORT_APPROVED": "1",
+                "ERP_PAYROLL_NET_PAYABLE_ACCOUNT_REF": "acct.net-payable"
+              },
+              "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
+              "role": "import",
+              "single_use": true,
+              "timeout_seconds": 2400,
+              "window": {
+                "closes_at": "2026-12-31T00:00:00Z",
+                "window_id": "window-1"
+              }
+            },
+            "images": [
+              {
+                "planned_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "planned_repository": "127.0.0.1:5000/team/app",
+                "release_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "release_repository": "registry.example.test/team/app",
+                "service": "dotmac-erp-v2",
+                "source": "present"
+              }
+            ],
+            "job_binding_names": [
+              "LEGACY_DATABASE_URL",
+              "MIGRATION_DATABASE_URL"
+            ],
+            "jobs": [
+              {
+                "apply_command": false,
+                "args": [
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--receipt",
+                    "io": "output",
+                    "max_length": 240,
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": true,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "-m",
+                  "erp_v2.importer",
+                  "execute"
+                ],
+                "materials": [
+                  "LEGACY_DATABASE_URL",
+                  "MIGRATION_DATABASE_URL"
+                ],
+                "name": "import_execute",
+                "params": [
+                  "import_apply_ok",
+                  "import_approved"
+                ],
+                "role": "import",
+                "timeout_seconds": 2400
+              }
+            ],
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
+            "legacy": null,
+            "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "primary_service": "dotmac-erp-v2",
+            "product_toml_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "roles": [],
+            "secrets_environment": "prod",
+            "secrets_namespace": "erp"
+          },
+          "environment": "production",
+          "plan_purpose": "foundation_execution",
+          "product_code": "dotmac-erp-v2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        }
+      },
+      {
+        "code": "job_inputs",
+        "name": "a duplicate input flag",
+        "operation": "run_job",
+        "snapshot": {
+          "deploy_binding": {
+            "active_binding_names": [],
+            "companion_order": null,
+            "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "dispatched_job": {
+              "apply_class": true,
+              "argv": [
+                "python",
+                "-m",
+                "erp_v2.importer",
+                "execute",
+                "--receipt",
+                "/job/out/receipt.json",
+                "--manifest",
+                "/job/in/manifest.json",
+                "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                },
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
+              "materials": [
+                "LEGACY_DATABASE_URL",
+                "MIGRATION_DATABASE_URL"
+              ],
+              "name": "import_execute",
+              "output_dir": "/job/out",
+              "params": {
+                "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
+                "ERP_IMPORT_APPLY_OK": "1",
+                "ERP_IMPORT_APPROVED": "1",
+                "ERP_PAYROLL_NET_PAYABLE_ACCOUNT_REF": "acct.net-payable"
+              },
+              "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
+              "role": "import",
+              "single_use": true,
+              "timeout_seconds": 2400,
+              "window": {
+                "closes_at": "2026-12-31T00:00:00Z",
+                "window_id": "window-1"
+              }
+            },
+            "images": [
+              {
+                "planned_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "planned_repository": "127.0.0.1:5000/team/app",
+                "release_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "release_repository": "registry.example.test/team/app",
+                "service": "dotmac-erp-v2",
+                "source": "present"
+              }
+            ],
+            "job_binding_names": [
+              "LEGACY_DATABASE_URL",
+              "MIGRATION_DATABASE_URL"
+            ],
+            "jobs": [
+              {
+                "apply_command": false,
+                "args": [
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--receipt",
+                    "io": "output",
+                    "max_length": 240,
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": true,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "-m",
+                  "erp_v2.importer",
+                  "execute"
+                ],
+                "materials": [
+                  "LEGACY_DATABASE_URL",
+                  "MIGRATION_DATABASE_URL"
+                ],
+                "name": "import_execute",
+                "params": [
+                  "import_apply_ok",
+                  "import_approved"
+                ],
+                "role": "import",
+                "timeout_seconds": 2400
+              }
+            ],
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
+            "legacy": null,
+            "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "primary_service": "dotmac-erp-v2",
+            "product_toml_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "roles": [],
+            "secrets_environment": "prod",
+            "secrets_namespace": "erp"
+          },
+          "environment": "production",
+          "plan_purpose": "foundation_execution",
+          "product_code": "dotmac-erp-v2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        }
+      },
+      {
+        "code": "job_inputs",
+        "name": "a non-canonical input digest",
+        "operation": "run_job",
+        "snapshot": {
+          "deploy_binding": {
+            "active_binding_names": [],
+            "companion_order": null,
+            "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "dispatched_job": {
+              "apply_class": true,
+              "argv": [
+                "python",
+                "-m",
+                "erp_v2.importer",
+                "execute",
+                "--receipt",
+                "/job/out/receipt.json",
+                "--manifest",
+                "/job/in/manifest.json",
+                "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
+              "materials": [
+                "LEGACY_DATABASE_URL",
+                "MIGRATION_DATABASE_URL"
+              ],
+              "name": "import_execute",
+              "output_dir": "/job/out",
+              "params": {
+                "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
+                "ERP_IMPORT_APPLY_OK": "1",
+                "ERP_IMPORT_APPROVED": "1",
+                "ERP_PAYROLL_NET_PAYABLE_ACCOUNT_REF": "acct.net-payable"
+              },
+              "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
+              "role": "import",
+              "single_use": true,
+              "timeout_seconds": 2400,
+              "window": {
+                "closes_at": "2026-12-31T00:00:00Z",
+                "window_id": "window-1"
+              }
+            },
+            "images": [
+              {
+                "planned_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "planned_repository": "127.0.0.1:5000/team/app",
+                "release_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "release_repository": "registry.example.test/team/app",
+                "service": "dotmac-erp-v2",
+                "source": "present"
+              }
+            ],
+            "job_binding_names": [
+              "LEGACY_DATABASE_URL",
+              "MIGRATION_DATABASE_URL"
+            ],
+            "jobs": [
+              {
+                "apply_command": false,
+                "args": [
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--receipt",
+                    "io": "output",
+                    "max_length": 240,
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": true,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "-m",
+                  "erp_v2.importer",
+                  "execute"
+                ],
+                "materials": [
+                  "LEGACY_DATABASE_URL",
+                  "MIGRATION_DATABASE_URL"
+                ],
+                "name": "import_execute",
+                "params": [
+                  "import_apply_ok",
+                  "import_approved"
+                ],
+                "role": "import",
+                "timeout_seconds": 2400
+              }
+            ],
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
+            "legacy": null,
+            "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "primary_service": "dotmac-erp-v2",
+            "product_toml_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "roles": [],
+            "secrets_environment": "prod",
+            "secrets_namespace": "erp"
+          },
+          "environment": "production",
+          "plan_purpose": "foundation_execution",
+          "product_code": "dotmac-erp-v2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        }
+      },
+      {
+        "code": "job_shape",
+        "name": "an apply_class that is not a bool",
+        "operation": "run_job",
+        "snapshot": {
+          "deploy_binding": {
+            "active_binding_names": [],
+            "companion_order": null,
+            "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "dispatched_job": {
+              "apply_class": "yes",
+              "argv": [
+                "python",
+                "-m",
+                "erp_v2.importer",
+                "execute",
+                "--receipt",
+                "/job/out/receipt.json",
+                "--manifest",
+                "/job/in/manifest.json",
+                "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
+              "materials": [
+                "LEGACY_DATABASE_URL",
+                "MIGRATION_DATABASE_URL"
+              ],
+              "name": "import_execute",
+              "output_dir": "/job/out",
+              "params": {
+                "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
+                "ERP_IMPORT_APPLY_OK": "1",
+                "ERP_IMPORT_APPROVED": "1",
+                "ERP_PAYROLL_NET_PAYABLE_ACCOUNT_REF": "acct.net-payable"
+              },
+              "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
+              "role": "import",
+              "single_use": true,
+              "timeout_seconds": 2400,
+              "window": {
+                "closes_at": "2026-12-31T00:00:00Z",
+                "window_id": "window-1"
+              }
+            },
+            "images": [
+              {
+                "planned_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "planned_repository": "127.0.0.1:5000/team/app",
+                "release_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "release_repository": "registry.example.test/team/app",
+                "service": "dotmac-erp-v2",
+                "source": "present"
+              }
+            ],
+            "job_binding_names": [
+              "LEGACY_DATABASE_URL",
+              "MIGRATION_DATABASE_URL"
+            ],
+            "jobs": [
+              {
+                "apply_command": false,
+                "args": [
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--receipt",
+                    "io": "output",
+                    "max_length": 240,
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": true,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "-m",
+                  "erp_v2.importer",
+                  "execute"
+                ],
+                "materials": [
+                  "LEGACY_DATABASE_URL",
+                  "MIGRATION_DATABASE_URL"
+                ],
+                "name": "import_execute",
+                "params": [
+                  "import_apply_ok",
+                  "import_approved"
+                ],
+                "role": "import",
+                "timeout_seconds": 2400
+              }
+            ],
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
+            "legacy": null,
+            "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "primary_service": "dotmac-erp-v2",
+            "product_toml_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "roles": [],
+            "secrets_environment": "prod",
+            "secrets_namespace": "erp"
+          },
+          "environment": "production",
+          "plan_purpose": "foundation_execution",
+          "product_code": "dotmac-erp-v2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        }
+      },
+      {
+        "code": "job_inputs",
+        "name": "an output dir outside /job/out",
+        "operation": "run_job",
+        "snapshot": {
+          "deploy_binding": {
+            "active_binding_names": [],
+            "companion_order": null,
+            "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "dispatched_job": {
+              "apply_class": true,
+              "argv": [
+                "python",
+                "-m",
+                "erp_v2.importer",
+                "execute",
+                "--receipt",
+                "/job/out/receipt.json",
+                "--manifest",
+                "/job/in/manifest.json",
+                "--apply"
+              ],
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
+              "materials": [
+                "LEGACY_DATABASE_URL",
+                "MIGRATION_DATABASE_URL"
+              ],
+              "name": "import_execute",
+              "output_dir": "/run/dotmac/out",
+              "params": {
+                "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
+                "ERP_IMPORT_APPLY_OK": "1",
+                "ERP_IMPORT_APPROVED": "1",
+                "ERP_PAYROLL_NET_PAYABLE_ACCOUNT_REF": "acct.net-payable"
+              },
+              "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
+              "role": "import",
+              "single_use": true,
+              "timeout_seconds": 2400,
+              "window": {
+                "closes_at": "2026-12-31T00:00:00Z",
+                "window_id": "window-1"
+              }
+            },
+            "images": [
+              {
+                "planned_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "planned_repository": "127.0.0.1:5000/team/app",
+                "release_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "release_repository": "registry.example.test/team/app",
+                "service": "dotmac-erp-v2",
+                "source": "present"
+              }
+            ],
+            "job_binding_names": [
+              "LEGACY_DATABASE_URL",
+              "MIGRATION_DATABASE_URL"
+            ],
+            "jobs": [
+              {
+                "apply_command": false,
+                "args": [
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--receipt",
+                    "io": "output",
+                    "max_length": 240,
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": true,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "-m",
+                  "erp_v2.importer",
+                  "execute"
+                ],
+                "materials": [
+                  "LEGACY_DATABASE_URL",
+                  "MIGRATION_DATABASE_URL"
+                ],
+                "name": "import_execute",
+                "params": [
+                  "import_apply_ok",
+                  "import_approved"
+                ],
+                "role": "import",
+                "timeout_seconds": 2400
+              }
+            ],
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
+            "legacy": null,
+            "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "primary_service": "dotmac-erp-v2",
+            "product_toml_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "roles": [],
+            "secrets_environment": "prod",
+            "secrets_namespace": "erp"
+          },
+          "environment": "production",
+          "plan_purpose": "foundation_execution",
+          "product_code": "dotmac-erp-v2",
+          "target_ref": "dotmac-erp-v2/production/host-a"
+        }
+      },
+      {
+        "code": "job_shape",
+        "name": "a dispatched job with a stray key",
+        "operation": "run_job",
+        "snapshot": {
+          "deploy_binding": {
+            "active_binding_names": [],
+            "companion_order": null,
+            "deploy_unit_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "dispatched_job": {
+              "apply_class": true,
+              "argv": [
+                "python",
+                "-m",
+                "erp_v2.importer",
+                "execute",
+                "--receipt",
+                "/job/out/receipt.json",
+                "--manifest",
+                "/job/in/manifest.json",
+                "--apply"
+              ],
+              "extra": 1,
+              "inputs": [
+                {
+                  "flag": "--manifest",
+                  "path": "/job/in/manifest.json",
+                  "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                }
+              ],
+              "materials": [
+                "LEGACY_DATABASE_URL",
+                "MIGRATION_DATABASE_URL"
+              ],
+              "name": "import_execute",
+              "output_dir": "/job/out",
+              "params": {
+                "ERP_ENROLMENT_ACTOR_ID": "11111111-2222-3333-4444-555555555555",
+                "ERP_IMPORT_APPLY_OK": "1",
+                "ERP_IMPORT_APPROVED": "1",
+                "ERP_PAYROLL_NET_PAYABLE_ACCOUNT_REF": "acct.net-payable"
+              },
+              "params_env_digest": "sha256:1acecfe85430ec43557ce1928d29ae787e836528b5be3f1f853e76b685e5ceb6",
+              "role": "import",
+              "single_use": true,
+              "timeout_seconds": 2400,
+              "window": {
+                "closes_at": "2026-12-31T00:00:00Z",
+                "window_id": "window-1"
+              }
+            },
+            "images": [
+              {
+                "planned_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "planned_repository": "127.0.0.1:5000/team/app",
+                "release_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "release_repository": "registry.example.test/team/app",
+                "service": "dotmac-erp-v2",
+                "source": "present"
+              }
+            ],
+            "job_binding_names": [
+              "LEGACY_DATABASE_URL",
+              "MIGRATION_DATABASE_URL"
+            ],
+            "jobs": [
+              {
+                "apply_command": false,
+                "args": [
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--receipt",
+                    "io": "output",
+                    "max_length": 240,
+                    "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": true,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": false,
+                    "choices": [],
+                    "flag": "--manifest",
+                    "io": "input",
+                    "max_length": 240,
+                    "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "required": false,
+                    "type": "path"
+                  },
+                  {
+                    "apply_choices": [],
+                    "apply_mode": true,
+                    "choices": [],
+                    "flag": "--apply",
+                    "io": null,
+                    "max_length": 240,
+                    "pattern": null,
+                    "required": false,
+                    "type": "bool"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "-m",
+                  "erp_v2.importer",
+                  "execute"
+                ],
+                "materials": [
+                  "LEGACY_DATABASE_URL",
+                  "MIGRATION_DATABASE_URL"
+                ],
+                "name": "import_execute",
+                "params": [
+                  "import_apply_ok",
+                  "import_approved"
+                ],
+                "role": "import",
+                "timeout_seconds": 2400
+              }
+            ],
+            "lease_max_seconds": 2520,
+            "lease_ttl_seconds": 2520,
             "legacy": null,
             "params_env_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "primary_service": "dotmac-erp-v2",
@@ -4052,14 +6103,40 @@
           "job_binding_names": [],
           "jobs": [
             {
+              "apply_command": false,
               "args": [
                 {
+                  "apply_choices": [],
+                  "apply_mode": false,
                   "choices": [],
                   "flag": "--receipt",
+                  "io": "output",
                   "max_length": 240,
-                  "pattern": "^/var/lib/dotmac/erp-v2/job-work/import_execute/[A-Za-z0-9._-]+$",
+                  "pattern": "^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
                   "required": true,
                   "type": "path"
+                },
+                {
+                  "apply_choices": [],
+                  "apply_mode": false,
+                  "choices": [],
+                  "flag": "--manifest",
+                  "io": "input",
+                  "max_length": 240,
+                  "pattern": "^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "required": false,
+                  "type": "path"
+                },
+                {
+                  "apply_choices": [],
+                  "apply_mode": true,
+                  "choices": [],
+                  "flag": "--apply",
+                  "io": null,
+                  "max_length": 240,
+                  "pattern": null,
+                  "required": false,
+                  "type": "bool"
                 }
               ],
               "command": [
@@ -4078,7 +6155,7 @@
                 "import_approved"
               ],
               "role": "import",
-              "timeout_seconds": 3000
+              "timeout_seconds": 2400
             }
           ],
           "lease_max_seconds": 3120,
@@ -4162,6 +6239,7 @@
       "lease/standing": {
         "request": {},
         "response": {
+          "dispatch_run": "optstr",
           "standing": "str"
         }
       }
@@ -4171,6 +6249,7 @@
       "lease_held": 409,
       "lease_max_reached": 409,
       "lease_not_held": 409,
+      "lease_not_renewable": 409,
       "reconcile_marker_required": 409
     },
     "lease_margin_seconds": 120,
@@ -4231,6 +6310,65 @@
     ]
   },
   "file": "target_api_v2.json",
+  "job_arg_schema": {
+    "ok": [
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--manifest\"\ntype = \"path\"\nio = \"input\"\npattern = \"^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$\"\n",
+        "name": "an input path under /job/in"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--receipt\"\ntype = \"path\"\nio = \"output\"\npattern = \"^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$\"\n",
+        "name": "an output path under /job/out"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--apply\"\ntype = \"bool\"\napply_mode = true\n",
+        "name": "a bool flag that applies"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--mode\"\ntype = \"enum\"\nchoices = [\"plan\", \"apply\"]\napply_choices = [\"apply\"]\n",
+        "name": "enum choices that apply"
+      }
+    ],
+    "refused": [
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--x\"\ntype = \"path\"\npattern = \"^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$\"\n",
+        "name": "a path without io"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--x\"\ntype = \"string\"\nio = \"input\"\n",
+        "name": "io on a non-path"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--x\"\ntype = \"path\"\nio = \"inout\"\npattern = \"^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$\"\n",
+        "name": "an unknown io"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--x\"\ntype = \"path\"\nio = \"input\"\npattern = \"^/job/out/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$\"\n",
+        "name": "an input pattern under /job/out"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--x\"\ntype = \"path\"\nio = \"output\"\npattern = \"^/job/in/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$\"\n",
+        "name": "an output pattern under /job/in"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--x\"\ntype = \"path\"\nio = \"input\"\npattern = \"^/etc/[a-z]+$\"\n",
+        "name": "a pattern outside /job"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--x\"\ntype = \"path\"\nio = \"input\"\npattern = \"^/job/in/../[a-z]+$\"\n",
+        "name": "a pattern with .."
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--x\"\ntype = \"string\"\napply_mode = true\n",
+        "name": "apply_mode on a non-bool"
+      },
+      {
+        "descriptor": "\nschema = \"dotmac.deploy_unit/1\"\nproduct = \"dotmac-erp-v2\"\nspec = \"deploy/product.toml\"\nsecrets_namespace = \"erp\"\n\n[[jobs]]\nname = \"j\"\ncommand = [\"x\"]\ntrigger = \"operator\"\nmaterials = []\nrunbook = \"docs/r.md\"\ntimeout_seconds = 60\n\n[[jobs.args]]\nflag = \"--m\"\ntype = \"enum\"\nchoices = [\"a\", \"b\"]\napply_choices = [\"c\"]\n",
+        "name": "apply_choices that are not choices"
+      }
+    ],
+    "rule": "A `path` argument declares `io`: an `input` lives at /job/in/<name> and its sha256 is entered at propose and signed in dispatched_job.inputs; an `output` lives at /job/out/<name>. <name> is [A-Za-z0-9][A-Za-z0-9._-]{0,127}; there is no `..`. `apply_mode` marks a bool flag, and `apply_choices` the enum choices, that make a plan apply-class."
+  },
   "lease_body_vectors": {
     "ok": [
       {
@@ -4303,6 +6441,7 @@
       },
       {
         "body": {
+          "dispatch_run": null,
           "standing": "held"
         },
         "direction": "response",
@@ -4373,9 +6512,36 @@
       },
       {
         "body": {
+          "dispatch_run": null,
           "standing": "maybe"
         },
         "code": "body_value",
+        "direction": "response",
+        "route": "lease/standing"
+      },
+      {
+        "body": {
+          "dispatch_run": null,
+          "standing": "expired_unreleased"
+        },
+        "code": "body_value",
+        "direction": "response",
+        "route": "lease/standing"
+      },
+      {
+        "body": {
+          "dispatch_run": "run-1",
+          "standing": "held"
+        },
+        "code": "body_value",
+        "direction": "response",
+        "route": "lease/standing"
+      },
+      {
+        "body": {
+          "standing": "free"
+        },
+        "code": "body_keys",
         "direction": "response",
         "route": "lease/standing"
       },
@@ -4404,7 +6570,7 @@
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 1500,
-            "reconcile_marker": true,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 0,
@@ -4481,9 +6647,53 @@
           "args": {},
           "at": 1500,
           "body": {
+            "dispatch_run": "run-1",
             "standing": "expired_unreleased"
           },
           "call": "standing",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "name": "a run_job lease is granted once and never renewed",
+      "steps": [
+        {
+          "args": {
+            "dispatch_run": "run-1",
+            "lease_max_seconds": 2520,
+            "marker_present": true,
+            "renewable": false,
+            "ttl_seconds": 2520
+          },
+          "at": 0,
+          "body": {
+            "lease_id": "lease-0001",
+            "ttl_seconds": 2520
+          },
+          "call": "acquire",
+          "status": 200
+        },
+        {
+          "args": {
+            "dispatch_run": "run-1",
+            "lease_id": "lease-0001"
+          },
+          "at": 100,
+          "call": "renew",
+          "error": "lease_not_renewable",
+          "status": 409
+        },
+        {
+          "args": {
+            "dispatch_run": "run-1",
+            "lease_id": "lease-0001"
+          },
+          "at": 200,
+          "body": {
+            "covers": true
+          },
+          "call": "covers",
           "status": 200
         }
       ]
@@ -4495,7 +6705,7 @@
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 600,
-            "reconcile_marker": true,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 0,
@@ -4522,30 +6732,148 @@
       ]
     },
     {
-      "name": "acquire without the reconcile marker is a signed 409",
+      "name": "a never-leased host acquires without a marker",
       "steps": [
+        {
+          "args": {},
+          "at": 0,
+          "body": {
+            "dispatch_run": null,
+            "standing": "free"
+          },
+          "call": "standing",
+          "status": 200
+        },
         {
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 1500,
-            "reconcile_marker": false,
+            "marker_present": false,
             "ttl_seconds": 600
           },
-          "at": 0,
+          "at": 1,
+          "body": {
+            "lease_id": "lease-0001",
+            "ttl_seconds": 600
+          },
           "call": "acquire",
-          "error": "reconcile_marker_required",
-          "status": 409
+          "status": 200
         }
       ]
     },
     {
-      "name": "re-acquiring by the same run returns its lease",
+      "name": "after an expiry the acquire needs the marker (a signed 409 without it)",
       "steps": [
         {
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 1500,
-            "reconcile_marker": true,
+            "marker_present": true,
+            "ttl_seconds": 600
+          },
+          "at": 0,
+          "body": {
+            "lease_id": "lease-0001",
+            "ttl_seconds": 600
+          },
+          "call": "acquire",
+          "status": 200
+        },
+        {
+          "args": {},
+          "at": 700,
+          "body": {
+            "dispatch_run": "run-1",
+            "standing": "expired_unreleased"
+          },
+          "call": "standing",
+          "status": 200
+        },
+        {
+          "args": {
+            "dispatch_run": "run-2",
+            "lease_max_seconds": 1500,
+            "marker_present": false,
+            "ttl_seconds": 600
+          },
+          "at": 710,
+          "call": "acquire",
+          "error": "reconcile_marker_required",
+          "status": 409
+        },
+        {
+          "args": {
+            "dispatch_run": "run-2",
+            "lease_max_seconds": 1500,
+            "marker_present": true,
+            "ttl_seconds": 600
+          },
+          "at": 720,
+          "body": {
+            "lease_id": "lease-0002",
+            "ttl_seconds": 600
+          },
+          "call": "acquire",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "name": "after a clean release the next acquire needs no marker",
+      "steps": [
+        {
+          "args": {
+            "dispatch_run": "run-1",
+            "lease_max_seconds": 1500,
+            "marker_present": true,
+            "ttl_seconds": 600
+          },
+          "at": 0,
+          "body": {
+            "lease_id": "lease-0001",
+            "ttl_seconds": 600
+          },
+          "call": "acquire",
+          "status": 200
+        },
+        {
+          "args": {
+            "host_mutated": false,
+            "lease_id": "lease-0001"
+          },
+          "at": 50,
+          "body": {
+            "released": true,
+            "replay": false
+          },
+          "call": "release",
+          "status": 200
+        },
+        {
+          "args": {
+            "dispatch_run": "run-2",
+            "lease_max_seconds": 1500,
+            "marker_present": false,
+            "ttl_seconds": 600
+          },
+          "at": 60,
+          "body": {
+            "lease_id": "lease-0002",
+            "ttl_seconds": 600
+          },
+          "call": "acquire",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "name": "a replayed acquire by the same run returns the REMAINING ttl",
+      "steps": [
+        {
+          "args": {
+            "dispatch_run": "run-1",
+            "lease_max_seconds": 1500,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 0,
@@ -4560,13 +6888,13 @@
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 1500,
-            "reconcile_marker": true,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 10,
           "body": {
             "lease_id": "lease-0001",
-            "ttl_seconds": 600
+            "ttl_seconds": 590
           },
           "call": "acquire",
           "status": 200
@@ -4592,7 +6920,7 @@
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 1500,
-            "reconcile_marker": true,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 0,
@@ -4607,7 +6935,7 @@
           "args": {
             "dispatch_run": "run-2",
             "lease_max_seconds": 1500,
-            "reconcile_marker": true,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 100,
@@ -4624,7 +6952,7 @@
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 1500,
-            "reconcile_marker": true,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 0,
@@ -4677,6 +7005,7 @@
           "args": {},
           "at": 80,
           "body": {
+            "dispatch_run": null,
             "standing": "free"
           },
           "call": "standing",
@@ -4691,7 +7020,7 @@
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 1500,
-            "reconcile_marker": true,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 0,
@@ -4731,7 +7060,7 @@
           "args": {
             "dispatch_run": "run-1",
             "lease_max_seconds": 1500,
-            "reconcile_marker": true,
+            "marker_present": true,
             "ttl_seconds": 600
           },
           "at": 0,
@@ -4746,6 +7075,7 @@
           "args": {},
           "at": 599,
           "body": {
+            "dispatch_run": null,
             "standing": "held"
           },
           "call": "standing",
@@ -4755,6 +7085,7 @@
           "args": {},
           "at": 700,
           "body": {
+            "dispatch_run": "run-1",
             "standing": "expired_unreleased"
           },
           "call": "standing",
