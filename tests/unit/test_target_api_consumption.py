@@ -626,3 +626,20 @@ def test_router_replays_materials_vectors(db: Session) -> None:
             with pytest.raises(c.TargetApiError):
                 c.check_materials_shape(document)
     assert reproduced >= 10
+
+
+def test_consume_lifts_lease_expires_at_for_the_run_job_entry_point(
+    db: Session,
+) -> None:
+    backend = FakeBackend()
+    original = backend.commit_consumption
+
+    def with_lease(*args: Any, **kwargs: Any) -> Mapping[str, object]:
+        return {**original(*args, **kwargs), "lease_expires_at": "2026-11-22T11:00:00Z"}
+
+    backend.commit_consumption = with_lease  # type: ignore[method-assign]
+    rig = Rig(backend, db)
+    response = rig.post("consume", _CONSUME)
+    assert response.status_code == 200
+    assert response.json()["lease_expires_at"] == "2026-11-22T11:00:00Z"
+    assert rig.post("consume", _CONSUME).json()["error"] == "already_consumed"

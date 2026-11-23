@@ -253,14 +253,22 @@ def test_resolve_replays_the_binding_vectors_with_control_plan_key_names(
     assert body["operation"] == "run_job"
     # verbatim: the signed plan's own values under the plan's own key names
     assert body["dispatched_job"] == binding["dispatched_job"]
-    assert body["plan_image"] == binding["images"][0]
+    image = binding["images"][0]
+    assert body["image"] == {
+        "planned_repository": image["planned_repository"],
+        "planned_digest": image["planned_digest"],
+        "source": image["source"],
+    }
+    assert body["image"]["source"] == "present"
+    assert body["job_binding_names"] == binding["job_binding_names"]
+    assert body["secrets_namespace"] == binding["secrets_namespace"]
+    assert body["dispatch_id"] == "dispatch-0001"
     assert set(body["dispatched_job"]) >= {"argv", "materials", "name", "params"}
-    assert body["plan_image"]["source"] == "present"
 
     serving = V2["binding"]["serving"]
     deploy = _resolve(db, serving["operation"], serving["snapshot"]).json()
     assert deploy["operation"] == "deploy"
-    assert "dispatched_job" not in deploy and "plan_image" not in deploy
+    assert not {"dispatched_job", "image", "job_binding_names"} & set(deploy)
 
 
 def test_resolve_refuses_the_dispatched_job_mismatch_vectors(db: Session) -> None:

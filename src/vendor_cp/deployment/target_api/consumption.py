@@ -225,9 +225,12 @@ def _committed(db: Session, dispatch_id: str) -> Mapping[str, Any] | None:
 def _plan_fields(resolution: Resolution) -> dict[str, object]:
     """What the target needs from the plan, under Control's own key names.
 
-    `dispatched_job` is `plan_snapshot.deploy_binding.dispatched_job` VERBATIM and
-    `plan_image` is the primary service's entry of `deploy_binding.images`
-    (`service`, `source`, `planned_repository`, `planned_digest`, ...) VERBATIM.
+    For `run_job`, VERBATIM from `plan_snapshot.deploy_binding`: `dispatched_job`,
+    `job_binding_names`, `secrets_namespace`, and `image` = the primary service's
+    `images` entry reduced to `planned_repository`, `planned_digest`, `source`
+    (the key set Foundation's operator-job entry point pins). `render_unit`,
+    `path_materials`, `job_uid` and `job_user` are NOT in the signed plan: the
+    uid is an enrolment fact (RULING-agent-contract R2), never a CP-supplied field.
     A `run_job` plan must carry a job and any other operation must not
     (`dispatched_job_mismatch`); a run_job plan without a primary image is refused.
     """
@@ -246,8 +249,18 @@ def _plan_fields(resolution: Resolution) -> dict[str, object]:
         image = c.primary_image(resolution.plan_snapshot)
     except c.TargetApiError:
         raise ConsumptionRefused("plan_image_missing") from None
+    names = binding.get("job_binding_names") if isinstance(binding, Mapping) else None
+    namespace = (
+        binding.get("secrets_namespace") if isinstance(binding, Mapping) else None
+    )
+    if not isinstance(names, list) or not isinstance(namespace, str):
+        raise ConsumptionRefused("dispatched_job_mismatch")
     fields["dispatched_job"] = dict(job)
-    fields["plan_image"] = dict(image)
+    fields["image"] = {
+        key: image[key] for key in ("planned_repository", "planned_digest", "source")
+    }
+    fields["job_binding_names"] = list(names)
+    fields["secrets_namespace"] = namespace
     return fields
 
 
@@ -335,7 +348,12 @@ class ConsumptionService:
         )
         if outcome.replayed:
             return self._replay(call, outcome.result)
-        return HandlerResult(200, {"committed": outcome.result["marker"]})
+        marker = outcome.result["marker"]
+        extra: dict[str, object] = {}
+        if isinstance(marker, Mapping) and "lease_expires_at" in marker:
+            # the run_job entry point reads the lease deadline at the top level
+            extra["lease_expires_at"] = marker["lease_expires_at"]
+        return HandlerResult(200, {"committed": marker, **extra})
 
     def _replay(
         self, call: AuthenticatedCall, stored: Mapping[str, Any]
