@@ -479,7 +479,7 @@ def test_standing_names_the_expired_dispatch_only_when_expired_unreleased() -> N
     rig.store.standing_value = "expired_unreleased"
     assert rig.call("GET", "lease/standing").json()["dispatch_run"] == "d-1"
     rig.store.standing_value = "held"
-    assert "dispatch_run" not in rig.call("GET", "lease/standing").json()
+    assert rig.call("GET", "lease/standing").json()["dispatch_run"] is None
     rig.store.standing_value = "released"
     assert rig.call("GET", "lease/standing").json()["standing"] == "free"
 

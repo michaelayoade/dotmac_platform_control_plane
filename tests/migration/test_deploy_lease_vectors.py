@@ -9,16 +9,10 @@ into `LeaseHandlers`, into the REAL `cp_deploy_lease` functions on PG16 as the C
 runtime role, on the frozen database clock. Each step's status, signed error and
 exact response key set are Control's.
 
-Two honest limits, stated rather than hidden:
-
-* `lease/renew` is not a route of lane 5b's pinned v1 mirror, so the fixture adds
-  it to the mirror's verb table (`contract._VERBS`) for the run, exactly as the v2
-  mirror will; nothing else of 5b's is touched.
-* Control's reference ledger refuses a missing reconcile marker on ANY acquire
-  (`reconciled` False). CP's rule is narrower and is the design's: the marker is
-  required only when the host's last lease EXPIRED UNRELEASED. So a scenario whose
-  step says `reconcile_marker: false` is replayed on a host seeded in exactly that
-  state (an expired unreleased lease of another run).
+One honest limit, stated rather than hidden: `lease/renew` is not a route of lane
+5b's pinned v1 mirror, so the fixture adds it to the mirror's verb table
+(`contract._VERBS`) for the run, exactly as the v2 mirror will; nothing else of 5b's
+is touched.
 """
 
 from __future__ import annotations
@@ -64,8 +58,9 @@ VECTOR_FILE = (
     / "target_api"
     / "target_api_v2.json"
 )
-#: Control `contract/target_api_v2.json` at control-a18-20261122 abdecc0 (provisional).
-PINNED_V2_SHA256 = "2ffcccdc2e74054ef6ff1496671c951aceaecc70e41de17b75545c4768d4c2a4"
+#: Control `contract/target_api_v2.json`, control-a18-20261122 be74634 (provisional:
+#: Control regenerates it again for inputs and apply_class).
+PINNED_V2_SHA256 = "0fe9c6be1b49af5fb4b9267bce51dfaccc016e83b1c5dd8b2332916f698d834d"
 V2 = json.loads(VECTOR_FILE.read_bytes())
 
 _SEED = b64u(bytes(range(1, 33)))
@@ -91,7 +86,7 @@ def test_the_vendored_v2_contract_is_byte_identical_to_the_pin() -> None:
     assert V2["constants"]["endpoints_added"] == [["POST", "lease/renew", "agent"]]
     assert set(V2["constants"]["lease_errors"]) == LEASE_ERRORS
     assert set(V2["constants"]["lease_errors"].values()) == {409}
-    assert len(V2["lease_scenarios"]) == 8
+    assert len(V2["lease_scenarios"]) == 10
 
 
 class _Port:
@@ -111,8 +106,6 @@ class _Replay:
         monkeypatch.setitem(c._VERBS, "lease/renew", "POST")
         self.db, self.engine, self.port = db, engine, _Port()
         self.ids: dict[str, str] = {}
-        self.acquired_at: dict[str, int] = {}
-        self.last_run = ""
         self.n = 0
         self.base = db.now()
         self.at = 0
@@ -141,23 +134,6 @@ class _Replay:
         now = self.db.now().timestamp()
         if target > now:
             self.db.advance(None, target - now)
-
-    def seed_expired_unreleased(self) -> None:
-        """A host whose last lease expired unreleased: the state that needs a marker."""
-        from vendor_cp.deployment.deploy_lease import DeployLeaseStore, dispatch_run
-
-        with self.engine.connect() as conn:
-            DeployLeaseStore(conn).acquire(
-                target_ref=TARGET,
-                host_id="host-a",
-                dispatch_run=dispatch_run(TARGET, "seed-run"),
-                ttl_seconds=120,
-                max_seconds=120,
-                principal_ref="target-credential:cred-0001",
-            )
-            conn.commit()
-        self.db.advance(None, 121)
-        self.base = self.db.now()
 
     def call(self, name: str, args: dict[str, Any], body: Any = None) -> Any:
         method, route = _ROUTES[name]
@@ -202,54 +178,39 @@ def _wire_body(
     body = {
         k: v
         for k, v in args.items()
-        if k not in {"lease_max_seconds", "reconcile_marker"}
+        if k not in {"lease_max_seconds", "marker_present"}
     }
     if "lease_id" in body:
         body["lease_id"] = replay.ids.get(body["lease_id"], body["lease_id"])
     return body
 
 
-@pytest.mark.parametrize("index", range(8))
+@pytest.mark.parametrize("index", range(10))
 def test_every_v2_lease_scenario_replays_through_the_real_router(
     replay_factory: Any, index: int
 ) -> None:
     scenario = V2["lease_scenarios"][index]
     replay: _Replay = replay_factory()
-    first = scenario["steps"][0]
-    if first["call"] == "acquire" and first["args"]["reconcile_marker"] is False:
-        replay.seed_expired_unreleased()
     for step in scenario["steps"]:
         args, name = step["args"], step["call"]
         replay.clock_to(step["at"])
         if name == "acquire":
-            replay.last_run = args["dispatch_run"]
             replay.port.plan = LeasePlan(
                 "deploy", None, args["ttl_seconds"], args["lease_max_seconds"]
             )
-            replay.port.marker = _MARKER if args["reconcile_marker"] else None
+            replay.port.marker = _MARKER if args["marker_present"] else None
         response = replay.call(name, args, _wire_body(replay, name, args))
         where = f"{scenario['name']} / {name} at {step['at']}"
         assert response.status_code == step["status"], where
         assert "X-Dotmac-Response-Signature" in response.headers, where
         got = response.json()
         got.pop("store_now")  # the router's own CP-time stamp, not a lease field
-        if name == "standing" and got.get("standing") == "expired_unreleased":
-            # Architect r4 ruling 3 (newer than the vendored pin): standing names the
-            # expired dispatch. Drop this when Control's regenerated v2 is re-vendored.
-            assert got.pop("dispatch_run") == replay.last_run, where
         if "error" in step:
             assert got == {"error": step["error"]}, where
             assert step["error"] in LEASE_ERRORS, where
             continue
         want = dict(step["body"])
         if name == "acquire":
-            if want["lease_id"] in replay.ids:
-                # Architect r4 ruling 4 (newer than the vendored pin): a replayed
-                # same-run acquire answers the REMAINING ttl. Drop this adjustment
-                # when Control's regenerated v2 is re-vendored.
-                want["ttl_seconds"] -= step["at"] - replay.acquired_at[want["lease_id"]]
-            else:
-                replay.acquired_at[want["lease_id"]] = step["at"]
             replay.ids[want["lease_id"]] = got["lease_id"]
         if "lease_id" in want:
             want["lease_id"] = replay.ids.get(want["lease_id"], want["lease_id"])

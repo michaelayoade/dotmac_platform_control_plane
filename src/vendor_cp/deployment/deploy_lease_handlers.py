@@ -426,12 +426,15 @@ class LeaseHandlers:
         )
         if refusal is not None:
             if code == "lease-host-unknown":
-                return HandlerResult(200, {"standing": "free"})
+                return HandlerResult(200, {"standing": "free", "dispatch_run": None})
             return refusal
         # the contract's three: a released lease leaves the host `free`
         value = "free" if standing.standing == "released" else standing.standing
-        body: dict[str, object] = {"standing": value}
-        if value == "expired_unreleased":
-            # name the dispatch whose lease expired (the run is `<target>#<id>`)
-            body["dispatch_run"] = str(standing.dispatch_run).rsplit("#", 1)[-1]
+        # the dispatch whose lease expired (the run is `<target>#<id>`), else null
+        expired = (
+            str(standing.dispatch_run).rsplit("#", 1)[-1]
+            if value == "expired_unreleased"
+            else None
+        )
+        body: dict[str, object] = {"standing": value, "dispatch_run": expired}
         return HandlerResult(200, body)
