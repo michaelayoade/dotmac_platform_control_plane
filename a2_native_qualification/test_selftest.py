@@ -335,7 +335,13 @@ class ObserverResultTests(unittest.TestCase):
 
     def test_all_true_passes(self) -> None:
         r = self.m.judge(
-            self.stages, ["a|true", "b|true"], self.login, ["role_absent|true"]
+            self.stages,
+            ["a|true", "b|true"],
+            self.login,
+            ["role_absent|true"],
+            ["secdef_reachable|none"],
+            ["no_reachable_security_definer_functions_outside_allowlist|false"],
+            ["secdef_reachable|public.a2_ci_sensitivity_probe()"],
         )
         self.assertEqual(r["status"], "PASS")
 
