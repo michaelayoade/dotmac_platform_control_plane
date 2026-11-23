@@ -384,6 +384,8 @@ jobs:
             python - "$ROLLOUT_REF" "$PLAN_ID" "$C1" "$C2" < "$c4/a2_recovery_observe_container.py" \
             > "$work/stdout" 2> "$work/stderr"
           rc=$?
+          # Never let the password reach the receipt (token_urlsafe: sed-safe chars).
+          sed -i "s/$(cat "$work/pw")/***/g" "$work/stderr"
           # 5. Sensitivity: the observer must be unable to write.
           psql_wrc=0
           PGOPTIONS="" docker compose -f cp-src/docker-compose.test.yml exec -T postgres \

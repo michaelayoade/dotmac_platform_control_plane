@@ -53,8 +53,9 @@ def readback_sql(role: str, dbname: str) -> str:
  'config', (SELECT to_json(rolconfig) FROM pg_roles WHERE rolname='{role}'),
  'table_grants', (SELECT json_agg(privilege_type) FROM
      information_schema.role_table_grants WHERE grantee='{role}'),
- 'column_privileges', (SELECT count(*) FROM information_schema.column_privileges
-     WHERE grantee='{role}'),
+ 'column_acl_entries', (SELECT count(*) FROM pg_attribute a
+     CROSS JOIN LATERAL aclexplode(a.attacl) x JOIN pg_roles r ON r.oid = x.grantee
+     WHERE a.attacl IS NOT NULL AND r.rolname='{role}'),
  'memberships', (SELECT count(*) FROM pg_auth_members m JOIN pg_roles r
      ON r.oid=m.member WHERE r.rolname='{role}'),
  'db_create', has_database_privilege('{role}', '{dbname}', 'CREATE'),
@@ -83,7 +84,7 @@ def judge_readback(doc: dict) -> dict[str, bool]:
         "config_exactly_four": set(doc.get("config") or []) == EXPECTED_CONFIG
         and len(doc.get("config") or []) == 4,
         "exactly_4_select_grants": len(grants) == 4 and set(grants) == {"SELECT"},
-        "no_column_privileges": doc.get("column_privileges") == 0,
+        "no_column_level_grants": doc.get("column_acl_entries") == 0,
         "no_memberships": doc.get("memberships") == 0,
         "no_create": doc.get("db_create") is False
         and doc.get("schema_create") is False,
@@ -127,6 +128,8 @@ def main(argv: list[str]) -> int:
         observation = judge_observation(stdout) if rc == "0" else {}
         stderr = Path(err).read_text()
         stop = stderr.strip().rsplit("STOP: ", 1)[-1][:60] if "STOP:" in stderr else ""
+        # Last non-empty stderr line (the harness scrubs the password before this).
+        tail = [x for x in stderr.splitlines() if x.strip()][-1:]
         checks = {
             "container_exit_zero": rc == "0",
             "observer_cannot_write": wrc != "0",
@@ -145,6 +148,7 @@ def main(argv: list[str]) -> int:
                 "image_control_version": os.environ.get("C4_IMAGE_CONTROL_VERSION", ""),
             },
             "stop_name": stop,
+            "stderr_last_line": (tail[0][:240] if tail else ""),
             "stdout_sha256": hashlib.sha256(stdout.encode()).hexdigest(),
             "checks": checks,
         }
