@@ -266,7 +266,8 @@ jobs:
         env:
           POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
           POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
-          PGPASSWORD: postgres
+          # No PGPASSWORD here: it would override .pgpass and send the wrong
+          # password for app_admin / app_user / platform_api.
           TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5442/postgres
           REQUIRE_NO_SKIPS: "1"
           DOTMAC_MIGRATION_BINDINGS: tests.migration_bindings:CANARY_PREREQUISITE_BINDINGS
