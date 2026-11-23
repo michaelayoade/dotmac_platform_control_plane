@@ -142,6 +142,32 @@ def judge_recovery_suite(path: Path) -> dict[str, Any]:
     }
 
 
+def wheelhouse_lock(
+    wheelhouse: Path, lock_out: Path, manifest_out: Path
+) -> dict[str, Any]:
+    """Write a hash-pinned requirements lock for every wheel in the wheelhouse."""
+    wheels = sorted(wheelhouse.glob("*.whl"))
+    if not wheels:
+        raise SystemExit("empty wheelhouse")
+    if any(p.suffix != ".whl" for p in wheelhouse.iterdir()):
+        raise SystemExit("wheelhouse holds a non-wheel file")
+    entries = []
+    lines = []
+    for wheel in wheels:
+        name, version = wheel.name.split("-")[:2]
+        digest = sha256_file(wheel)
+        entries.append({"wheel": wheel.name, "sha256": digest})
+        lines.append(
+            f"{name.replace('_', '-').lower()}=={version} --hash=sha256:{digest}"
+        )
+    lock_out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    manifest = {"lock_sha256": sha256_file(lock_out), "wheels": entries}
+    manifest_out.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
 def overall(scenarios: list[dict[str, Any]]) -> str:
     states = {s["status"] for s in scenarios}
     if states == {"PASS"}:
@@ -181,6 +207,16 @@ def workflow_block() -> dict[str, Any]:
         "event": _env("GITHUB_EVENT_NAME"),
         "workflow_commit": _sha(_env("GITHUB_SHA"), "GITHUB_SHA"),
     }
+
+
+def wheelhouse_block(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"status": "ABSENT"}
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    _digest(doc["lock_sha256"], "lock sha")
+    for w in doc["wheels"]:
+        _digest(w["sha256"], "wheel sha")
+    return {"status": "PRESENT", **doc, "offline_install_verified": True}
 
 
 def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
@@ -236,6 +272,7 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
             if Path(args.recovery_junit).is_file()
             else None,
         },
+        "runtime_wheelhouse": wheelhouse_block(Path(args.wheelhouse_manifest)),
         "installed_artifact_parity": {
             "tests_import_installed_wheel": args.parity == "true",
             "note": "CP tests ran against the installed CP wheel, not the source tree. "
@@ -297,6 +334,9 @@ def write_receipt(doc: dict[str, Any], out_dir: Path, stem: str) -> Path:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="qual")
     sub = p.add_subparsers(dest="cmd", required=True)
+    wl = sub.add_parser("wheelhouse-lock")
+    for flag in ("wheelhouse", "lock-out", "manifest-out"):
+        wl.add_argument(f"--{flag}", required=True)
     sel = sub.add_parser("pg-select")
     sel.add_argument("--scenarios", required=True)
     pg = sub.add_parser("pg-receipt")
@@ -306,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:
         "control-wheel-name", "control-wheel-sha256", "cp-image-id", "parity",
         "server-version", "postgres-image", "pytest-rc", "foundation-repo",
         "foundation-commit",
-        "recovery-junit", "recovery-cp-commit", "recovery-parity",
+        "recovery-junit", "wheelhouse-manifest",
+        "recovery-cp-commit", "recovery-parity",
     ):  # fmt: skip
         pg.add_argument(f"--{flag}", required=True)
     bao = sub.add_parser("bao-receipt")
@@ -319,6 +360,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "pg-select":
         print("\n".join(select_targets(load_scenarios(Path(args.scenarios)))))
+        return 0
+    if args.cmd == "wheelhouse-lock":
+        m = wheelhouse_lock(
+            Path(args.wheelhouse), Path(args.lock_out), Path(args.manifest_out)
+        )
+        print(f"lock {m['lock_sha256']} wheels={len(m['wheels'])}")
         return 0
     if args.cmd == "gate":
         doc = json.loads(Path(args.receipt).read_text(encoding="utf-8"))

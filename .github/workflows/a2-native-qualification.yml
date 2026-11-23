@@ -137,6 +137,28 @@ jobs:
           control_wheel="$(ls "$RUNNER_TEMP"/control-dist/*.whl)"
           echo "CONTROL_WHEEL_NAME=$(basename "$control_wheel")" >> "$GITHUB_ENV"
           echo "CONTROL_WHEEL_SHA256=$(sha256sum "$control_wheel" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+      - name: Build the hash-pinned runtime wheelhouse for the Control wheel
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"
+          wh="$out/wheelhouse"
+          mkdir -p "$wh"
+          python -m venv "$RUNNER_TEMP/dl-venv"
+          # Credentials only in an env var (never an argument, never logged).
+          export PIP_EXTRA_INDEX_URL="https://ci-reader:${FORGEJO_READ_TOKEN}@registry.dotmac.io/api/packages/dotmac/pypi/simple"
+          "$RUNNER_TEMP/dl-venv/bin/python" -m pip download --disable-pip-version-check \
+            --only-binary=:all: --dest "$wh" "$RUNNER_TEMP"/control-dist/*.whl
+          cp "$RUNNER_TEMP"/control-dist/*.whl "$wh"/
+          unset PIP_EXTRA_INDEX_URL
+          python3 -I a2_native_qualification/qual.py wheelhouse-lock --wheelhouse "$wh" \
+            --lock-out "$out/runtime-lock.txt" --manifest-out "$out/wheelhouse-manifest.json"
+          # Prove the lock installs OFFLINE, hash-checked, from the wheelhouse alone.
+          python -m venv "$RUNNER_TEMP/offline-venv"
+          "$RUNNER_TEMP/offline-venv/bin/python" -m pip install --disable-pip-version-check \
+            --require-hashes --no-index --find-links "$wh" -r "$out/runtime-lock.txt"
+          "$RUNNER_TEMP/offline-venv/bin/python" -c 'import dotmac_deployment_control'
       - name: Install CP dependencies and the BUILT CP wheel (not the source tree)
         working-directory: cp-src
         env:
@@ -240,10 +262,22 @@ jobs:
             --cp-image-id "${CP_IMAGE_ID:-unbuilt}" --parity "${PARITY:-false}" \
             --server-version "${PG_SERVER_VERSION:-unknown}" --postgres-image "${PG_IMAGE:-unknown}" \
             --pytest-rc "${PYTEST_RC:-255}" \
+            --wheelhouse-manifest "$RUNNER_TEMP/out/wheelhouse-manifest.json" \
             --recovery-junit "$RUNNER_TEMP/out/recovery-junit.xml" \
             --recovery-cp-commit "$RECOVERY_CP_COMMIT" \
             --recovery-parity "${RECOVERY_PARITY:-false}"
           (cd "$RUNNER_TEMP/out" && sha256sum pg.log pg-junit.xml > a2-native-pg-qualification-inputs.sha256) || true
+      - name: Retain the runtime lock and wheelhouse (workflow artifact only)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: a2-native-runtime-wheelhouse-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/out/wheelhouse
+            ${{ runner.temp }}/out/runtime-lock.txt
+            ${{ runner.temp }}/out/wheelhouse-manifest.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Stop PostgreSQL
         if: always()
         working-directory: cp-src
@@ -253,7 +287,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: a2-native-pg-qualification-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/out
+          path: |
+            ${{ runner.temp }}/out
+            !${{ runner.temp }}/out/wheelhouse
           if-no-files-found: error
           retention-days: 90
       - name: Gate (FAIL always fails; INCOMPLETE fails when completeness is required)

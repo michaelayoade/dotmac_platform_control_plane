@@ -170,6 +170,8 @@ class ReceiptTests(unittest.TestCase):
                         "postgres:16",
                         "--pytest-rc",
                         "1",
+                        "--wheelhouse-manifest",
+                        str(tmp / "absent3.json"),
                         "--recovery-junit",
                         str(tmp / "absent2.xml"),
                         "--recovery-cp-commit",
@@ -221,6 +223,21 @@ class ReceiptTests(unittest.TestCase):
     def test_non_hex_digest_is_refused(self) -> None:
         with self.assertRaises(SystemExit):
             qual._digest("zz", "x")
+
+
+class WheelhouseTests(unittest.TestCase):
+    def test_lock_pins_every_wheel_by_hash_and_refuses_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            wh = Path(d) / "wh"
+            wh.mkdir()
+            with self.assertRaises(SystemExit):
+                qual.wheelhouse_lock(wh, Path(d) / "l", Path(d) / "m")
+            (wh / "dotmac_kernel-0.1.0-py3-none-any.whl").write_bytes(b"x")
+            m = qual.wheelhouse_lock(wh, Path(d) / "l", Path(d) / "m")
+            text = (Path(d) / "l").read_text()
+        self.assertIn("dotmac-kernel==0.1.0 --hash=sha256:", text)
+        self.assertEqual(len(m["wheels"]), 1)
+        self.assertEqual(len(m["lock_sha256"]), 64)
 
 
 class BaoGuardTests(unittest.TestCase):
