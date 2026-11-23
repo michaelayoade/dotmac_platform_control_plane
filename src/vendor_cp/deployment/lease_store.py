@@ -93,6 +93,8 @@ REFUSAL_CODES: Final = frozenset(
         "lease-expired",
         "lease-foreign-run",
         "lease-already-released",
+        "lease-max-reached",
+        "reconcile-marker-required",
         "lease-document-already-bound",
         "lease-document-digest-mismatch",
         "lease-document-mismatch",

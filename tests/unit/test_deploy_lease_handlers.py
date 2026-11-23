@@ -10,8 +10,17 @@ authenticated target and never the request, that the reconcile marker cannot be
 supplied by a caller, that a refusal answers typed while the nonce still commits,
 and that `consume` is impossible without a covering lease.
 
+Shapes follow architect ruling Q-c/4 (Control's `target_api_v2` is the authority once
+it lands): acquire `{dispatch_run, ttl_seconds}` -> `{lease_id, ttl_seconds}`; covers
+`{lease_id, dispatch_run}` -> `{covers}`; renew `{lease_id, dispatch_run}` ->
+`{lease_id, ttl_seconds}`; release `{lease_id, host_mutated}` -> `{released, replay}`;
+standing -> `{standing}`; a missing reconcile marker is a signed 409
+`reconcile_marker_required`. `lease/renew` is not a route of the pinned v1 mirror, so
+renew is driven through `LeaseHandlers.handle` with a hand-built authenticated call
+until the v2 mirror is vendored.
+
 Named rows: `test_consume_requires_covering_lease_through_the_deploy_class` (the
-covers-in-consume wiring), the job/serving TTL rulings, and the server half of
+covers-in-consume wiring), the job/serving grant rules, and the server half of
 `test_agent_stops_on_lease_refusal`.
 """
 
@@ -46,6 +55,8 @@ from target_api_support import (
 from vendor_cp.deployment.deploy_lease import (
     DeployLease,
     DeployLeaseRefused,
+    DeployRelease,
+    DeployRenewal,
     DeployStanding,
 )
 from vendor_cp.deployment.deploy_lease_consume import LeaseCoveringBackend
@@ -56,6 +67,8 @@ from vendor_cp.deployment.deploy_lease_handlers import (
     refusal_http_status,
 )
 from vendor_cp.deployment.lease_store import REFUSAL_CODES
+from vendor_cp.deployment.target_api import contract as c
+from vendor_cp.deployment.target_api.auth import AuthenticatedCall, TargetPrincipal
 from vendor_cp.deployment.target_api.consumption import (
     ConsumptionService,
     MaterialsHandler,
@@ -76,8 +89,8 @@ _NOW = datetime(2026, 11, 22, 10, 0, 0, tzinfo=UTC)
 _LEASE = "11111111-1111-4111-8111-111111111111"
 _RUN = f"{TARGET}#d-1"
 _MARKER = "sha256:" + "a" * 64
-_SERVING = LeasePlan("deploy", None, 1800, 900)
-_JOB = LeasePlan("run_job", {"timeout_seconds": 600}, 900, 900)
+_SERVING = LeasePlan("deploy", None, 600, 10800)
+_JOB = LeasePlan("run_job", {"timeout_seconds": 600}, 720, 720)
 
 
 class FakePort:
@@ -105,6 +118,7 @@ class FakeStore:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.refuse: str | None = None
         self.fault: bool = False
+        self.replay: bool = False
 
     def _go(self, name: str, **kw: Any) -> None:
         self.calls.append((name, kw))
@@ -115,17 +129,20 @@ class FakeStore:
 
     def acquire(self, **kw: Any) -> DeployLease:
         self._go("acquire", **kw)
-        return DeployLease(
-            UUID(_LEASE), _NOW, _NOW + timedelta(seconds=kw["ttl_seconds"]), _NOW
-        )
+        ttl = kw["ttl_seconds"]
+        return DeployLease(UUID(_LEASE), ttl, _NOW, _NOW + timedelta(seconds=ttl), _NOW)
 
     def covers(self, **kw: Any) -> datetime:
         self._go("covers", **kw)
         return _NOW
 
-    def release(self, **kw: Any) -> datetime:
+    def renew(self, **kw: Any) -> DeployRenewal:
+        self._go("renew", **kw)
+        return DeployRenewal(UUID(_LEASE), 120, _NOW + timedelta(seconds=120), _NOW)
+
+    def release(self, **kw: Any) -> DeployRelease:
         self._go("release", **kw)
-        return _NOW
+        return DeployRelease(_NOW, self.replay)
 
     def standing(self, host_id: str) -> DeployStanding:
         self._go("standing", host_id=host_id)
@@ -183,7 +200,7 @@ class Rig:
 
 def _acquire(rig: Rig, ttl: Any, dispatch: str = "d-1") -> Any:
     return rig.call(
-        "POST", "lease/acquire", {"dispatch_id": dispatch, "ttl_seconds": ttl}
+        "POST", "lease/acquire", {"dispatch_run": dispatch, "ttl_seconds": ttl}
     )
 
 
@@ -195,8 +212,7 @@ def test_acquire_takes_the_host_and_principal_from_the_authenticated_target() ->
     response = _acquire(rig, 600)
     assert response.status_code == 200
     body = response.json()
-    assert body["lease_id"] == _LEASE
-    assert body["expires_at"] == "2026-11-22T10:10:00Z"
+    assert body["lease_id"] == _LEASE and body["ttl_seconds"] == 600
     assert body["store_now"] == STORE_NOW  # the router's own CP-time stamp
     (name, kw), *rest = rig.store.calls
     assert (name, rest) == ("acquire", [])
@@ -205,6 +221,7 @@ def test_acquire_takes_the_host_and_principal_from_the_authenticated_target() ->
         "host_id": "host-a",  # the target ref's third segment, never a request field
         "dispatch_run": _RUN,  # qualified by the authenticated target
         "ttl_seconds": 600,
+        "max_seconds": 10800,  # the plan's total
         "principal_ref": "target-credential:cred-0001",
         "reconcile_marker": None,
     }
@@ -216,7 +233,7 @@ def test_acquire_takes_the_host_and_principal_from_the_authenticated_target() ->
 )
 def test_a_request_cannot_name_a_host_a_principal_or_a_marker(extra: Any) -> None:
     rig = Rig()
-    body = {"dispatch_id": "d-1", "ttl_seconds": 600, **extra}
+    body = {"dispatch_run": "d-1", "ttl_seconds": 600, **extra}
     response = rig.call("POST", "lease/acquire", body)
     assert response.status_code == 400
     assert response.json()["error"] == "bad_body"
@@ -229,30 +246,41 @@ def test_the_reconcile_marker_comes_only_from_the_controls_issued_marker() -> No
     assert rig.store.calls[0][1]["reconcile_marker"] == _MARKER
 
 
-def test_a_job_plan_is_leased_for_its_timeout_plus_120_up_to_the_ceiling() -> None:
-    rig = Rig({"d-1": _JOB})  # timeout 600 -> 720 .. 900
-    for ttl, status in ((719, 400), (720, 200), (900, 200), (901, 400)):
+def test_a_missing_reconcile_marker_is_a_signed_409_reconcile_marker_required() -> None:
+    rig = Rig()
+    rig.store.refuse = "reconcile-marker-required"
+    response = _acquire(rig, 600)
+    assert response.status_code == 409
+    assert response.json()["error"] == "reconcile_marker_required"
+    assert "X-Dotmac-Response-Signature" in response.headers
+    assert len(rig.nonces.spent) == 1  # the nonce still committed
+
+
+def test_a_job_plan_is_granted_exactly_timeout_plus_120() -> None:
+    rig = Rig({"d-1": _JOB})  # timeout 600 -> ttl = max = 720
+    for ttl, status in ((719, 400), (720, 200), (721, 400)):
         response = _acquire(rig, ttl)
         assert response.status_code == status, ttl
         if status == 400:
             body = response.json()
-            assert body["error"] == "lease-ttl-invalid"
-            assert (body["min_ttl"], body["max_ttl"]) == (720, 900)
+            assert body["error"] == "lease_ttl_invalid"
+            assert (body["min_ttl"], body["max_ttl"]) == (720, 720)
+    assert rig.store.calls[0][1]["max_seconds"] == 720
 
 
-def test_a_serving_plan_has_no_900_second_cap() -> None:
-    rig = Rig({"d-1": _SERVING})  # plan ttl 1800
-    assert _acquire(rig, 1800).status_code == 200
-    assert _acquire(rig, 1801).status_code == 400
-    big = Rig({"d-1": LeasePlan("deploy", None, 3600, 900)})
-    assert _acquire(big, 3600).status_code == 200
+def test_a_serving_plan_is_granted_120_to_its_ttl_with_a_larger_total() -> None:
+    rig = Rig({"d-1": _SERVING})  # ttl 600, total 10800
+    assert _acquire(rig, 120).status_code == 200
+    assert _acquire(rig, 600).status_code == 200
+    assert _acquire(rig, 119).status_code == 400
+    assert _acquire(rig, 601).status_code == 400  # per-grant, not the total
 
 
-def test_a_job_plan_that_does_not_fit_the_ceiling_is_not_leasable() -> None:
+def test_a_job_plan_that_does_not_fit_is_not_leasable() -> None:
     rig = Rig({"d-1": LeasePlan("run_job", {"timeout_seconds": 840}, 900, 900)})
     response = _acquire(rig, 900)
     assert response.status_code == 422
-    assert response.json()["reason"] == "job-timeout-out-of-bounds"
+    assert response.json()["reason"] == "job-lease-does-not-fit"
     assert rig.store.calls == []
 
 
@@ -284,26 +312,23 @@ def test_a_ttl_that_is_not_an_int_in_the_window_is_refused(ttl: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    ("code", "status"),
+    ("code", "status", "name"),
     [
-        ("lease-held-by-another-run", 409),
-        ("lease-host-mutated", 409),
-        ("lease-expired", 409),
-        ("lease-foreign-run", 409),
-        ("lease-already-released", 409),
-        ("release-not-this-lease", 403),
-        ("lease-role-unbound", 404),
-        ("host-mutated-required", 400),
+        ("lease-held-by-another-run", 409, "lease_held_by_another_run"),
+        ("lease-host-mutated", 409, "lease_host_mutated"),
+        ("lease-expired", 409, "lease_expired"),
+        ("release-not-this-lease", 403, "release_not_this_lease"),
+        ("lease-role-unbound", 404, "lease_role_unbound"),
     ],
 )
 def test_a_store_refusal_is_a_typed_signed_answer_and_the_nonce_is_spent(
-    code: str, status: int
+    code: str, status: int, name: str
 ) -> None:
     rig = Rig()
     rig.store.refuse = code
     response = _acquire(rig, 600)
     assert response.status_code == status
-    assert response.json()["error"] == code
+    assert response.json()["error"] == name
     assert "X-Dotmac-Response-Signature" in response.headers
     assert len(rig.nonces.spent) == 1
     assert rig.savepoints == 1
@@ -322,6 +347,7 @@ def test_every_mapped_refusal_code_is_in_the_closed_set() -> None:
     from vendor_cp.deployment import deploy_lease_handlers as h
 
     assert set(h._STATUS) <= REFUSAL_CODES
+    assert set(h._RENEW_NAMES) <= REFUSAL_CODES
     assert refusal_http_status("store-error") is None
     assert refusal_http_status("store-unreachable") is None
 
@@ -329,46 +355,77 @@ def test_every_mapped_refusal_code_is_in_the_closed_set() -> None:
 # ── covers, release, standing ───────────────────────────────────────────────
 
 
-def test_covers_and_release_carry_the_run_and_the_principal() -> None:
+def test_covers_answers_true_or_false_and_release_names_only_the_lease() -> None:
     rig = Rig()
     covered = rig.call(
-        "POST", "lease/covers", {"lease_id": _LEASE, "dispatch_id": "d-1"}
+        "POST", "lease/covers", {"lease_id": _LEASE, "dispatch_run": "d-1"}
     )
-    assert covered.status_code == 200 and covered.json()["covered"] is True
+    assert covered.status_code == 200 and covered.json()["covers"] is True
     released = rig.call(
-        "POST",
-        "lease/release",
-        {"lease_id": _LEASE, "dispatch_id": "d-1", "host_mutated": True},
+        "POST", "lease/release", {"lease_id": _LEASE, "host_mutated": True}
     )
     assert released.status_code == 200
-    assert released.json()["released_at"] == "2026-11-22T10:00:00Z"
+    assert (released.json()["released"], released.json()["replay"]) == (True, False)
     assert [n for n, _ in rig.store.calls] == ["covers", "release"]
+    assert rig.store.calls[0][1] == {"lease_id": _LEASE, "dispatch_run": _RUN}
     assert rig.store.calls[1][1] == {
         "lease_id": _LEASE,
-        "dispatch_run": _RUN,
+        "target_ref": TARGET,  # the authenticated target and principal hold it
         "principal_ref": "target-credential:cred-0001",
         "host_mutated": True,
     }
+
+
+def test_a_second_release_is_a_signed_200_replay() -> None:
+    rig = Rig()
+    rig.store.replay = True
+    response = rig.call(
+        "POST", "lease/release", {"lease_id": _LEASE, "host_mutated": False}
+    )
+    assert response.status_code == 200
+    assert response.json()["replay"] is True
+    assert "X-Dotmac-Response-Signature" in response.headers
+
+
+@pytest.mark.parametrize(
+    "refusal", ["lease-expired", "lease-foreign-run", "lease-role-unbound"]
+)
+def test_covers_is_false_not_an_error_when_no_lease_covers(refusal: str) -> None:
+    rig = Rig()
+    rig.store.refuse = refusal
+    response = rig.call(
+        "POST", "lease/covers", {"lease_id": _LEASE, "dispatch_run": "d-1"}
+    )
+    assert response.status_code == 200 and response.json()["covers"] is False
+    assert len(rig.nonces.spent) == 1
 
 
 @pytest.mark.parametrize("mutated", [1, 0, "true", None])
 def test_release_needs_a_real_bool(mutated: Any) -> None:
     rig = Rig()
     response = rig.call(
-        "POST",
-        "lease/release",
-        {"lease_id": _LEASE, "dispatch_id": "d-1", "host_mutated": mutated},
+        "POST", "lease/release", {"lease_id": _LEASE, "host_mutated": mutated}
     )
     assert response.status_code == 400
     assert rig.store.calls == []
 
 
+def test_release_by_another_holder_is_403() -> None:
+    rig = Rig()
+    rig.store.refuse = "release-not-this-lease"
+    response = rig.call(
+        "POST", "lease/release", {"lease_id": _LEASE, "host_mutated": True}
+    )
+    assert response.status_code == 403
+
+
 def test_a_malformed_lease_id_is_refused_before_the_store() -> None:
     rig = Rig()
-    response = rig.call(
-        "POST", "lease/covers", {"lease_id": "not-a-uuid", "dispatch_id": "d-1"}
-    )
-    assert response.status_code == 400
+    for route, body in (
+        ("lease/covers", {"lease_id": "not-a-uuid", "dispatch_run": "d-1"}),
+        ("lease/release", {"lease_id": "not-a-uuid", "host_mutated": True}),
+    ):
+        assert rig.call("POST", route, body).status_code == 400
     assert rig.store.calls == []
 
 
@@ -392,6 +449,97 @@ def test_standing_of_a_host_held_by_the_rehearsal_class_is_a_conflict() -> None:
     rig = Rig()
     rig.store.refuse = "lease-host-mutated"
     assert rig.call("GET", "lease/standing").status_code == 409
+
+
+# ── renew (driven directly: not a route of the pinned v1 mirror) ─────────────
+
+
+def _renew_call() -> Any:
+    coordinates = c.RequestCoordinates(
+        method="POST",
+        path=f"{BASE}/targets/{TARGET}/lease/renew",
+        target_ref=TARGET,
+        route="lease/renew",
+        dispatch_id=None,
+        credential_id="cred-0001",
+        issued_at=STORE_NOW,
+        nonce="0" * 32,
+        signature_b64u="",
+        signed_message=b"",
+        nonce_ledger_key="cred-0001/" + "0" * 32,
+    )
+    principal = TargetPrincipal(
+        kind="target",
+        principal_ref="target-credential:cred-0001",
+        target_ref=TARGET,
+        credential_id="cred-0001",
+    )
+    return AuthenticatedCall(
+        principal=principal,
+        coordinates=coordinates,
+        store_now=_NOW,
+        store_now_stamp=STORE_NOW,
+    )
+
+
+def _renew_rig() -> tuple[LeaseHandlers, FakeStore]:
+    store = FakeStore()
+
+    @contextmanager
+    def savepoint(_db: Any) -> Any:
+        yield
+
+    handlers = LeaseHandlers(
+        inner=RecordingHandlers(),
+        port=FakePort({}),
+        store_factory=lambda _db: store,
+        savepoint=savepoint,
+    )
+    return handlers, store
+
+
+def test_renew_returns_the_granted_ttl_for_this_targets_run() -> None:
+    handlers, store = _renew_rig()
+    result = handlers.handle(
+        _renew_call(), None, {"lease_id": _LEASE, "dispatch_run": "d-1"}
+    )
+    assert result.status == 200
+    assert dict(result.body) == {"lease_id": _LEASE, "ttl_seconds": 120}
+    assert store.calls == [("renew", {"lease_id": _LEASE, "dispatch_run": _RUN})]
+
+
+@pytest.mark.parametrize(
+    ("code", "name"),
+    [
+        ("lease-role-unbound", "lease_not_held"),
+        ("lease-foreign-run", "lease_not_held"),
+        ("lease-already-released", "lease_not_held"),
+        ("lease-expired", "lease_expired"),
+        ("lease-max-reached", "lease_max_reached"),
+    ],
+)
+def test_renew_refusals_are_the_contracts_three_signed_names(
+    code: str, name: str
+) -> None:
+    handlers, store = _renew_rig()
+    store.refuse = code
+    result = handlers.handle(
+        _renew_call(), None, {"lease_id": _LEASE, "dispatch_run": "d-1"}
+    )
+    assert result.status == 409 or result.status == 404
+    assert result.body["error"] == name
+
+
+def test_renew_needs_a_lease_and_a_run_and_nothing_else() -> None:
+    handlers, store = _renew_rig()
+    for body in (
+        {"lease_id": _LEASE},
+        {"lease_id": _LEASE, "dispatch_run": "d-1", "ttl_seconds": 999},
+        {"lease_id": "nope", "dispatch_run": "d-1"},
+        None,
+    ):
+        assert handlers.handle(_renew_call(), None, body).status == 400
+    assert store.calls == []
 
 
 @pytest.mark.parametrize(

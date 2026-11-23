@@ -63,6 +63,16 @@ def test_every_sql_refusal_code_is_in_the_closed_set() -> None:
 def test_the_closed_set_holds_no_stray_member() -> None:
     """Every member is raised by the SQL or by Python (nothing is declared and
     never used); the three transport codes are not members."""
-    used = _sql_codes() | _python_literals()
+    # the deploy lease class (`v024_deploy_lease`) raises two of its own
+    deploy = set(
+        re.findall(
+            r'_refuse\("([a-z0-9-]+)"\)',
+            (ROOT / "alembic" / "versions" / "v024_deploy_lease.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+    )
+    assert {"lease-max-reached", "reconcile-marker-required"} <= deploy
+    used = _sql_codes() | _python_literals() | deploy
     assert lease_store.REFUSAL_CODES - used == set()
     assert not (lease_store.REFUSAL_CODES & _OWN)

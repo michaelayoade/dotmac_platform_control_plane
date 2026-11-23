@@ -27,7 +27,7 @@
 #   supersedes   deploy/candidates/2026-11-19-lane3-store.toml
 #
 # Vendor v024_deploy_lease replaces v023_lane3_store with the production (deploy)
-# lease class in a new `cp_deploy_lease` schema: four SECURITY DEFINER functions
+# lease class in a new `cp_deploy_lease` schema: five SECURITY DEFINER functions
 # the CP runtime role may execute, and no table privilege. `cp_lane3` stays
 # unreachable by every runtime role. The composed-heads CI gate re-derives the
 # complete set. This source composition changes no runtime activation setting and
@@ -397,7 +397,7 @@ owner_material = "MIGRATION_DATABASE_URL"
 #
 # 2026-11-23: Vendor v024_deploy_lease replaces v023_lane3_store. It creates the
 # `cp_deploy_lease` schema (production lease class, P-CP1 WP5c) and grants the CP
-# runtime role `platform_api` USAGE on it and EXECUTE on its four functions, and
+# runtime role `platform_api` USAGE on it and EXECUTE on its five functions, and
 # nothing in `cp_lane3`. It must not reach production before the CP149 fence ACL
 # line (`held_fence_acl_drift`) is closed. No deployment, database application or
 # lease activation is claimed.
@@ -589,7 +589,7 @@ denied = true
 
 # The production lease class (v024) is the one `cp_lane3`-adjacent schema a runtime
 # role DOES reach, and only the CP runtime role `platform_api`, only by USAGE and
-# EXECUTE on four SECURITY DEFINER functions: no table, sequence or column
+# EXECUTE on five SECURITY DEFINER functions: no table, sequence or column
 # privilege, and nothing in `cp_lane3`. The other runtime roles are denied.
 [[database.isolation]]
 code = "app-user-cannot-reach-the-deploy-lease-schema"

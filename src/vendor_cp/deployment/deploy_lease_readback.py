@@ -18,7 +18,7 @@ migrating role, as the migration does):
 `after` (the grant, as built):
   * the schema carries no ACL entry but the owner's and `platform_api` USAGE;
   * no table, sequence or column ACL entry; no default-privilege rule;
-  * exactly the four `deploy_*` functions carry `platform_api` EXECUTE and no
+  * exactly the five `deploy_*` functions carry `platform_api` EXECUTE and no
     other function ACL entry exists; every object is owned by one role;
   * `platform_api` has no USAGE on `cp_lane3` (nothing in it is reachable).
 
@@ -151,11 +151,11 @@ def run_after(
         ("no-table-or-sequence-acl", _count(execute, source.RELATION_ACL_SQL) == 0),
         ("no-column-acl", _count(execute, source.COLUMN_ACL_SQL) == 0),
         (
-            "no-function-acl-beyond-the-four",
+            "no-function-acl-beyond-the-five",
             _count(execute, source.FUNCTION_ACL_SQL) == 0,
         ),
         (
-            "four-functions-granted-to-runtime-role",
+            "five-functions-granted-to-runtime-role",
             _count(execute, source.FUNCTION_GRANT_COUNT_SQL)
             == len(source.RUNTIME_ROLE_FUNCTIONS),
         ),

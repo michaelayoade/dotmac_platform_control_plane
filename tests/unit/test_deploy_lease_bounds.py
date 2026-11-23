@@ -1,9 +1,9 @@
-"""The TTL window one signed plan allows (WP5c; RULING-agent-contract, F1 shape).
+"""The grant window and total one signed plan allows (WP5c; ruling Q-c/4).
 
-No database. A role job (`operation = "run_job"`) is leased for at least
-`timeout_seconds + 120` and at most Control's per-target
-`role_job_lease_ceiling_seconds` (default 900, at most 3600); a serving plan has
-no 900 s cap, only the lease store's 3600 s.
+No database. A plan carries `lease_ttl_seconds` (per grant, 120..900) and
+`lease_max_seconds` (the total, renewals included, at most 10800). A job plan
+(`operation = "run_job"`) has ttl = max = `timeout_seconds + 120`; a serving plan
+is granted 120 up to its ttl and renewed up to its total.
 """
 
 from __future__ import annotations
@@ -20,128 +20,117 @@ from vendor_cp.deployment.deploy_lease import (
 )
 
 
-def _job(timeout: Any = 840) -> dict[str, Any]:
+def _job(timeout: Any = 600) -> dict[str, Any]:
     return {"name": "import", "timeout_seconds": timeout}
 
 
-def test_a_job_plan_is_leased_for_its_timeout_plus_120_up_to_the_default_ceiling() -> (
-    None
-):
+def test_a_job_plan_is_granted_exactly_its_ttl() -> None:
     bounds = lease_bounds(
-        operation="run_job", dispatched_job=_job(780), plan_lease_ttl_seconds=900
+        operation="run_job",
+        dispatched_job=_job(600),
+        lease_ttl_seconds=720,
+        lease_max_seconds=720,
     )
-    assert bounds == LeaseBounds(900, 900)
-    short = lease_bounds(
-        operation="run_job", dispatched_job=_job(60), plan_lease_ttl_seconds=900
+    assert bounds == LeaseBounds(720, 720, 720)
+    top = lease_bounds(
+        operation="run_job",
+        dispatched_job=_job(780),
+        lease_ttl_seconds=900,
+        lease_max_seconds=900,
     )
-    assert short == LeaseBounds(180, 900)
+    assert top == LeaseBounds(900, 900, 900)
 
 
-def test_a_job_whose_timeout_does_not_fit_the_default_ceiling_is_refused() -> None:
-    # the ruling's own F1 example (840 s) needs 960 s: over the default 900 ceiling
-    with pytest.raises(LeasePlanRefused, match="job-timeout-out-of-bounds"):
+@pytest.mark.parametrize(
+    ("ttl", "total"),
+    [(719, 719), (720, 900), (900, 720), (721, 721)],
+)
+def test_a_job_lease_must_equal_its_total_and_cover_timeout_plus_120(
+    ttl: int, total: int
+) -> None:
+    # timeout 600 needs 720; ttl must equal max
+    if ttl == total and ttl >= 720:
+        assert (
+            lease_bounds(
+                operation="run_job",
+                dispatched_job=_job(600),
+                lease_ttl_seconds=ttl,
+                lease_max_seconds=total,
+            ).max_ttl
+            == ttl
+        )
+        return
+    with pytest.raises(LeasePlanRefused, match="job-lease-does-not-fit|max-out"):
         lease_bounds(
-            operation="run_job", dispatched_job=_job(840), plan_lease_ttl_seconds=900
+            operation="run_job",
+            dispatched_job=_job(600),
+            lease_ttl_seconds=ttl,
+            lease_max_seconds=total,
         )
 
 
-def test_a_raised_ceiling_admits_a_longer_job_up_to_the_store_cap() -> None:
-    bounds = lease_bounds(
-        operation="run_job",
-        dispatched_job=_job(840),
-        plan_lease_ttl_seconds=1200,
-        role_job_lease_ceiling_seconds=3600,
-    )
-    assert bounds == LeaseBounds(960, 1200)
-    top = lease_bounds(
-        operation="run_job",
-        dispatched_job=_job(3480),
-        plan_lease_ttl_seconds=3600,
-        role_job_lease_ceiling_seconds=3600,
-    )
-    assert top == LeaseBounds(3600, 3600)
-
-
-@pytest.mark.parametrize("timeout", [0, -1, 781, None, "60", 1.5, True])
-def test_job_timeout_bounds(timeout: Any) -> None:
+@pytest.mark.parametrize("timeout", [0, -1, None, "60", 1.5, True])
+def test_job_timeout_must_be_a_positive_int(timeout: Any) -> None:
     with pytest.raises(LeasePlanRefused, match="job-timeout-out-of-bounds"):
         lease_bounds(
             operation="run_job",
             dispatched_job=_job(timeout),
-            plan_lease_ttl_seconds=900,
+            lease_ttl_seconds=900,
+            lease_max_seconds=900,
         )
 
 
-def test_a_plan_ttl_below_the_job_need_does_not_fit() -> None:
-    with pytest.raises(LeasePlanRefused, match="job-lease-does-not-fit"):
-        lease_bounds(
-            operation="run_job", dispatched_job=_job(600), plan_lease_ttl_seconds=700
-        )
-
-
-@pytest.mark.parametrize("ceiling", [0, -5, 3601, None, "900", True])
-def test_the_ceiling_is_bounded_by_control(ceiling: Any) -> None:
-    with pytest.raises(LeasePlanRefused, match="ceiling-out-of-bounds"):
-        lease_bounds(
-            operation="run_job",
-            dispatched_job=_job(60),
-            plan_lease_ttl_seconds=900,
-            role_job_lease_ceiling_seconds=ceiling,
-        )
-
-
-def test_a_serving_plan_has_no_900_second_cap() -> None:
-    assert lease_bounds(
-        operation="deploy", dispatched_job=None, plan_lease_ttl_seconds=3600
-    ) == LeaseBounds(1, 3600)
-    assert lease_bounds(
-        operation="deploy", dispatched_job=None, plan_lease_ttl_seconds=1800
-    ) == LeaseBounds(1, 1800)
-
-
-def test_the_serving_ceiling_setting_does_not_apply_to_serving_plans() -> None:
+def test_a_serving_plan_is_granted_120_to_its_ttl_and_renewed_to_its_total() -> None:
     bounds = lease_bounds(
         operation="deploy",
         dispatched_job=None,
-        plan_lease_ttl_seconds=2000,
-        role_job_lease_ceiling_seconds=900,
+        lease_ttl_seconds=600,
+        lease_max_seconds=10800,
     )
-    assert bounds.max_ttl == 2000
+    assert bounds == LeaseBounds(120, 600, 10800)
+    assert bounds.check(120) == 120 and bounds.check(600) == 600
+    for bad in (119, 601):
+        with pytest.raises(DeployLeaseRefused):
+            bounds.check(bad)
 
 
-def test_operation_and_dispatched_job_must_agree() -> None:
-    with pytest.raises(LeasePlanRefused, match="run-job-without-dispatched-job"):
-        lease_bounds(
-            operation="run_job", dispatched_job=None, plan_lease_ttl_seconds=900
-        )
-    with pytest.raises(LeasePlanRefused, match="run-job-without-dispatched-job"):
-        lease_bounds(operation="run_job", dispatched_job=[], plan_lease_ttl_seconds=900)
-    with pytest.raises(LeasePlanRefused, match="dispatched-job-on-a-serving-plan"):
-        lease_bounds(
-            operation="deploy", dispatched_job=_job(), plan_lease_ttl_seconds=900
-        )
-
-
-@pytest.mark.parametrize("ttl", [0, -1, 3601, None, "900", True])
-def test_the_plan_lease_ttl_is_bounded_by_the_store_cap(ttl: Any) -> None:
+@pytest.mark.parametrize("ttl", [0, 119, 901, 3600, None, "600", True])
+def test_the_per_grant_ttl_is_120_to_900(ttl: Any) -> None:
     for operation, job in (("deploy", None), ("run_job", _job(60))):
         with pytest.raises(LeasePlanRefused, match="plan-lease-ttl-out-of-bounds"):
             lease_bounds(
-                operation=operation, dispatched_job=job, plan_lease_ttl_seconds=ttl
+                operation=operation,
+                dispatched_job=job,
+                lease_ttl_seconds=ttl,
+                lease_max_seconds=900,
             )
 
 
-@pytest.mark.parametrize("requested", [0, 1799, 3601, None, "900", 900.0, True])
+@pytest.mark.parametrize("total", [0, 599, 10801, None, "900", True])
+def test_the_total_is_at_least_the_ttl_and_at_most_10800(total: Any) -> None:
+    with pytest.raises(LeasePlanRefused, match="plan-lease-max-out-of-bounds"):
+        lease_bounds(
+            operation="deploy",
+            dispatched_job=None,
+            lease_ttl_seconds=600,
+            lease_max_seconds=total,
+        )
+
+
+def test_operation_and_dispatched_job_must_agree() -> None:
+    kw: dict[str, Any] = {"lease_ttl_seconds": 600, "lease_max_seconds": 600}
+    with pytest.raises(LeasePlanRefused, match="run-job-without-dispatched-job"):
+        lease_bounds(operation="run_job", dispatched_job=None, **kw)
+    with pytest.raises(LeasePlanRefused, match="run-job-without-dispatched-job"):
+        lease_bounds(operation="run_job", dispatched_job=[], **kw)
+    with pytest.raises(LeasePlanRefused, match="dispatched-job-on-a-serving-plan"):
+        lease_bounds(operation="deploy", dispatched_job=_job(), **kw)
+
+
+@pytest.mark.parametrize("requested", [0, 119, 901, None, "600", 600.0, True])
 def test_a_requested_ttl_outside_the_window_is_lease_ttl_invalid(
     requested: Any,
 ) -> None:
-    window = LeaseBounds(1800, 3600)
     with pytest.raises(DeployLeaseRefused) as raised:
-        window.check(requested)
+        LeaseBounds(120, 900, 900).check(requested)
     assert raised.value.code == "lease-ttl-invalid"
-
-
-def test_a_requested_ttl_inside_the_window_is_returned() -> None:
-    window = LeaseBounds(180, 900)
-    assert window.check(180) == 180
-    assert window.check(900) == 900

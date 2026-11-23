@@ -1,13 +1,18 @@
 """The lease endpoints of the target API (WP5c, DESIGN 2.6.2).
 
-`LeaseHandlers` is a `TargetHandlers` (lane 5b's seam) that serves the four lease
+`LeaseHandlers` is a `TargetHandlers` (lane 5b's seam) that serves the five lease
 routes and delegates every other route to the handlers it wraps (5b's
 `TargetApiHandlers`, whose lease routes answer 501 until this is composed in):
 
-    POST lease/acquire   {"dispatch_id", "ttl_seconds"}
-    POST lease/covers    {"lease_id", "dispatch_id"}
-    POST lease/release   {"lease_id", "dispatch_id", "host_mutated"}
-    GET  lease/standing
+    POST lease/acquire   {"dispatch_run", "ttl_seconds"}  -> {"lease_id", "ttl_seconds"}
+    POST lease/covers    {"lease_id", "dispatch_run"}     -> {"covers"}
+    POST lease/renew     {"lease_id", "dispatch_run"}     -> {"lease_id", "ttl_seconds"}
+    POST lease/release   {"lease_id", "host_mutated"}     -> {"released", "replay"}
+    GET  lease/standing                                    -> {"standing"}
+
+(architect ruling Q-c/4; Control's `target_api_v2` is the authority once it lands.
+`lease/renew` is not a route of the pinned v1 mirror in `target_api.contract`, so it
+becomes reachable through the router when the v2 mirror is vendored.)
 
 Covers-in-consume is NOT a route here: 5b's consume calls
 `ConsumptionBackend.covers_lease` at step 4 of the atomic consume, in the same
@@ -21,11 +26,13 @@ fills that port with `cp_deploy_lease.deploy_covers`.
   principal's own reference, and the lease's run is `<target_ref>#<dispatch_id>`
   (`dispatch_run`), so another target cannot cover or release this one's lease.
   Requests carry no host, no principal, no marker and no time.
-* The TTL window comes from the signed plan (`lease_bounds`): a job plan
-  (`operation = "run_job"`) is `timeout_seconds + 120` up to Control's per-target
-  `role_job_lease_ceiling_seconds` (default 900, at most 3600); a serving plan has
-  no 900 s cap. The plan is read through the `LeasePort`, at acquire only, for THIS
-  target's pending dispatch.
+* The TTL window comes from the signed plan (`lease_bounds`): `lease_ttl_seconds`
+  per grant (120..900) and `lease_max_seconds` for the total (at most 10800); a job
+  plan has ttl = max = `timeout_seconds + 120`. The plan is read through the
+  `LeasePort`, at acquire only, for THIS target's pending dispatch; renewal reads
+  the ttl and total the lease was stored with, so it works after consume.
+* Release names only the lease: the holder is the authenticated target and its
+  credential principal, checked in the database.
 * The reconcile marker is NEVER read from the request. After an expired-unreleased
   lease the agent posts a signed read-only reconcile observation; Control issues the
   marker when the observed release matches, and the `LeasePort` hands the handler
@@ -44,7 +51,7 @@ import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Final, Protocol
 
 from vendor_cp.deployment.deploy_lease import (
@@ -67,7 +74,13 @@ __all__ = [
 ]
 
 _LEASE_ROUTES: Final = frozenset(
-    {"lease/acquire", "lease/covers", "lease/release", "lease/standing"}
+    {
+        "lease/acquire",
+        "lease/covers",
+        "lease/renew",
+        "lease/release",
+        "lease/standing",
+    }
 )
 #: The contract's dispatch id grammar (`target_api.contract`): the lease's run.
 _DISPATCH_ID: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
@@ -84,6 +97,8 @@ _STATUS: Final = {
     "lease-expired": 409,
     "lease-foreign-run": 409,
     "lease-already-released": 409,
+    "lease-max-reached": 409,
+    "reconcile-marker-required": 409,
     "reprovision-receipt-spent": 409,
     "lease-ttl-invalid": 400,
     "host-mutated-required": 400,
@@ -92,6 +107,20 @@ _STATUS: Final = {
     "lease-host-unknown": 404,
     "release-not-this-lease": 403,
 }
+#: The signed error name of a refusal, per route. Renew speaks the contract's three
+#: (`lease_not_held`, `lease_expired`, `lease_max_reached`); acquire's missing marker
+#: is `reconcile_marker_required`; every other code is its own name with `_`.
+_RENEW_NAMES: Final = {
+    "lease-role-unbound": "lease_not_held",
+    "lease-foreign-run": "lease_not_held",
+    "lease-already-released": "lease_not_held",
+    "lease-expired": "lease_expired",
+    "lease-max-reached": "lease_max_reached",
+}
+#: Refusals that mean "this lease does not cover this run" (a `covers` answer).
+_NOT_COVERED: Final = frozenset(
+    {"lease-expired", "lease-foreign-run", "lease-role-unbound"}
+)
 
 
 def refusal_http_status(code: str) -> int | None:
@@ -106,7 +135,7 @@ class LeasePlan:
     operation: str
     dispatched_job: Mapping[str, object] | None
     lease_ttl_seconds: int
-    role_job_lease_ceiling_seconds: int
+    lease_max_seconds: int
 
 
 class LeasePort(Protocol):
@@ -137,10 +166,6 @@ class UnconfiguredLeasePort:
         self, db: Any, *, target_ref: str, at: datetime
     ) -> str | None:
         return None
-
-
-def _stamp(moment: datetime) -> str:
-    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _refusal(code: str, status: int, **extra: object) -> HandlerResult:
@@ -188,6 +213,7 @@ class LeaseHandlers:
             return {
                 "lease/acquire": self._acquire,
                 "lease/covers": self._covers,
+                "lease/renew": self._renew,
                 "lease/release": self._release,
                 "lease/standing": self._standing,
             }[route](call, db, payload)
@@ -200,28 +226,33 @@ class LeaseHandlers:
         return call.principal.target_ref.split("/")[2]
 
     def _guarded(
-        self, db: Any, operation: Callable[[Any], Any]
-    ) -> tuple[Any, HandlerResult | None]:
+        self,
+        db: Any,
+        operation: Callable[[Any], Any],
+        names: Mapping[str, str] | None = None,
+    ) -> tuple[Any, HandlerResult | None, str | None]:
         """Run one store call in a savepoint. A typed refusal rolls back only the
-        savepoint and is answered; a store fault propagates (full rollback)."""
+        savepoint and is answered; a store fault propagates (full rollback).
+        Returns `(result, refusal answer, refusal code)`."""
         try:
             with self._savepoint(db):
-                return operation(self._store_factory(db)), None
+                return operation(self._store_factory(db)), None, None
         except DeployLeaseRefused as refusal:
             status = refusal_http_status(refusal.code)
             if status is None:
                 raise
-            return None, _refusal(refusal.code, status)
+            name = (names or {}).get(refusal.code) or refusal.code.replace("-", "_")
+            return None, _refusal(name, status), refusal.code
 
     # ── lease/acquire ───────────────────────────────────────────────────────
 
     def _acquire(
         self, call: AuthenticatedCall, db: Any, payload: object
     ) -> HandlerResult:
-        body = _body(payload, frozenset({"dispatch_id", "ttl_seconds"}))
-        if body is None or not _is_dispatch_id(body["dispatch_id"]):
+        body = _body(payload, frozenset({"dispatch_run", "ttl_seconds"}))
+        if body is None or not _is_dispatch_id(body["dispatch_run"]):
             return _refusal("bad_body", 400)
-        dispatch_id = str(body["dispatch_id"])
+        dispatch_id = str(body["dispatch_run"])
         plan = self._port.plan_for(
             db,
             target_ref=call.principal.target_ref,
@@ -234,8 +265,8 @@ class LeaseHandlers:
             bounds = lease_bounds(
                 operation=plan.operation,
                 dispatched_job=plan.dispatched_job,
-                plan_lease_ttl_seconds=plan.lease_ttl_seconds,
-                role_job_lease_ceiling_seconds=plan.role_job_lease_ceiling_seconds,
+                lease_ttl_seconds=plan.lease_ttl_seconds,
+                lease_max_seconds=plan.lease_max_seconds,
             )
         except LeasePlanRefused as refused:
             return _refusal("plan_not_leasable", 422, reason=refused.reason)
@@ -243,18 +274,22 @@ class LeaseHandlers:
             ttl = bounds.check(body["ttl_seconds"])
         except DeployLeaseRefused as refused:
             return _refusal(
-                refused.code, 400, min_ttl=bounds.min_ttl, max_ttl=bounds.max_ttl
+                refused.code.replace("-", "_"),
+                400,
+                min_ttl=bounds.min_ttl,
+                max_ttl=bounds.max_ttl,
             )
         marker = self._port.reconcile_marker_for(
             db, target_ref=call.principal.target_ref, at=call.store_now
         )
-        lease, refusal = self._guarded(
+        lease, refusal, _ = self._guarded(
             db,
             lambda store: store.acquire(
                 target_ref=call.principal.target_ref,
                 host_id=self._host(call),
                 dispatch_run=dispatch_run(call.principal.target_ref, dispatch_id),
                 ttl_seconds=ttl,
+                max_seconds=bounds.max_seconds,
                 principal_ref=call.principal.principal_ref,
                 reconcile_marker=marker,
             ),
@@ -263,45 +298,59 @@ class LeaseHandlers:
             return refusal
         assert isinstance(lease, DeployLease)  # noqa: S101 - typing narrow
         return HandlerResult(
-            200,
-            {
-                "lease_id": str(lease.lease_id),
-                "acquired_at": _stamp(lease.acquired_at),
-                "expires_at": _stamp(lease.expires_at),
-                "lease_store_now": _stamp(lease.store_now),
-            },
+            200, {"lease_id": str(lease.lease_id), "ttl_seconds": lease.ttl_seconds}
         )
 
     # ── lease/covers ────────────────────────────────────────────────────────
 
+    def _lease_and_run(
+        self, call: AuthenticatedCall, payload: object
+    ) -> tuple[str, str] | None:
+        body = _body(payload, frozenset({"lease_id", "dispatch_run"}))
+        if (
+            body is None
+            or not _is_dispatch_id(body["dispatch_run"])
+            or not _is_lease_id(body["lease_id"])
+        ):
+            return None
+        return body["lease_id"], dispatch_run(
+            call.principal.target_ref, body["dispatch_run"]
+        )
+
     def _covers(
         self, call: AuthenticatedCall, db: Any, payload: object
     ) -> HandlerResult:
-        body = _body(payload, frozenset({"lease_id", "dispatch_id"}))
-        if (
-            body is None
-            or not _is_dispatch_id(body["dispatch_id"])
-            or not _is_lease_id(body["lease_id"])
-        ):
+        named = self._lease_and_run(call, payload)
+        if named is None:
             return _refusal("bad_body", 400)
-        judged, refusal = self._guarded(
+        lease_id, run = named
+        _, refusal, code = self._guarded(
+            db, lambda store: store.covers(lease_id=lease_id, dispatch_run=run)
+        )
+        if refusal is not None:
+            if code in _NOT_COVERED:
+                return HandlerResult(200, {"covers": False})
+            return refusal
+        return HandlerResult(200, {"covers": True})
+
+    # ── lease/renew ─────────────────────────────────────────────────────────
+
+    def _renew(
+        self, call: AuthenticatedCall, db: Any, payload: object
+    ) -> HandlerResult:
+        named = self._lease_and_run(call, payload)
+        if named is None:
+            return _refusal("bad_body", 400)
+        lease_id, run = named
+        renewal, refusal, _ = self._guarded(
             db,
-            lambda store: store.covers(
-                lease_id=body["lease_id"],
-                dispatch_run=dispatch_run(
-                    call.principal.target_ref, body["dispatch_id"]
-                ),
-            ),
+            lambda store: store.renew(lease_id=lease_id, dispatch_run=run),
+            _RENEW_NAMES,
         )
         if refusal is not None:
             return refusal
         return HandlerResult(
-            200,
-            {
-                "covered": True,
-                "lease_id": body["lease_id"],
-                "lease_store_now": _stamp(judged),
-            },
+            200, {"lease_id": lease_id, "ttl_seconds": renewal.granted_seconds}
         )
 
     # ── lease/release ───────────────────────────────────────────────────────
@@ -309,49 +358,36 @@ class LeaseHandlers:
     def _release(
         self, call: AuthenticatedCall, db: Any, payload: object
     ) -> HandlerResult:
-        body = _body(payload, frozenset({"lease_id", "dispatch_id", "host_mutated"}))
+        body = _body(payload, frozenset({"lease_id", "host_mutated"}))
         if (
             body is None
-            or not _is_dispatch_id(body["dispatch_id"])
             or not _is_lease_id(body["lease_id"])
             or not isinstance(body["host_mutated"], bool)
         ):
             return _refusal("bad_body", 400)
-        released, refusal = self._guarded(
+        released, refusal, _ = self._guarded(
             db,
             lambda store: store.release(
                 lease_id=body["lease_id"],
-                dispatch_run=dispatch_run(
-                    call.principal.target_ref, body["dispatch_id"]
-                ),
+                target_ref=call.principal.target_ref,
                 principal_ref=call.principal.principal_ref,
                 host_mutated=body["host_mutated"],
             ),
         )
         if refusal is not None:
             return refusal
-        return HandlerResult(
-            200, {"lease_id": body["lease_id"], "released_at": _stamp(released)}
-        )
+        return HandlerResult(200, {"released": True, "replay": released.replay})
 
     # ── lease/standing ──────────────────────────────────────────────────────
 
     def _standing(
         self, call: AuthenticatedCall, db: Any, payload: object
     ) -> HandlerResult:
-        standing, refusal = self._guarded(
+        standing, refusal, code = self._guarded(
             db, lambda store: store.standing(self._host(call))
         )
         if refusal is not None:
-            if refusal.body.get("error") == "lease-host-unknown":
+            if code == "lease-host-unknown":
                 return HandlerResult(200, {"standing": "none"})
             return refusal
-        return HandlerResult(
-            200,
-            {
-                "standing": standing.standing,
-                "lease_id": str(standing.lease_id),
-                "expires_at": _stamp(standing.expires_at),
-                "lease_store_now": _stamp(standing.store_now),
-            },
-        )
+        return HandlerResult(200, {"standing": standing.standing})

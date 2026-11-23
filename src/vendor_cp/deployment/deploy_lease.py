@@ -5,16 +5,15 @@ classes, the store clock, the persistent-host rule, the reconcile marker, the
 release rules) is a `SECURITY DEFINER` function of `v024_deploy_lease`; this
 module owns none of it. What it owns:
 
-* `DeployLeaseStore`: calls the four functions on the CALLER'S session and maps a
+* `DeployLeaseStore`: calls the five functions on the CALLER'S session and maps a
   database refusal to a code of the closed `lease_store.REFUSAL_CODES` set. It
   never commits, never retries and never surfaces database text. A refusal
   aborts the caller's transaction: the caller rolls back (consume relies on this
   so a missing cover leaves nothing consumed).
-* `lease_bounds`: the TTL window one signed plan allows. A role job
-  (`operation = "run_job"`) is leased for `timeout_seconds + 120` at least and
-  for no more than Control's per-target `role_job_lease_ceiling_seconds`
-  (default 900, at most 3600). A serving plan has no 900 s cap, only the lease
-  store's 3600 s.
+* `lease_bounds`: the TTL window one signed plan allows. A plan carries
+  `lease_ttl_seconds` (per grant, 120..900) and `lease_max_seconds` (the total,
+  at most 10800); a job plan (`operation = "run_job"`) has ttl = max =
+  `timeout_seconds + 120`. A serving plan is renewed up to its total.
 
 Identity (W-i): the database does not identify the caller; the CP application
 asserts `principal_ref` after it verified the target's PoP signature.
@@ -34,14 +33,16 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.deployment.lease_store import REFUSAL_CODES
 
 __all__ = [
-    "DEFAULT_ROLE_JOB_LEASE_CEILING_SECONDS",
     "JOB_LEASE_MARGIN_SECONDS",
+    "MAX_GRANT_SECONDS",
     "MAX_LEASE_SECONDS",
-    "MAX_ROLE_JOB_LEASE_CEILING_SECONDS",
+    "MIN_GRANT_SECONDS",
     "RUN_JOB_OPERATION",
     "DeployLease",
     "DeployLeaseRefused",
     "DeployLeaseStore",
+    "DeployRelease",
+    "DeployRenewal",
     "DeployStanding",
     "LeaseBounds",
     "LeasePlanRefused",
@@ -53,11 +54,10 @@ __all__ = [
 RUN_JOB_OPERATION: Final = "run_job"
 #: A job lease covers the job's timeout plus this much for fetch, mint and purge.
 JOB_LEASE_MARGIN_SECONDS: Final = 120
-#: The lease store's own cap (`deploy_acquire` refuses more).
-MAX_LEASE_SECONDS: Final = 3600
-#: Control's per-target `role_job_lease_ceiling_seconds`: default and maximum.
-DEFAULT_ROLE_JOB_LEASE_CEILING_SECONDS: Final = 900
-MAX_ROLE_JOB_LEASE_CEILING_SECONDS: Final = 3600
+#: Per-grant TTL bounds of a plan (Control: 120..900) and the total's maximum.
+MIN_GRANT_SECONDS: Final = 120
+MAX_GRANT_SECONDS: Final = 900
+MAX_LEASE_SECONDS: Final = 10800
 
 _REFUSAL_SQLSTATE: Final = "L3001"
 STORE_UNREACHABLE: Final = "store-unreachable"
@@ -85,10 +85,27 @@ class LeasePlanRefused(Exception):  # noqa: N818
 @dataclass(frozen=True, slots=True)
 class DeployLease:
     lease_id: UUID
+    #: The per-grant TTL the lease was taken with.
+    ttl_seconds: int
     acquired_at: datetime
     expires_at: datetime
     #: The store's own clock when it answered.
     store_now: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DeployRenewal:
+    lease_id: UUID
+    granted_seconds: int
+    expires_at: datetime
+    store_now: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DeployRelease:
+    released_at: datetime
+    #: True when this was a repeat of an earlier identical release.
+    replay: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,13 +118,14 @@ class DeployStanding:
 
 @dataclass(frozen=True, slots=True)
 class LeaseBounds:
-    """The TTL window a plan allows, inclusive on both ends."""
+    """What one signed plan allows: the grant window and the total, inclusive."""
 
     min_ttl: int
     max_ttl: int
+    max_seconds: int
 
     def check(self, requested: object) -> int:
-        """`requested` as an int inside the window, or `lease-ttl-invalid`."""
+        """`requested` as an int inside the grant window, or `lease-ttl-invalid`."""
         if (
             isinstance(requested, bool)
             or not isinstance(requested, int)
@@ -135,38 +153,38 @@ def lease_bounds(
     *,
     operation: object,
     dispatched_job: object,
-    plan_lease_ttl_seconds: object,
-    role_job_lease_ceiling_seconds: object = DEFAULT_ROLE_JOB_LEASE_CEILING_SECONDS,
+    lease_ttl_seconds: object,
+    lease_max_seconds: object,
 ) -> LeaseBounds:
-    """The TTL window of one signed plan, or `LeasePlanRefused`.
+    """The grant window and total of one signed plan, or `LeasePlanRefused`.
 
     * `operation` and `dispatched_job` must agree: `run_job` requires an object,
       any other operation requires null.
-    * Job plan: `timeout_seconds + 120 <= ttl <= min(plan ttl, ceiling)`, with the
-      ceiling 1..3600 (Control's per-target setting, default 900). The signed
-      `timeout_seconds` is at least 1 and at most `ceiling - 120`.
-    * Serving plan: `1 <= ttl <= min(plan ttl, 3600)`. No 900 s cap.
+    * `lease_ttl_seconds` is 120..900 (per grant); `lease_max_seconds` is at
+      least the ttl and at most 10800 (the total, renewals included).
+    * Job plan: `lease_ttl_seconds = lease_max_seconds` and at least
+      `timeout_seconds + 120`; the only grant is that ttl.
+    * Serving plan: a grant of 120 up to `lease_ttl_seconds`; renewals bring the
+      total up to `lease_max_seconds`.
     """
-    plan_ttl = _int(plan_lease_ttl_seconds)
-    if plan_ttl is None or not 1 <= plan_ttl <= MAX_LEASE_SECONDS:
+    ttl = _int(lease_ttl_seconds)
+    if ttl is None or not MIN_GRANT_SECONDS <= ttl <= MAX_GRANT_SECONDS:
         raise LeasePlanRefused("plan-lease-ttl-out-of-bounds")
+    total = _int(lease_max_seconds)
+    if total is None or not ttl <= total <= MAX_LEASE_SECONDS:
+        raise LeasePlanRefused("plan-lease-max-out-of-bounds")
     if operation != RUN_JOB_OPERATION:
         if dispatched_job is not None:
             raise LeasePlanRefused("dispatched-job-on-a-serving-plan")
-        return LeaseBounds(1, plan_ttl)
+        return LeaseBounds(MIN_GRANT_SECONDS, ttl, total)
     if not isinstance(dispatched_job, Mapping):
         raise LeasePlanRefused("run-job-without-dispatched-job")
-    cap = _int(role_job_lease_ceiling_seconds)
-    if cap is None or not 1 <= cap <= MAX_ROLE_JOB_LEASE_CEILING_SECONDS:
-        raise LeasePlanRefused("role-job-lease-ceiling-out-of-bounds")
     timeout = _int(dispatched_job.get("timeout_seconds"))
-    if timeout is None or not 1 <= timeout <= cap - JOB_LEASE_MARGIN_SECONDS:
+    if timeout is None or timeout < 1:
         raise LeasePlanRefused("job-timeout-out-of-bounds")
-    low = timeout + JOB_LEASE_MARGIN_SECONDS
-    high = min(plan_ttl, cap)
-    if low > high:
+    if ttl != total or ttl < timeout + JOB_LEASE_MARGIN_SECONDS:
         raise LeasePlanRefused("job-lease-does-not-fit")
-    return LeaseBounds(low, high)
+    return LeaseBounds(ttl, ttl, total)
 
 
 def _state(exc: BaseException) -> str | None:
@@ -196,7 +214,7 @@ def _map(exc: DBAPIError) -> DeployLeaseRefused:
 
 
 class DeployLeaseStore:
-    """The four `cp_deploy_lease` functions over the caller's session.
+    """The five `cp_deploy_lease` functions over the caller's session.
 
     `session` is a SQLAlchemy `Session` or `Connection` connected as the CP
     runtime role. Nothing is committed here: the caller owns the transaction.
@@ -218,25 +236,26 @@ class DeployLeaseStore:
         host_id: str,
         dispatch_run: str,
         ttl_seconds: int,
+        max_seconds: int,
         principal_ref: str,
         reconcile_marker: str | None = None,
     ) -> DeployLease:
         """Take the host's lease on the shared row lock, or raise a refusal."""
         row = self._one(
-            "SELECT o_lease_id, o_acquired_at, o_expires_at, o_store_now "
-            "FROM cp_deploy_lease.deploy_acquire("
-            ":target_ref, :host, :run, CAST(:ttl AS integer), :principal, "
-            ":marker)",
+            "SELECT o_lease_id, o_ttl, o_acquired_at, o_expires_at, o_store_now "
+            "FROM cp_deploy_lease.deploy_acquire(:target_ref, :host, :run, "
+            "CAST(:ttl AS integer), CAST(:max AS integer), :principal, :marker)",
             {
                 "target_ref": target_ref,
                 "host": host_id,
                 "run": dispatch_run,
                 "ttl": ttl_seconds,
+                "max": max_seconds,
                 "principal": principal_ref,
                 "marker": reconcile_marker,
             },
         )
-        return DeployLease(row[0], row[1], row[2], row[3])
+        return DeployLease(row[0], row[1], row[2], row[3], row[4])
 
     def covers(self, *, lease_id: UUID | str, dispatch_run: str) -> datetime:
         """Judge the lease on store time for THIS run; return the instant judged."""
@@ -246,26 +265,35 @@ class DeployLeaseStore:
         )
         return row[0]  # type: ignore[no-any-return]
 
+    def renew(self, *, lease_id: UUID | str, dispatch_run: str) -> DeployRenewal:
+        """Grant `min(ttl, max - time held)` more, or raise a refusal."""
+        row = self._one(
+            "SELECT o_lease_id, o_granted, o_expires_at, o_store_now "
+            "FROM cp_deploy_lease.deploy_renew(CAST(:lease AS uuid), :run)",
+            {"lease": str(lease_id), "run": dispatch_run},
+        )
+        return DeployRenewal(row[0], row[1], row[2], row[3])
+
     def release(
         self,
         *,
         lease_id: UUID | str,
-        dispatch_run: str,
+        target_ref: str,
         principal_ref: str,
         host_mutated: bool,
-    ) -> datetime:
-        """Release once, on store time; return the store's release instant."""
+    ) -> DeployRelease:
+        """Release once, on store time; a repeat of the same release is a replay."""
         row = self._one(
-            "SELECT cp_deploy_lease.deploy_release("
-            "CAST(:lease AS uuid), :run, :principal, :mutated)",
+            "SELECT o_released_at, o_replay FROM cp_deploy_lease.deploy_release("
+            "CAST(:lease AS uuid), :target, :principal, :mutated)",
             {
                 "lease": str(lease_id),
-                "run": dispatch_run,
+                "target": target_ref,
                 "principal": principal_ref,
                 "mutated": host_mutated,
             },
         )
-        return row[0]  # type: ignore[no-any-return]
+        return DeployRelease(row[0], bool(row[1]))
 
     def standing(self, host_id: str) -> DeployStanding:
         """The host's standing on store time (`held`, `released`, ...)."""

@@ -337,6 +337,14 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
     ),
     _retain(
         "cp_deploy_lease",
+        "deploy_host_lease_renewals",
+        "every renewal of a production lease: when, to what instant and for how "
+        "many seconds. Written only by `cp_deploy_lease.deploy_renew`; the "
+        "effective expiry is the later of the lease's and its renewals'; v024 "
+        "refuses UPDATE, DELETE and TRUNCATE",
+    ),
+    _retain(
+        "cp_deploy_lease",
         "deploy_host_lease_releases",
         "the terminal release of a production lease, one per lease, `released_at` "
         "set by trigger from the database clock; v024 refuses UPDATE, DELETE and "

@@ -1,7 +1,7 @@
 """WP5c: the production (deploy) lease class on a real PG16 (`v024_deploy_lease`).
 
 Every case runs the REAL migration chain as the production migrator and calls the
-four `cp_deploy_lease` functions as the real CP runtime role `platform_api` over
+five `cp_deploy_lease` functions as the real CP runtime role `platform_api` over
 its own connection, through `DeployLeaseStore`. The clock is the one thing
 replaced, and only in the per-case database (`cp_lane3.store_now()` over a one-row
 clock the `advance` hook moves), exactly as the rehearsal class's suite does, so
@@ -60,9 +60,10 @@ MARKER_1 = "sha256:" + "1" * 64
 MARKER_2 = "sha256:" + "2" * 64
 
 RUNTIME_FUNCTIONS = (
-    "deploy_acquire(text, text, text, integer, text, text)",
+    "deploy_acquire(text, text, text, integer, integer, text, text)",
     "deploy_covers(uuid, text)",
     "deploy_release(uuid, text, text, boolean)",
+    "deploy_renew(uuid, text)",
     "deploy_standing(text)",
 )
 
@@ -190,6 +191,7 @@ class Runtime:
             "host_id": HOST,
             "dispatch_run": RUN,
             "ttl_seconds": 60,
+            "max_seconds": 600,
             "principal_ref": PRINCIPAL,
         }
         args.update(kw)
@@ -201,12 +203,15 @@ class Runtime:
     def release(self, lease: Any, **kw: Any) -> Any:
         args: dict[str, Any] = {
             "lease_id": lease.lease_id,
-            "dispatch_run": RUN,
+            "target_ref": TARGET,
             "principal_ref": PRINCIPAL,
             "host_mutated": True,
         }
         args.update(kw)
         return self.call(lambda s: s.release(**args))
+
+    def renew(self, lease: Any, run: str = RUN) -> Any:
+        return self.call(lambda s: s.renew(lease_id=lease.lease_id, dispatch_run=run))
 
     def standing(self, host: str = HOST) -> Any:
         return self.call(lambda s: s.standing(host))
@@ -245,8 +250,8 @@ def test_deploy_lease_acquire_covers_release_roundtrip(env: Any) -> None:
     assert lease.expires_at - lease.acquired_at == timedelta(seconds=60)
     assert rt.standing().standing == "held"
     assert rt.covers(lease) == db.now()
-    released_at = rt.release(lease, host_mutated=True)
-    assert released_at == db.now()
+    released = rt.release(lease, host_mutated=True)
+    assert released.released_at == db.now() and released.replay is False
     assert rt.standing().standing == "released"
 
 
@@ -283,7 +288,7 @@ def test_deploy_lease_held_by_another_run_refused(env: Any) -> None:
     _refused("lease-held-by-another-run", lambda: rt.acquire(dispatch_run="other"))
 
 
-@pytest.mark.parametrize("ttl", [0, -1, 3601, 86400, None])
+@pytest.mark.parametrize("ttl", [0, -1, 901, 86400, None])
 def test_deploy_lease_ttl_is_capped(env: Any, ttl: Any) -> None:
     _db, rt = env
     _refused("lease-ttl-invalid", lambda: rt.acquire(ttl_seconds=ttl))
@@ -291,17 +296,31 @@ def test_deploy_lease_ttl_is_capped(env: Any, ttl: Any) -> None:
         rt.standing()  # nothing was written: the host is unknown
 
 
-def test_deploy_lease_ttl_cap_is_inclusive(env: Any) -> None:
+@pytest.mark.parametrize("total", [None, 59, 10801])
+def test_deploy_lease_total_is_bounded_by_the_ttl_and_10800(
+    env: Any, total: Any
+) -> None:
     _db, rt = env
-    lease = rt.acquire(ttl_seconds=3600)
-    assert lease.expires_at - lease.acquired_at == timedelta(seconds=3600)
+    _refused("lease-ttl-invalid", lambda: rt.acquire(ttl_seconds=60, max_seconds=total))
+
+
+def test_deploy_lease_ttl_and_total_caps_are_inclusive(env: Any) -> None:
+    _db, rt = env
+    lease = rt.acquire(ttl_seconds=900, max_seconds=10800)
+    assert lease.ttl_seconds == 900
+    assert lease.expires_at - lease.acquired_at == timedelta(seconds=900)
 
 
 def test_deploy_lease_foreign_run_refused(env: Any) -> None:
     _db, rt = env
     lease = rt.acquire()
     _refused("lease-foreign-run", lambda: rt.covers(lease, run="other-run"))
-    _refused("lease-foreign-run", lambda: rt.release(lease, dispatch_run="other-run"))
+    _refused("lease-foreign-run", lambda: rt.renew(lease, run="other-run"))
+    # a release names the holder (target and principal), not the run
+    _refused(
+        "release-not-this-lease",
+        lambda: rt.release(lease, target_ref="other/env/host-a"),
+    )
     assert rt.standing().standing == "held"
 
 
@@ -319,17 +338,12 @@ def test_deploy_lease_double_release_refused(env: Any) -> None:
     db, rt = env
     lease = rt.acquire()
     first = rt.release(lease, host_mutated=False)
+    assert first.replay is False
     db.advance(None, 5)
-    assert rt.release(lease, host_mutated=False) == first  # replay, not a new release
+    again = rt.release(lease, host_mutated=False)
+    assert (again.released_at, again.replay) == (first.released_at, True)
     _refused("lease-already-released", lambda: rt.release(lease, host_mutated=True))
-    _refused(
-        "lease-already-released",
-        lambda: rt.release(lease, dispatch_run="other-run", host_mutated=False),
-    )
-    _refused(
-        "lease-already-released",
-        lambda: rt.release(lease, principal_ref="x", host_mutated=False),
-    )
+    _refused("release-not-this-lease", lambda: rt.release(lease, principal_ref="x"))
     assert (
         _scalar(
             db,
@@ -401,7 +415,7 @@ def test_deploy_lease_released_is_clean_whatever_host_mutated(env: Any) -> None:
     rt.release(first, host_mutated=True)
     second = rt.acquire(dispatch_run="dispatch-run-2")
     assert second.lease_id != first.lease_id
-    rt.release(second, dispatch_run="dispatch-run-2", host_mutated=False)
+    rt.release(second, host_mutated=False)
     rt.acquire(dispatch_run="dispatch-run-3")
 
 
@@ -411,7 +425,10 @@ def test_deploy_lease_expired_unreleased_is_never_a_clean_release(env: Any) -> N
     db.advance(None, 61)
     standing = rt.standing()
     assert standing.standing == "expired_unreleased"
-    _refused("lease-host-mutated", lambda: rt.acquire(dispatch_run="dispatch-run-2"))
+    _refused(
+        "reconcile-marker-required",
+        lambda: rt.acquire(dispatch_run="dispatch-run-2"),
+    )
     assert rt.standing().standing == "expired_unreleased"
 
 
@@ -421,7 +438,10 @@ def test_deploy_acquire_requires_marker(env: Any) -> None:
     db, rt = env
     rt.acquire(ttl_seconds=60)
     db.advance(None, 61)
-    _refused("lease-host-mutated", lambda: rt.acquire(dispatch_run="dispatch-run-2"))
+    _refused(
+        "reconcile-marker-required",
+        lambda: rt.acquire(dispatch_run="dispatch-run-2"),
+    )
     reopened = rt.acquire(dispatch_run="dispatch-run-2", reconcile_marker=MARKER_1)
     assert rt.covers(reopened, run="dispatch-run-2") == db.now()
     assert (
@@ -507,7 +527,7 @@ def test_deploy_lease_time_is_store_time(env: Any) -> None:
     )
     assert row == lease.expires_at  # one expiry: the answer is the row's
     db.advance(None, 30)
-    assert rt.release(lease) == db.now()
+    assert rt.release(lease).released_at == db.now()
     stored = _scalar(
         db,
         "SELECT released_at FROM cp_deploy_lease.deploy_host_lease_releases "
@@ -565,6 +585,9 @@ def test_deploy_evidence_is_append_only_even_for_the_owner(env: Any) -> None:
         "UPDATE cp_deploy_lease.deploy_host_lease_releases SET host_mutated = false",
         "DELETE FROM cp_deploy_lease.deploy_host_lease_releases",
         "TRUNCATE cp_deploy_lease.deploy_host_lease_releases",
+        "UPDATE cp_deploy_lease.deploy_host_lease_renewals SET granted_seconds = 1",
+        "DELETE FROM cp_deploy_lease.deploy_host_lease_renewals",
+        "TRUNCATE cp_deploy_lease.deploy_host_lease_renewals",
     ):
         with pytest.raises(DBAPIError), db.admin.begin() as conn:
             conn.execute(text(statement))
@@ -643,7 +666,7 @@ def _held_in(db: Any, role: str, schema: str) -> list[str]:
 
 
 def test_runtime_role_cp_lane3_privilege_proof(env: Any) -> None:
-    """The CP runtime role holds USAGE on `cp_deploy_lease` and EXECUTE on its four
+    """The CP runtime role holds USAGE on `cp_deploy_lease` and EXECUTE on its five
     functions, and NOTHING else: no table, sequence or column privilege there, no
     rehearsal function, no `store_now`, nothing at all in `cp_lane3`."""
     db, rt = env
@@ -662,6 +685,8 @@ def test_runtime_role_cp_lane3_privilege_proof(env: Any) -> None:
             "SELECT * FROM cp_lane3.host_current_lease",
             "SELECT cp_lane3.database_time()",
             "SELECT * FROM cp_deploy_lease.deploy_host_leases",
+            "SELECT * FROM cp_deploy_lease.deploy_host_lease_renewals",
+            "SELECT cp_deploy_lease.effective_expiry(gen_random_uuid())",
             "INSERT INTO cp_deploy_lease.deploy_host_lease_releases "
             "(lease_id, released_at, host_mutated, released_by) "
             "VALUES (gen_random_uuid(), now(), true, 'x')",
@@ -696,7 +721,7 @@ def test_the_migrations_privilege_read_back_passes_and_sees_a_leak(env: Any) -> 
     with db.admin.begin() as conn:
         assert [conn.execute(text(q)).scalar_one() for q in clean] == [0] * len(clean)
         assert conn.execute(text(migration.SCHEMA_GRANT_PRESENT_SQL)).scalar_one() == 1
-        assert conn.execute(text(migration.FUNCTION_GRANT_COUNT_SQL)).scalar_one() == 4
+        assert conn.execute(text(migration.FUNCTION_GRANT_COUNT_SQL)).scalar_one() == 5
         assert conn.execute(text(migration.LANE3_REACH_SQL)).scalar_one() is False
     for leak, query in (
         (
@@ -739,7 +764,7 @@ def test_every_deploy_function_is_definer_pinned_and_none_is_public(env: Any) ->
                 "WHERE n.nspname = 'cp_deploy_lease'"
             )
         ).all()
-    assert len(rows) == 5  # four callable + the release-time trigger function
+    assert len(rows) == 7  # five callable + the release stamp + effective_expiry
     for signature, definer, config, public in rows:
         assert public is False, signature
         if signature.startswith("cp_deploy_lease.deploy_"):
@@ -747,7 +772,7 @@ def test_every_deploy_function_is_definer_pinned_and_none_is_public(env: Any) ->
         assert config == ["search_path=pg_catalog, pg_temp"], signature
 
 
-def test_the_schema_holds_exactly_two_tables_and_no_rehearsal_object_moved(
+def test_the_schema_holds_exactly_three_tables_and_no_rehearsal_object_moved(
     env: Any,
 ) -> None:
     db, _rt = env
@@ -768,7 +793,11 @@ def test_the_schema_holds_exactly_two_tables_and_no_rehearsal_object_moved(
                 "AND c.relkind = 'r'"
             )
         ).scalar_one()
-    assert tables == {"deploy_host_leases", "deploy_host_lease_releases"}
+    assert tables == {
+        "deploy_host_leases",
+        "deploy_host_lease_renewals",
+        "deploy_host_lease_releases",
+    }
     assert rehearsal == 6  # the six v023 tables: nothing added to `cp_lane3`
 
 
@@ -839,7 +868,10 @@ def test_another_target_cannot_cover_or_release_this_targets_lease(env: Any) -> 
     lease = rt.acquire(dispatch_run=mine)
     theirs = dispatch_run("other/env/host-a", "d-1")  # same dispatch id, other target
     _refused("lease-foreign-run", lambda: rt.covers(lease, run=theirs))
-    _refused("lease-foreign-run", lambda: rt.release(lease, dispatch_run=theirs))
+    _refused(
+        "release-not-this-lease",
+        lambda: rt.release(lease, target_ref="other/env/host-a"),
+    )
     assert rt.covers(lease, run=mine)
 
 
@@ -871,7 +903,7 @@ def test_consume_requires_covering_lease_on_a_real_session(env: Any) -> None:
         assert session.execute(text("SELECT 1")).scalar_one() == 1  # still healthy
         assert covers(session, lease.lease_id) is True
         session.rollback()
-    rt.release(lease, dispatch_run=run)
+    rt.release(lease)
     with Session(rt.engine) as session:
         assert covers(session, lease.lease_id) is False  # released
         session.rollback()
@@ -881,3 +913,74 @@ def test_consume_requires_covering_lease_on_a_real_session(env: Any) -> None:
         db.advance(None, 60)
         assert covers(session, expiring.lease_id, dispatch="d-3") is False  # expired
         session.rollback()
+
+
+# ── renewal (architect ruling Q-c/4) ────────────────────────────────────────
+
+
+def test_deploy_lease_renew_grants_min_ttl_and_the_time_left_in_the_total(
+    env: Any,
+) -> None:
+    db, rt = env
+    lease = rt.acquire(ttl_seconds=120, max_seconds=300)
+    db.advance(None, 100)  # held 100 s; expires at 120
+    first = rt.renew(lease)
+    assert first.granted_seconds == 120  # min(120, 300 - 100) = 120
+    assert first.expires_at == lease.acquired_at + timedelta(seconds=220)
+    assert rt.covers(lease) == db.now()
+    db.advance(None, 100)  # held 200; effective expiry 220
+    second = rt.renew(lease)
+    assert second.granted_seconds == 100  # min(120, 300 - 200)
+    assert second.expires_at == lease.acquired_at + timedelta(seconds=300)
+    assert rt.standing().expires_at == second.expires_at
+
+
+def test_deploy_lease_renew_refuses_at_the_total(env: Any) -> None:
+    db, rt = env
+    lease = rt.acquire(ttl_seconds=120, max_seconds=240)
+    db.advance(None, 100)
+    rt.renew(lease)  # to 220
+    db.advance(None, 100)
+    rt.renew(lease)  # to 240, the cap
+    db.advance(None, 10)
+    _refused("lease-max-reached", lambda: rt.renew(lease))
+    assert rt.covers(lease) == db.now()  # still held until 240
+
+
+def test_deploy_lease_renew_never_resurrects_an_expired_or_released_lease(
+    env: Any,
+) -> None:
+    db, rt = env
+    expired = rt.acquire(ttl_seconds=120, max_seconds=600)
+    db.advance(None, 120)  # store time == expires_at
+    _refused("lease-expired", lambda: rt.renew(expired))
+    assert rt.standing().standing == "expired_unreleased"
+    released = rt.acquire(
+        dispatch_run="dispatch-run-2", reconcile_marker=MARKER_1, ttl_seconds=120
+    )
+    rt.release(released, target_ref=TARGET)
+    _refused("lease-already-released", lambda: rt.renew(released, run="dispatch-run-2"))
+    ghost = type("L", (), {"lease_id": "00000000-0000-4000-8000-000000000000"})()
+    _refused("lease-role-unbound", lambda: rt.renew(ghost))
+
+
+def test_deploy_lease_renew_is_one_writer_with_acquire(env: Any) -> None:
+    """A renewed lease still excludes another run, and an unrenewed one that expired
+    needs the reconcile marker, not a silent takeover."""
+    db, rt = env
+    lease = rt.acquire(ttl_seconds=120, max_seconds=600)
+    db.advance(None, 100)
+    rt.renew(lease)
+    db.advance(None, 100)  # past the ORIGINAL expiry, inside the renewed one
+    _refused("lease-held-by-another-run", lambda: rt.acquire(dispatch_run="other"))
+    db.advance(None, 200)  # past the renewed expiry too
+    _refused("reconcile-marker-required", lambda: rt.acquire(dispatch_run="other"))
+
+
+def test_deploy_acquire_without_a_marker_after_expiry_is_reconcile_marker_required(
+    env: Any,
+) -> None:
+    db, rt = env
+    rt.acquire(ttl_seconds=120)
+    db.advance(None, 121)
+    _refused("reconcile-marker-required", lambda: rt.acquire(dispatch_run="x"))

@@ -1,7 +1,7 @@
 """WP5c guards that need no database (DESIGN-rev3 2.6.2, 6.3).
 
 * `v024_deploy_lease` is EXPAND-ONLY and grants exactly what 2.6.2 allows: USAGE on
-  its own schema and EXECUTE on its four functions, to the CP runtime role, and
+  its own schema and EXECUTE on its five functions, to the CP runtime role, and
   nothing in `cp_lane3`; it never creates a role, never alters a default privilege,
   never drops or alters an object, and never identifies a caller by `session_user`
   (the W-i identity shift is explicit, not accidental).
@@ -82,7 +82,7 @@ def test_the_migration_is_expand_only_and_creates_no_role() -> None:
         assert forbidden not in code.split('"""', 2)[-1], forbidden
 
 
-def test_the_only_grants_are_usage_on_own_schema_and_execute_on_four_functions() -> (
+def test_the_only_grants_are_usage_on_own_schema_and_execute_on_five_functions() -> (
     None
 ):
     module = _module()
@@ -101,6 +101,7 @@ def test_the_only_grants_are_usage_on_own_schema_and_execute_on_four_functions()
         "deploy_acquire",
         "deploy_covers",
         "deploy_release",
+        "deploy_renew",
         "deploy_standing",
     ]
     assert "GRANT" not in "".join(_statements())

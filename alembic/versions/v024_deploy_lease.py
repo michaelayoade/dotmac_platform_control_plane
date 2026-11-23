@@ -12,7 +12,7 @@ deploy or one role job. This is the *production class* beside the rehearsal clas
   is that no runtime role holds anything in `cp_lane3`. A deploy class inside
   `cp_lane3` would either break both or need the runtime role granted into it.
   Here the CP runtime role holds `USAGE` on `cp_deploy_lease` and `EXECUTE` on
-  four functions of it, and NOTHING in `cp_lane3` (not `store_now()`, not
+  five functions of it, and NOTHING in `cp_lane3` (not `store_now()`, not
   `USAGE`): the functions are `SECURITY DEFINER`, owned by the migrator, and
   reach `cp_lane3` themselves.
 * **One writer per host across both classes (M10).** Both classes take the SAME
@@ -27,8 +27,14 @@ deploy or one role job. This is the *production class* beside the rehearsal clas
   granted by this migration.
 * **Retries are idempotent (the wire contract).** A second acquire by the SAME
   run, principal and target while its lease is live returns that lease; a second
-  release by the same run and principal with the same `host_mutated` returns the
-  stored release instant. Any other repeat is refused.
+  release by the same target and principal with the same `host_mutated` is a
+  replay (`o_replay`). Any other repeat is refused.
+* **Renewal (architect ruling Q-c/4).** A lease has a per-grant TTL
+  (`ttl_seconds`, the plan's `lease_ttl_seconds`) and a total (`max_seconds`, the
+  plan's `lease_max_seconds`, at most 10800). `deploy_renew` grants
+  `min(ttl, max - time held)` as an append-only renewal row; the effective expiry
+  is the later of the lease's and its renewals'. It refuses (never resurrects) a
+  released, foreign or expired lease, and a lease already at its total.
 * **Persistent-host rule.** A RELEASED lease is the clean state, whatever
   `host_mutated` says (a clean deploy necessarily releases a mutated host). A
   lease that EXPIRED UNRELEASED is standing `expired_unreleased`; the next
@@ -49,11 +55,13 @@ deploy or one role job. This is the *production class* beside the rehearsal clas
 
 ## Refusal codes
 
-The CLOSED code set of `lease_store.REFUSAL_CODES`: no code is added. Mapping
+The CLOSED code set of `lease_store.REFUSAL_CODES`, plus two added for this class
+(`reconcile-marker-required`, `lease-max-reached`). Mapping
 used by the deploy class: an unknown lease or a malformed identity is
 `lease-role-unbound`; a lease held by another run, `lease-held-by-another-run`;
-an expired-unreleased host without a marker, or a host last held by the
-rehearsal class, `lease-host-mutated`; a malformed marker,
+an expired-unreleased host without a marker, `reconcile-marker-required`; a host
+last held by the rehearsal class, `lease-host-mutated`; a lease already at its
+total, `lease-max-reached`; a malformed marker,
 `reprovision-receipt-mismatch`; a reused marker, `reprovision-receipt-spent`.
 
 ## Not for prod before the fence line closes
@@ -126,9 +134,19 @@ TABLES_SQL = (
     f" reconcile_marker_ref text UNIQUE CHECK (reconcile_marker_ref ~ {_MARKER}),"
     " acquired_at timestamptz NOT NULL,"
     " expires_at timestamptz NOT NULL,"
-    " ttl_seconds integer NOT NULL CHECK (ttl_seconds BETWEEN 1 AND 3600),"
+    # per-grant TTL (the plan's lease_ttl_seconds) and the total the plan sizes
+    " ttl_seconds integer NOT NULL CHECK (ttl_seconds BETWEEN 1 AND 900),"
+    " max_seconds integer NOT NULL CHECK (max_seconds BETWEEN 1 AND 10800"
+    "  AND max_seconds >= ttl_seconds),"
     " seq bigserial NOT NULL,"
     " CHECK (expires_at = acquired_at + ttl_seconds * interval '1 second'))",
+    f"CREATE TABLE {SCHEMA}.deploy_host_lease_renewals ("
+    f" lease_id uuid NOT NULL REFERENCES {SCHEMA}.deploy_host_leases (lease_id),"
+    " seq bigserial NOT NULL,"
+    " renewed_at timestamptz NOT NULL,"
+    " new_expires_at timestamptz NOT NULL,"
+    " granted_seconds integer NOT NULL CHECK (granted_seconds BETWEEN 1 AND 900),"
+    " PRIMARY KEY (lease_id, seq))",
     f"CREATE TABLE {SCHEMA}.deploy_host_lease_releases ("
     f" lease_id uuid PRIMARY KEY REFERENCES {SCHEMA}.deploy_host_leases (lease_id),"
     " released_at timestamptz NOT NULL,"
@@ -142,6 +160,13 @@ TRIGGER_FUNCTIONS_SQL = (
     "LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp "
     "AS $$ BEGIN "
     "NEW.released_at := cp_lane3.store_now(); RETURN NEW; END $$",
+    # The lease's effective expiry: its own, or the latest renewal's if later.
+    f"CREATE FUNCTION {SCHEMA}.effective_expiry(p_lease uuid) RETURNS timestamptz "
+    "LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp "
+    "AS $$ SELECT greatest(l.expires_at, coalesce((SELECT max(r.new_expires_at) "
+    f"FROM {SCHEMA}.deploy_host_lease_renewals r WHERE r.lease_id = l.lease_id), "
+    f"l.expires_at)) FROM {SCHEMA}.deploy_host_leases l "
+    "WHERE l.lease_id = p_lease $$",
 )
 
 TRIGGERS_SQL = (
@@ -149,23 +174,27 @@ TRIGGERS_SQL = (
     f"ON {SCHEMA}.deploy_host_lease_releases "
     f"FOR EACH ROW EXECUTE FUNCTION {SCHEMA}.stamp_deploy_release_time()",
     *_append_only("deploy_host_leases"),
+    *_append_only("deploy_host_lease_renewals"),
     *_append_only("deploy_host_lease_releases"),
 )
 
 # ── the deploy functions ─────────────────────────────────────────────────────
 
 _DEFINER = "LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp"
+_EFF = f"{SCHEMA}.effective_expiry"
 
 FUNCTIONS_SQL = (
     # deploy_acquire: the shared host row lock, then the persistent-host rule.
     f"CREATE FUNCTION {SCHEMA}.deploy_acquire(p_target_ref text, p_host text, "
-    "p_run text, p_ttl integer, p_principal text, p_marker text DEFAULT NULL) "
-    "RETURNS TABLE (o_lease_id uuid, o_acquired_at timestamptz, "
+    "p_run text, p_ttl integer, p_max integer, p_principal text, "
+    "p_marker text DEFAULT NULL) "
+    "RETURNS TABLE (o_lease_id uuid, o_ttl integer, o_acquired_at timestamptz, "
     "o_expires_at timestamptz, o_store_now timestamptz) " + _DEFINER + " AS $$ "
-    "DECLARE v_now timestamptz; v_acq timestamptz; v_prev uuid; "
+    "DECLARE v_now timestamptz; v_acq timestamptz; v_prev uuid; v_exp timestamptz; "
     "v_dl record; v_rl record; v_new uuid; v_needs_marker boolean := false; "
     "BEGIN "
-    "IF p_ttl IS NULL OR p_ttl < 1 OR p_ttl > 3600 THEN "
+    "IF p_ttl IS NULL OR p_ttl < 1 OR p_ttl > 900 OR p_max IS NULL "
+    "OR p_max < p_ttl OR p_max > 10800 THEN "
     + _refuse("lease-ttl-invalid")
     + " END IF; "
     f"IF p_host IS NULL OR p_host !~ {_HOST} "
@@ -197,17 +226,17 @@ FUNCTIONS_SQL = (
     + " END IF; "
     f"IF NOT EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
     "WHERE x.lease_id = v_prev) THEN "
-    "IF v_now < v_dl.expires_at THEN "
+    f"v_exp := {_EFF}(v_prev); "
+    "IF v_now < v_exp THEN "
     # a retry by the SAME run, principal and target is the same request: it gets
-    # its own live lease back (the wire contract: re-acquiring by the same run
-    # returns its lease), never a second one
+    # its own live lease back, never a second one
     "IF v_dl.dispatch_run = p_run AND v_dl.principal_ref = p_principal "
     "AND v_dl.target_ref = p_target_ref THEN "
-    "RETURN QUERY SELECT l.lease_id, l.acquired_at, l.expires_at, v_now "
+    "RETURN QUERY SELECT l.lease_id, l.ttl_seconds, l.acquired_at, v_exp, v_now "
     f"FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_prev; "
     "RETURN; END IF; " + _refuse("lease-held-by-another-run") + " END IF; "
     # expired unreleased: only a reconcile marker reopens the host
-    "IF p_marker IS NULL THEN " + _refuse("lease-host-mutated") + " END IF; "
+    "IF p_marker IS NULL THEN " + _refuse("reconcile-marker-required") + " END IF; "
     "v_needs_marker := true; "
     "END IF; END IF; "
     "IF v_needs_marker AND EXISTS (SELECT 1 "
@@ -218,12 +247,12 @@ FUNCTIONS_SQL = (
     "v_new := gen_random_uuid(); "
     f"INSERT INTO {SCHEMA}.deploy_host_leases (lease_id, host_id, target_ref, "
     "dispatch_run, principal_ref, reconcile_marker_ref, acquired_at, expires_at, "
-    "ttl_seconds) VALUES (v_new, p_host, p_target_ref, p_run, p_principal, "
-    "CASE WHEN v_needs_marker THEN p_marker END, v_acq, "
-    "v_acq + p_ttl * interval '1 second', p_ttl); "
+    "ttl_seconds, max_seconds) VALUES (v_new, p_host, p_target_ref, p_run, "
+    "p_principal, CASE WHEN v_needs_marker THEN p_marker END, v_acq, "
+    "v_acq + p_ttl * interval '1 second', p_ttl, p_max); "
     "UPDATE cp_lane3.host_current_lease SET lease_id = v_new WHERE host_id = p_host; "
-    "RETURN QUERY SELECT l.lease_id, l.acquired_at, l.expires_at, v_now "
-    f"FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_new; END $$",
+    "RETURN QUERY SELECT l.lease_id, l.ttl_seconds, l.acquired_at, l.expires_at, "
+    f"v_now FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_new; END $$",
     # deploy_covers: live, unreleased, held by THIS dispatch run, on store time.
     f"CREATE FUNCTION {SCHEMA}.deploy_covers(p_lease uuid, p_run text) "
     "RETURNS timestamptz " + _DEFINER + " AS $$ "
@@ -233,16 +262,48 @@ FUNCTIONS_SQL = (
     "IF NOT FOUND THEN " + _refuse("lease-role-unbound") + " END IF; "
     "v_now := cp_lane3.store_now(); "
     f"IF EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
-    "WHERE x.lease_id = p_lease) OR v_now >= v_l.expires_at THEN "
+    f"WHERE x.lease_id = p_lease) OR v_now >= {_EFF}(p_lease) THEN "
     + _refuse("lease-expired")
     + " END IF; "
     "IF p_run IS NULL OR v_l.dispatch_run <> p_run THEN "
     + _refuse("lease-foreign-run")
     + " END IF; "
     "RETURN v_now; END $$",
+    # deploy_renew: min(per-grant ttl, max - time held); never past the total.
+    f"CREATE FUNCTION {SCHEMA}.deploy_renew(p_lease uuid, p_run text) "
+    "RETURNS TABLE (o_lease_id uuid, o_granted integer, "
+    "o_expires_at timestamptz, o_store_now timestamptz) " + _DEFINER + " AS $$ "
+    "DECLARE v_l record; v_now timestamptz; v_t timestamptz; v_cur timestamptz; "
+    "v_cap timestamptz; v_new timestamptz; v_g integer; "
+    "BEGIN "
+    f"SELECT * INTO v_l FROM {SCHEMA}.deploy_host_leases WHERE lease_id = p_lease; "
+    "IF NOT FOUND THEN " + _refuse("lease-role-unbound") + " END IF; "
+    "PERFORM 1 FROM cp_lane3.host_current_lease hc "
+    "WHERE hc.host_id = v_l.host_id FOR UPDATE; "
+    "v_now := cp_lane3.store_now(); v_t := date_trunc('second', v_now); "
+    f"IF EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
+    "WHERE x.lease_id = p_lease) THEN "
+    + _refuse("lease-already-released")
+    + " END IF; "
+    "IF p_run IS NULL OR v_l.dispatch_run <> p_run THEN "
+    + _refuse("lease-foreign-run")
+    + " END IF; "
+    f"v_cur := {_EFF}(p_lease); "
+    "IF v_now >= v_cur THEN " + _refuse("lease-expired") + " END IF; "
+    "v_cap := v_l.acquired_at + v_l.max_seconds * interval '1 second'; "
+    "IF v_t >= v_cap OR v_cur >= v_cap THEN "
+    + _refuse("lease-max-reached")
+    + " END IF; "
+    "v_new := least(v_cap, v_t + v_l.ttl_seconds * interval '1 second'); "
+    "IF v_new < v_cur THEN v_new := v_cur; END IF; "
+    "v_g := extract(epoch FROM (v_new - v_t))::integer; "
+    f"INSERT INTO {SCHEMA}.deploy_host_lease_renewals (lease_id, renewed_at, "
+    "new_expires_at, granted_seconds) VALUES (p_lease, v_t, v_new, v_g); "
+    "RETURN QUERY SELECT p_lease, v_g, v_new, v_now; END $$",
     # deploy_release: under the shared host row lock; one release; never late.
-    f"CREATE FUNCTION {SCHEMA}.deploy_release(p_lease uuid, p_run text, "
-    "p_principal text, p_host_mutated boolean) RETURNS timestamptz "
+    f"CREATE FUNCTION {SCHEMA}.deploy_release(p_lease uuid, p_target_ref text, "
+    "p_principal text, p_host_mutated boolean) "
+    "RETURNS TABLE (o_released_at timestamptz, o_replay boolean) "
     + _DEFINER
     + " AS $$ "
     "DECLARE v_l record; v_rel record; v_now timestamptz; v_at timestamptz; "
@@ -253,34 +314,29 @@ FUNCTIONS_SQL = (
     "PERFORM 1 FROM cp_lane3.host_current_lease hc "
     "WHERE hc.host_id = v_l.host_id FOR UPDATE; "
     "v_now := cp_lane3.store_now(); "
-    f"IF EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
-    "WHERE x.lease_id = p_lease) THEN "
-    # a second release by the same run and principal, saying the same thing, is a
-    # replay and returns the stored instant (the wire contract); anything else
-    # is refused
-    f"SELECT * INTO v_rel FROM {SCHEMA}.deploy_host_lease_releases x "
-    "WHERE x.lease_id = p_lease; "
-    "IF v_l.dispatch_run = p_run AND v_l.principal_ref = p_principal "
-    "AND v_rel.host_mutated = p_host_mutated THEN "
-    "RETURN v_rel.released_at; END IF; "
-    + _refuse("lease-already-released")
-    + " END IF; "
-    "IF v_now >= v_l.expires_at THEN " + _refuse("lease-expired") + " END IF; "
-    "IF p_run IS NULL OR v_l.dispatch_run <> p_run THEN "
-    + _refuse("lease-foreign-run")
-    + " END IF; "
-    "IF p_principal IS DISTINCT FROM v_l.principal_ref THEN "
+    # the holder: the authenticated target and its credential principal
+    "IF p_target_ref IS DISTINCT FROM v_l.target_ref "
+    "OR p_principal IS DISTINCT FROM v_l.principal_ref THEN "
     + _refuse("release-not-this-lease")
     + " END IF; "
+    f"SELECT * INTO v_rel FROM {SCHEMA}.deploy_host_lease_releases x "
+    "WHERE x.lease_id = p_lease; "
+    "IF FOUND THEN "
+    # a second release saying the same thing is a replay (wire contract)
+    "IF v_rel.host_mutated = p_host_mutated THEN "
+    "RETURN QUERY SELECT v_rel.released_at, true; RETURN; END IF; "
+    + _refuse("lease-already-released")
+    + " END IF; "
+    f"IF v_now >= {_EFF}(p_lease) THEN " + _refuse("lease-expired") + " END IF; "
     f"INSERT INTO {SCHEMA}.deploy_host_lease_releases (lease_id, released_at, "
     "host_mutated, released_by) VALUES (p_lease, v_now, p_host_mutated, "
     "p_principal) RETURNING released_at INTO v_at; "
-    "RETURN v_at; END $$",
+    "RETURN QUERY SELECT v_at, false; END $$",
     # deploy_standing: the host's standing on store time, for GET lease/standing.
     f"CREATE FUNCTION {SCHEMA}.deploy_standing(p_host text) "
     "RETURNS TABLE (o_standing text, o_lease_id uuid, o_expires_at timestamptz, "
     "o_store_now timestamptz) " + _DEFINER + " AS $$ "
-    "DECLARE v_id uuid; v_l record; v_now timestamptz; v_s text; "
+    "DECLARE v_id uuid; v_l record; v_now timestamptz; v_s text; v_e timestamptz; "
     "BEGIN "
     "SELECT hc.lease_id INTO v_id FROM cp_lane3.host_current_lease hc "
     "WHERE hc.host_id = p_host; "
@@ -288,23 +344,25 @@ FUNCTIONS_SQL = (
     f"SELECT * INTO v_l FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_id; "
     "IF NOT FOUND THEN " + _refuse("lease-host-mutated") + " END IF; "
     "v_now := cp_lane3.store_now(); "
+    f"v_e := {_EFF}(v_id); "
     f"IF EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
     "WHERE x.lease_id = v_id) THEN v_s := 'released'; "
-    "ELSIF v_now >= v_l.expires_at THEN v_s := 'expired_unreleased'; "
+    "ELSIF v_now >= v_e THEN v_s := 'expired_unreleased'; "
     "ELSE v_s := 'held'; END IF; "
-    "RETURN QUERY SELECT v_s, v_l.lease_id, v_l.expires_at, v_now; END $$",
+    "RETURN QUERY SELECT v_s, v_l.lease_id, v_e, v_now; END $$",
 )
 
 #: Every function the runtime role is granted. Written down because the grant,
 #: the read-back and the privilege proof must name the same set.
 RUNTIME_ROLE_FUNCTIONS = (
-    "deploy_acquire(text, text, text, integer, text, text)",
+    "deploy_acquire(text, text, text, integer, integer, text, text)",
     "deploy_covers(uuid, text)",
     "deploy_release(uuid, text, text, boolean)",
+    "deploy_renew(uuid, text)",
     "deploy_standing(text)",
 )
-#: The internal trigger function: owned and executed by the definer, never granted.
-INTERNAL_FUNCTIONS = ("stamp_deploy_release_time()",)
+#: The internal functions: owned and executed by the definer, never granted.
+INTERNAL_FUNCTIONS = ("stamp_deploy_release_time()", "effective_expiry(uuid)")
 
 # ── the privilege read-back ──────────────────────────────────────────────────
 #
@@ -496,7 +554,7 @@ def upgrade() -> None:
         connection.exec_driver_sql(
             f"REVOKE ALL ON FUNCTION {SCHEMA}.{signature} FROM PUBLIC"
         )
-    # The one grant of this migration (W-i): the runtime role may call the four
+    # The one grant of this migration (W-i): the runtime role may call the five
     # functions and nothing else. No table, no sequence, nothing in cp_lane3.
     connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA {SCHEMA} TO {RUNTIME_ROLE}")
     for signature in RUNTIME_ROLE_FUNCTIONS:
@@ -508,7 +566,7 @@ def upgrade() -> None:
             (SCHEMA_ACL_SQL, "an ACL entry on the schema beyond the one grant"),
             (RELATION_ACL_SQL, "an ACL entry on a table or sequence"),
             (COLUMN_ACL_SQL, "a column ACL entry"),
-            (FUNCTION_ACL_SQL, "an ACL entry on a function beyond the four grants"),
+            (FUNCTION_ACL_SQL, "an ACL entry on a function beyond the five grants"),
             (DEFAULT_ACL_SQL, "a default-privilege rule names the schema"),
             (OWNER_NOT_MIGRATOR_SQL, "an object not owned by the migrating role"),
         ):
