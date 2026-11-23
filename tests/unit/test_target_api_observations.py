@@ -79,7 +79,7 @@ def _post(db: Session, parse: Any, forwarded: list[Any]) -> Any:
             consumption=ConsumptionService(UnwiredBackend()),
             materials=MaterialsHandler(None),
             observations=ObservationHandler(
-                ControlObservationSink(parse=parse, record=fake_record)
+                ControlObservationSink(claims=parse, record=fake_record)
             ),
         ),
         session=db,
@@ -98,9 +98,7 @@ def _post(db: Session, parse: Any, forwarded: list[Any]) -> Any:
 
 
 def _parse_as(key_id: str, target_ref: str) -> Any:
-    return lambda body: SimpleNamespace(
-        statement=SimpleNamespace(key_id=key_id, target_ref=target_ref)
-    )
+    return lambda body: (key_id, target_ref)
 
 
 def _audit(db: Session) -> list[PlatformAuditEvent]:
@@ -146,14 +144,9 @@ def test_observation_principal_mismatch_is_a_signed_403_with_an_audit_row(
     assert event.details["claimed_target_ref"] == target_ref
 
 
-def test_an_unparseable_body_is_still_forwarded_to_control(db: Session) -> None:
-    from dotmac_deployment_control import ExecutionObservationRefusedError
-
-    def parse(body: bytes) -> Any:
-        raise ExecutionObservationRefusedError.__new__(ExecutionObservationRefusedError)
-
+def test_an_unreadable_body_is_still_forwarded_to_control(db: Session) -> None:
     forwarded: list[Any] = []
-    response = _post(db, parse, forwarded)
+    response = _post(db, lambda body: None, forwarded)
     assert response.status_code == 200
     assert len(forwarded) == 1
     assert _audit(db) == []
