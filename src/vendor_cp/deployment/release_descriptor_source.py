@@ -149,6 +149,10 @@ class CatalogueReleaseDescriptorSource:
                 )
             attested_digest = attestation.digest
             source_revision = artifact.source_revision
+            if source_revision is None:
+                raise ReleaseDescriptorUnavailableError(
+                    "the catalogued artifact records no source revision"
+                )
             image_digest = artifact.digest
         try:
             payload = self._store().read(digest=attested_digest)
