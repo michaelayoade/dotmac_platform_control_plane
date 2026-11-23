@@ -1,12 +1,16 @@
 {
   "schema": "dotmac.a2.native-pg-scenarios.v1",
-  "comment": "Scenario -> existing CP tests, invoked by name from the checkout under test (CP #269 head, which carries #266 and the 5b consume test). Scenarios with an empty test list are BLOCKED on packet P0 (dispatch-only recovery source) and can never read as PASS.",
+  "comment": "Scenario -> existing CP tests, invoked by name from the checkout under test (CP #269 head, which carries #266 and the 5b consume test). Scenarios with an empty test list are BLOCKED on packet P0 (dispatch-only recovery source) and can never read as PASS. non_native_reference lists real tests that exist but do NOT run on PostgreSQL; they never turn a scenario to PASS.",
   "scenarios": [
     {
       "id": "a_standing_withdrawal_locking",
       "title": "approval standing GRANTED/non-revoked at hold (FOR SHARE) and withdrawal FOR UPDATE conflict",
-      "blocked_on": "P0: dispatch-only recovery source is not yet on a CP/Control branch",
-      "tests": []
+      "blocked_on": "no native-PG test exists. Control #76 (314039111) tests run on in-memory SQLite, so FOR SHARE at hold / FOR UPDATE withdrawal locking is unprovable there; CP #272 (73f88f1c) has no store-level test either. A builder must add a real-PG test (hold under FOR SHARE vs concurrent withdrawal under FOR UPDATE).",
+      "tests": [],
+      "non_native_reference": [
+        "dotmac_deployment_control michaelayoade/dotmac_deployment_control #76 314039111cec tests/unit/test_dispatch_recovery.py::test_a_revoked_approval_cannot_recover",
+        "dotmac_deployment_control michaelayoade/dotmac_deployment_control #76 314039111cec tests/unit/test_dispatch_recovery.py::test_a_pending_or_revoked_approval_is_refused"
+      ]
     },
     {
       "id": "b_cross_class_host_lock",
@@ -32,8 +36,16 @@
     {
       "id": "d_first_commit_dispatch_only_recovery",
       "title": "first-commit dispatch-only recovery: same coordinates, fresh hold, one-use, a second use refused",
-      "blocked_on": "P0: dispatch-only recovery source is not yet on a CP/Control branch",
-      "tests": []
+      "blocked_on": "no native-PG test exists. The recovery semantics are tested on in-memory SQLite in Control #76 and as unit tests in CP #272; they do not prove first-commit recovery on PostgreSQL. A builder must add a real-PG test.",
+      "tests": [],
+      "non_native_reference": [
+        "dotmac_deployment_control michaelayoade/dotmac_deployment_control #76 314039111cec tests/unit/test_dispatch_recovery.py::test_the_untouched_requested_rollout_is_recovered_exactly_once",
+        "dotmac_deployment_control michaelayoade/dotmac_deployment_control #76 314039111cec tests/unit/test_dispatch_recovery.py::test_a_duplicate_dispatch_command_cannot_recover",
+        "dotmac_deployment_control michaelayoade/dotmac_deployment_control #76 314039111cec tests/unit/test_dispatch_recovery.py::test_a_rollout_that_already_has_an_attempt_is_never_recovered",
+        "dotmac_deployment_control michaelayoade/dotmac_deployment_control #76 314039111cec tests/unit/test_dispatch_recovery.py::test_recovery_is_attempt_one_under_the_exact_signer_and_version",
+        "dotmac_platform_control_plane #272 tests/unit/test_target_materials_producer.py::test_recovery_replays_without_authorization_signing_and_shares_output",
+        "dotmac_platform_control_plane #272 tests/unit/test_target_transit_custody.py::test_recovery_custody_refuses_authorization_and_duplicate_dispatch"
+      ]
     },
     {
       "id": "e_consume_exactly_once",
