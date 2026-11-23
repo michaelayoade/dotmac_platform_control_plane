@@ -1,7 +1,7 @@
 """WP5c: the production (deploy) lease class on a real PG16 (`v024_deploy_lease`).
 
 Every case runs the REAL migration chain as the production migrator and calls the
-five `cp_deploy_lease` functions as the real CP runtime role `platform_api` over
+five `cp_deploy_lease` functions as the dedicated lease role `platform_target_lease` over
 its own connection, through `DeployLeaseStore`. The clock is the one thing
 replaced, and only in the per-case database (`cp_lane3.store_now()` over a one-row
 clock the `advance` hook moves), exactly as the rehearsal class's suite does, so
@@ -28,6 +28,7 @@ rehearsal acquire, which needs Foundation: it is proven in
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
 import re
 import threading
@@ -45,6 +46,7 @@ from vendor_cp.deployment import lease_store
 from vendor_cp.deployment.deploy_lease import (
     DeployLeaseRefused,
     DeployLeaseStore,
+    MarkerRequired,
     dispatch_run,
 )
 from vendor_cp.deployment.deploy_lease_consume import LeaseCoveringBackend
@@ -79,10 +81,7 @@ DEPLOY_CASE_MAP: dict[str, str | tuple[str, str]] = {
         "(test_deploy_lease_malformed_identity_refused)",
     ),
     "a_lost_connection_fails_closed_and_writes_nothing": (
-        "n/a",
-        "NOT COVERED for the deploy class: the CP application's own session, not a "
-        "per-handle connection; DeployLeaseStore maps it to store-unreachable "
-        "without a test here",
+        "test_connection_lost_before_commit_writes_nothing_and_a_fresh_acquire_works"
     ),
     "a_marker_must_cite_a_different_incarnation_than_the_leases": (
         "n/a",
@@ -103,14 +102,11 @@ DEPLOY_CASE_MAP: dict[str, str | tuple[str, str]] = {
         "(test_deploy_lease_marker_is_spent_once)",
     ),
     "a_release_commit_lost_is_unknown_and_never_retried": (
-        "n/a",
-        "NOT COVERED for the deploy class: the caller owns the transaction; "
-        "DeployLeaseStore never retries and never commits",
+        "test_release_commit_lost_the_repeat_is_a_replay"
     ),
     "a_release_must_match_the_held_lease": "test_deploy_lease_release_must_name_the_holder",
     "an_acquire_commit_lost_is_unknown_and_never_retried": (
-        "n/a",
-        "NOT COVERED for the deploy class: as for the release commit",
+        "test_acquire_commit_lost_the_retry_returns_the_same_lease_with_remaining_ttl"
     ),
     "an_untouched_release_may_be_reacquired": "test_deploy_lease_released_is_clean_whatever_host_mutated",
     "covers_is_judged_on_store_time": "test_deploy_lease_covers_is_judged_on_store_time",
@@ -221,10 +217,56 @@ class Runtime:
         self.engine.dispose()
 
 
+LEASE_ROLE = "platform_target_lease"
+
+
+def make_lease_role(postgres_url: str) -> None:
+    """The governed role op's part, done by the test cluster: a plain LOGIN role.
+    The migration never creates it."""
+    server = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+    with server.connect() as conn:
+        if (
+            conn.execute(
+                text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": LEASE_ROLE}
+            ).first()
+            is None
+        ):
+            conn.execute(text(f"CREATE ROLE {LEASE_ROLE} LOGIN"))
+    server.dispose()
+
+
+def drop_lease_role(postgres_url: str) -> None:
+    server = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+    with server.connect() as conn:
+        conn.execute(text(f"DROP ROLE IF EXISTS {LEASE_ROLE}"))
+    server.dispose()
+
+
+def grant_lease_role(db: Any) -> None:
+    """Connect on this case database and run the migration's own grant statements
+    (the F-G step that follows the role op when the role did not exist at migrate)."""
+    migration = _migration()
+    with db.admin.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(
+            text(f'GRANT CONNECT ON DATABASE "{db.admin.url.database}" TO {LEASE_ROLE}')
+        )
+        for statement in migration.role_grant_statements():
+            conn.execute(text(statement))
+
+
+@pytest.fixture(scope="module")
+def lease_role(postgres_url: str) -> Any:
+    make_lease_role(postgres_url)
+    yield LEASE_ROLE
+    # module-scoped, so it runs after every case database has been dropped
+    drop_lease_role(postgres_url)
+
+
 @pytest.fixture
-def env(lane3_cases: Any, postgres_url: str, url_for: Any) -> Any:
+def env(lane3_cases: Any, postgres_url: str, url_for: Any, lease_role: str) -> Any:
     db = lane3_cases.new()
-    runtime = Runtime(db, url_for, postgres_url, "platform_api")
+    grant_lease_role(db)
+    runtime = Runtime(db, url_for, postgres_url, lease_role)
     try:
         yield db, runtime
     finally:
@@ -669,18 +711,40 @@ def _held_in(db: Any, role: str, schema: str) -> list[str]:
     return held
 
 
-def test_runtime_role_cp_lane3_privilege_proof(env: Any) -> None:
-    """The CP runtime role holds USAGE on `cp_deploy_lease` and EXECUTE on its five
-    functions, and NOTHING else: no table, sequence or column privilege there, no
-    rehearsal function, no `store_now`, nothing at all in `cp_lane3`."""
+def test_runtime_role_cp_lane3_privilege_proof(
+    env: Any, url_for: Any, postgres_url: str
+) -> None:
+    """The dedicated lease role holds USAGE on `cp_deploy_lease` and EXECUTE on its
+    five functions, and NOTHING else: no table, sequence or column privilege there,
+    no rehearsal function, no `store_now`, nothing at all in `cp_lane3`. The CP
+    application role `platform_api` (the app, relay and ops containers) holds
+    NOTHING in either schema, and cannot call a lease function."""
     db, rt = env
-    assert _held_in(db, "platform_api", "cp_lane3") == []
-    held = _held_in(db, "platform_api", "cp_deploy_lease")
+    assert _held_in(db, LEASE_ROLE, "cp_lane3") == []
+    held = _held_in(db, LEASE_ROLE, "cp_deploy_lease")
     qualified = sorted(
         "function:cp_deploy_lease." + signature.replace(", ", ",")
         for signature in RUNTIME_FUNCTIONS
     )
     assert sorted(["schema:USAGE", *qualified]) == sorted(held)
+    for role in ("platform_api", "app_user", "public"):
+        assert _held_in(db, role, "cp_lane3") == [], role
+        assert _held_in(db, role, "cp_deploy_lease") == [], role
+    app = create_engine(
+        url_for(postgres_url, db.admin.url.database, user="platform_api")
+    )
+    try:
+        with app.connect() as conn:
+            for statement in (
+                "SELECT * FROM cp_deploy_lease.deploy_standing('host-a')",
+                "SELECT cp_deploy_lease.deploy_covers(gen_random_uuid(), 'r')",
+            ):
+                with pytest.raises(DBAPIError) as raised:
+                    conn.execute(text(statement))
+                conn.rollback()
+                assert getattr(raised.value.orig, "sqlstate", None) == "42501"
+    finally:
+        app.dispose()
     # and in fact, over a real connection as that role:
     with rt.engine.connect() as conn:
         for statement in (
@@ -702,14 +766,6 @@ def test_runtime_role_cp_lane3_privilege_proof(env: Any) -> None:
             assert getattr(raised.value.orig, "sqlstate", None) == "42501", statement
 
 
-@pytest.mark.parametrize("role", ["public", "app_user"])
-def test_no_other_runtime_role_holds_anything_in_the_deploy_schema(
-    env: Any, role: str
-) -> None:
-    db, _rt = env
-    assert _held_in(db, role, "cp_deploy_lease") == []
-
-
 def test_the_migrations_privilege_read_back_passes_and_sees_a_leak(env: Any) -> None:
     db, _rt = env
     migration = _migration()
@@ -727,7 +783,18 @@ def test_the_migrations_privilege_read_back_passes_and_sees_a_leak(env: Any) -> 
         assert conn.execute(text(migration.SCHEMA_GRANT_PRESENT_SQL)).scalar_one() == 1
         assert conn.execute(text(migration.FUNCTION_GRANT_COUNT_SQL)).scalar_one() == 5
         assert conn.execute(text(migration.LANE3_REACH_SQL)).scalar_one() is False
+        assert conn.execute(text(migration.APP_ROLE_REACH_SQL)).scalar_one() is False
+        assert conn.execute(text(migration.LEASE_ROLE_LANE3_SQL)).scalar_one() is False
     for leak, query in (
+        (
+            "GRANT USAGE ON SCHEMA cp_deploy_lease TO platform_api",
+            migration.APP_ROLE_REACH_SQL,
+        ),
+        (
+            "GRANT EXECUTE ON FUNCTION cp_deploy_lease.deploy_standing(text) "
+            "TO platform_api",
+            migration.APP_ROLE_REACH_SQL,
+        ),
         (
             "GRANT SELECT ON cp_deploy_lease.deploy_host_leases TO platform_api",
             migration.RELATION_ACL_SQL,
@@ -828,30 +895,45 @@ def test_the_after_read_back_holds_on_the_migrated_database(env: Any) -> None:
     db, _rt = env
     results = _readback(db, "after")
     assert [name for name, held in results if not held] == []
-    assert len(results) == 9
+    assert len(results) == 12
 
 
-def test_the_after_read_back_names_a_leak(env: Any) -> None:
+def test_the_after_read_back_fails_until_the_role_op_and_its_grants(
+    lane3_cases: Any, lease_role: str
+) -> None:
+    db = lane3_cases.new()  # migrated; the lease role is NOT yet granted here
+    failed = [name for name, held in _readback(db, "after") if not held]
+    assert set(failed) == {
+        "schema-usage-granted-to-lease-role",
+        "five-functions-granted-to-lease-role",
+    }
+
+
+def test_the_after_read_back_names_a_leak_to_the_application_role(env: Any) -> None:
     db, _rt = env
     with db.admin.begin() as conn:
         conn.execute(
-            text("GRANT SELECT ON cp_deploy_lease.deploy_host_leases TO platform_api")
+            text(
+                "GRANT EXECUTE ON FUNCTION cp_deploy_lease.deploy_standing(text) "
+                "TO platform_api"
+            )
         )
-    failed = [name for name, held in _readback(db, "after") if not held]
-    assert failed == ["no-table-or-sequence-acl"]
+    failed = {name for name, held in _readback(db, "after") if not held}
+    assert "app-role-has-nothing-in-the-lease-schema" in failed
+    assert "no-function-acl-beyond-the-five" in failed
 
 
-def test_the_before_read_back_reports_the_runtime_roles_attributes_by_name(
-    env: Any,
-) -> None:
+def test_the_before_read_back_reports_the_roles_by_name(env: Any) -> None:
     db, _rt = env
     checks, info = _readback(db, "before")
     held = dict(checks)
-    assert held["runtime-role-exists"] and held["runtime-role-nosuperuser"]
+    assert held["app-role-exists"] and held["app-role-nosuperuser"]
+    assert held["lease-role-absent-or-a-plain-login-role"]
     # the schema exists in the case database, so the pre-migration check says so
     assert held["schema-cp_deploy_lease-absent"] is False
-    assert "info runtime_role=platform_api" in info
-    assert "info role_superuser=false" in info
+    assert "info lease_role=platform_target_lease" in info
+    assert "info lease_role_present=true" in info
+    assert "info app_role_superuser=false" in info
     assert not [line for line in info if "=" in line and not line.startswith("info ")]
 
 
@@ -999,6 +1081,9 @@ def test_deploy_acquire_without_a_marker_after_expiry_is_reconcile_marker_requir
     rt.acquire(ttl_seconds=120)
     db.advance(None, 121)
     _refused("reconcile-marker-required", lambda: rt.acquire(dispatch_run="x"))
+    with pytest.raises(MarkerRequired) as raised:
+        rt.acquire(dispatch_run="x")
+    assert raised.value.expired_dispatch_run == RUN
 
 
 def test_standing_names_the_expired_dispatch_and_a_deletion_cannot_free_the_host(
@@ -1069,3 +1154,251 @@ def test_the_class_bounds_are_also_table_constraints(env: Any) -> None:
             conn.execute(text(base.format(cls=cls, ttl=ttl, mx=mx)))
     with db.admin.begin() as conn:  # the same shape inside its class is accepted
         conn.execute(text(base.format(cls="run_job", ttl=2520, mx=2520)))
+
+
+# ── commit lost / connection lost (the four named cases, architect ruling 5) ─
+
+
+def _kill_after(db: Any, rt: Any, work: Callable[[Any], Any], *, commit: bool) -> Any:
+    """Run `work` on a lease-role connection, optionally commit it, then terminate
+    the backend (the connection is lost). Returns what `work` answered."""
+    conn = rt.engine.connect()
+    try:
+        pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        answered = work(DeployLeaseStore(conn))
+        if commit:
+            conn.commit()
+        with db.admin.connect().execution_options(isolation_level="AUTOCOMMIT") as adm:
+            adm.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid})
+        if not commit:
+            with pytest.raises(DBAPIError):
+                conn.commit()  # the connection is gone: nothing can commit
+        return answered
+    finally:
+        with contextlib.suppress(Exception):
+            conn.invalidate()  # never return a dead connection to the pool
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def test_acquire_commit_lost_the_retry_returns_the_same_lease_with_remaining_ttl(
+    env: Any,
+) -> None:
+    db, rt = env
+    first = _kill_after(db, rt, lambda s: s.acquire(**_acquire_args()), commit=True)
+    db.advance(None, 10)
+    retry = rt.acquire(ttl_seconds=60)  # the agent never saw the answer
+    assert retry.lease_id == first.lease_id
+    assert retry.ttl_seconds == 50  # the REMAINING ttl
+    assert rt.standing().standing == "held"
+
+
+def test_release_commit_lost_the_repeat_is_a_replay(env: Any) -> None:
+    db, rt = env
+    lease = rt.acquire()
+    done = _kill_after(
+        db,
+        rt,
+        lambda s: s.release(
+            lease_id=lease.lease_id,
+            target_ref=TARGET,
+            principal_ref=PRINCIPAL,
+            host_mutated=True,
+        ),
+        commit=True,
+    )
+    db.advance(None, 5)
+    again = rt.release(lease, host_mutated=True)
+    assert (again.released_at, again.replay) == (done.released_at, True)
+
+
+def test_connection_lost_before_commit_writes_nothing_and_a_fresh_acquire_works(
+    env: Any,
+) -> None:
+    db, rt = env
+    _kill_after(db, rt, lambda s: s.acquire(**_acquire_args()), commit=False)
+    _refused("lease-host-unknown", lambda: rt.standing())  # no row, no pointer
+    assert _scalar(db, "SELECT count(*) FROM cp_deploy_lease.deploy_host_leases") == 0
+    assert rt.acquire().ttl_seconds == 60  # a fresh acquire is a fresh lease
+
+
+def test_connection_lost_after_commit_is_the_same_as_commit_lost(env: Any) -> None:
+    db, rt = env
+    first = _kill_after(db, rt, lambda s: s.acquire(**_acquire_args()), commit=True)
+    assert _scalar(db, "SELECT count(*) FROM cp_deploy_lease.deploy_host_leases") == 1
+    assert rt.acquire().lease_id == first.lease_id
+
+
+def _acquire_args() -> dict[str, Any]:
+    return {
+        "target_ref": TARGET,
+        "host_id": HOST,
+        "dispatch_run": RUN,
+        "ttl_seconds": 60,
+        "max_seconds": 600,
+        "lease_class": "serving",
+        "principal_ref": PRINCIPAL,
+    }
+
+
+# ── a moved pointer fails closed (architect ruling 4) ───────────────────────
+
+
+def _move_pointer(db: Any) -> None:
+    """What a rehearsal reprovision acquire does: point the host elsewhere."""
+    with db.admin.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE cp_lane3.host_current_lease SET lease_id = gen_random_uuid() "
+                "WHERE host_id = :h"
+            ),
+            {"h": HOST},
+        )
+
+
+def test_covers_renew_and_release_refuse_a_superseded_lease(env: Any) -> None:
+    db, rt = env
+    lease = rt.acquire(ttl_seconds=120, max_seconds=600)
+    _move_pointer(db)
+    _refused("lease-superseded", lambda: rt.covers(lease))
+    _refused("lease-superseded", lambda: rt.renew(lease))
+    _refused("lease-superseded", lambda: rt.release(lease))
+
+
+def test_consume_fails_closed_when_the_host_pointer_moved(env: Any) -> None:
+    from sqlalchemy.orm import Session
+
+    db, rt = env
+    lease = rt.acquire(dispatch_run=dispatch_run(TARGET, "d-1"))
+
+    @contextlib.contextmanager
+    def stores(_db: Any) -> Any:
+        with Session(rt.engine) as session:
+            yield DeployLeaseStore(session)
+
+    backend = LeaseCoveringBackend(inner=None, stores=stores)  # type: ignore[arg-type]
+
+    def covers() -> bool:
+        return backend.covers_lease(
+            None,  # type: ignore[arg-type]
+            target_ref=TARGET,
+            dispatch_id="d-1",
+            lease_id=str(lease.lease_id),
+            store_now=db.now(),
+        )
+
+    assert covers() is True
+    _move_pointer(db)
+    assert covers() is False  # no covering lease: consume refuses
+
+
+def test_a_released_leases_replay_survives_the_pointer_moving_on(env: Any) -> None:
+    db, rt = env
+    lease = rt.acquire()
+    first = rt.release(lease)
+    rt.acquire(dispatch_run="dispatch-run-2")  # the next deploy moves the pointer
+    assert rt.release(lease).replay is True
+    assert rt.release(lease).released_at == first.released_at
+
+
+# ── release after expiry (architect ruling 3) ───────────────────────────────
+
+
+def test_a_late_release_is_lease_expired_and_the_host_stays_expired_unreleased(
+    env: Any,
+) -> None:
+    db, rt = env
+    lease = rt.acquire(ttl_seconds=120)
+    db.advance(None, 120)
+    _refused("lease-expired", lambda: rt.release(lease))
+    standing = rt.standing()
+    assert (standing.standing, standing.dispatch_run) == ("expired_unreleased", RUN)
+
+
+def test_a_release_replay_from_before_the_expiry_is_still_a_200_replay(
+    env: Any,
+) -> None:
+    db, rt = env
+    lease = rt.acquire(ttl_seconds=120)
+    rt.release(lease)
+    db.advance(None, 500)
+    assert rt.release(lease).replay is True
+
+
+# ── the marker is read under the host row lock, in the acquire's transaction ─
+
+
+def test_the_marker_is_decided_inside_the_acquires_own_transaction(env: Any) -> None:
+    """`deploy_acquire` ANSWERS "marker required" (it does not raise), so the host row
+    lock it took is still held while the caller reads Control's marker; a competing
+    acquire blocks until this transaction ends."""
+    db, rt = env
+    rt.acquire(ttl_seconds=120)
+    db.advance(None, 121)
+    holder = rt.engine.connect()
+    try:
+        with pytest.raises(MarkerRequired) as needed:
+            DeployLeaseStore(holder).acquire(
+                **{**_acquire_args(), "dispatch_run": "dispatch-run-2"}
+            )
+        assert needed.value.expired_dispatch_run == RUN
+        # the lock is held by `holder`: another session cannot take the row
+        with db.admin.connect() as other:
+            other.execute(text("SET lock_timeout = '300ms'"))
+            with pytest.raises(DBAPIError):
+                other.execute(
+                    text(
+                        "SELECT 1 FROM cp_lane3.host_current_lease "
+                        "WHERE host_id = :h FOR UPDATE"
+                    ),
+                    {"h": HOST},
+                )
+        # ...and the same transaction completes with the marker Control decided
+        lease = DeployLeaseStore(holder).acquire(
+            **{
+                **_acquire_args(),
+                "dispatch_run": "dispatch-run-2",
+                "reconcile_marker": MARKER_1,
+            }
+        )
+        holder.commit()
+    finally:
+        holder.close()
+    assert (
+        _scalar(
+            db,
+            "SELECT reopened_from_run FROM cp_deploy_lease.deploy_host_leases "
+            "WHERE lease_id = :l",
+            l=str(lease.lease_id),
+        )
+        == RUN
+    )
+
+
+# ── the lane3 integrity checker accepts a pointer into a deploy lease (R1) ───
+
+
+def test_the_lane3_integrity_checker_accepts_a_pointer_into_a_deploy_lease(
+    env: Any,
+) -> None:
+    from vendor_cp.deployment import lane3_store_integrity as integrity
+
+    db, rt = env
+    migration = ROOT / "alembic" / "versions" / "v023_lane3_store.py"
+
+    def violations() -> tuple[str, ...]:
+        with db.admin.connect() as conn:
+            return integrity.check_store_integrity(
+                integrity.session_execute(conn), migration_path=migration
+            )
+
+    before = violations()  # the case clock replaces `store_now`: a known baseline
+    lease = rt.acquire()
+    assert _scalar(
+        db,
+        "SELECT lease_id::text FROM cp_lane3.host_current_lease WHERE host_id = :h",
+        h=HOST,
+    ) == str(lease.lease_id)  # the shared pointer now names a cp_deploy_lease row
+    assert violations() == before
+    rt.release(lease)
+    assert violations() == before

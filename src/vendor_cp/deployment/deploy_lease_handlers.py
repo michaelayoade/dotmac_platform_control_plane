@@ -15,9 +15,9 @@ routes and delegates every other route to the handlers it wraps (5b's
 becomes reachable through the router when the v2 mirror is vendored.)
 
 Covers-in-consume is NOT a route here: 5b's consume calls
-`ConsumptionBackend.covers_lease` at step 4 of the atomic consume, in the same
-transaction as the nonce and the effect, and `deploy_lease_consume.LeaseCoveringBackend`
-fills that port with `cp_deploy_lease.deploy_covers`.
+`ConsumptionBackend.covers_lease` at step 4 of the atomic consume, and
+`deploy_lease_consume.LeaseCoveringBackend` fills that port with
+`cp_deploy_lease.deploy_covers`.
 
 ## What the handler decides and what it does not
 
@@ -33,13 +33,17 @@ fills that port with `cp_deploy_lease.deploy_covers`.
   the ttl and total the lease was stored with, so it works after consume.
 * Release names only the lease: the holder is the authenticated target and its
   credential principal, checked in the database.
-* The reconcile marker is NEVER read from the request. After an expired-unreleased
-  lease the agent posts a signed read-only reconcile observation; Control issues the
-  marker when the observed release matches, and the `LeasePort` hands the handler
-  that issued, unspent marker. A caller cannot supply its own.
-* Every database refusal aborts only a SAVEPOINT: the request's nonce still
-  commits and the caller gets a typed, signed answer. A store fault (unreachable,
-  error) is raised, so the whole request rolls back and the caller retries.
+* The reconcile marker is NEVER read from the request and never derived by CP:
+  only Control's `reconcile_marker` decision, through the `LeasePort`, supplies it.
+* Every lease call runs on the DEDICATED lease role's own transaction
+  (`deploy_lease_engine`), never the request's: a refusal rolls that transaction
+  back and is answered typed and signed while the request's nonce still commits; a
+  store fault (unreachable, error) is raised, so the request rolls back and the
+  caller retries (the functions are idempotent under retry).
+* The reconcile marker is read inside the acquire's own transaction, under the host
+  row lock: `deploy_acquire` ANSWERS "marker required" with the expired dispatch's
+  run (it does not raise), CP asks Control's `reconcile_marker` port for exactly
+  that dispatch, and calls again in the same transaction.
 
 `LeasePort` is the one seam left for Control (the plan of a pending dispatch and
 its issued marker); `UnconfiguredLeasePort` fails closed until it is composed.
@@ -57,8 +61,8 @@ from typing import Any, Final, Protocol
 from vendor_cp.deployment.deploy_lease import (
     DeployLease,
     DeployLeaseRefused,
-    DeployLeaseStore,
     LeasePlanRefused,
+    MarkerRequired,
     dispatch_run,
     lease_bounds,
 )
@@ -237,16 +241,15 @@ class LeaseHandlers:
         self,
         *,
         inner: TargetHandlers,
+        stores: Callable[[Any], AbstractContextManager[Any]],
         port: LeasePort | None = None,
-        store_factory: Callable[[Any], Any] = DeployLeaseStore,
-        savepoint: Callable[[Any], AbstractContextManager[Any]] = lambda db: (
-            db.begin_nested()
-        ),
     ) -> None:
+        """`stores(request_db)` yields a lease store on the DEDICATED lease role's own
+        transaction (commit on success, rollback on a refusal or fault); see
+        `deploy_lease_engine`. The request's session is never used for a lease."""
         self._inner = inner
         self._port: LeasePort = port or UnconfiguredLeasePort()
-        self._store_factory = store_factory
-        self._savepoint = savepoint
+        self._stores = stores
 
     # ── routing ─────────────────────────────────────────────────────────────
 
@@ -276,12 +279,12 @@ class LeaseHandlers:
         operation: Callable[[Any], Any],
         names: Mapping[str, str] | None = None,
     ) -> tuple[Any, HandlerResult | None, str | None]:
-        """Run one store call in a savepoint. A typed refusal rolls back only the
-        savepoint and is answered; a store fault propagates (full rollback).
-        Returns `(result, refusal answer, refusal code)`."""
+        """Run one lease operation in its own transaction on the lease role. A typed
+        refusal rolls it back and is answered (the request's nonce still commits); a
+        store fault propagates. Returns `(result, refusal answer, refusal code)`."""
         try:
-            with self._savepoint(db):
-                return operation(self._store_factory(db)), None, None
+            with self._stores(db) as store:
+                return operation(store), None, None
         except DeployLeaseRefused as refusal:
             status = refusal_http_status(refusal.code)
             if status is None:
@@ -290,15 +293,6 @@ class LeaseHandlers:
             if name in LEASE_ERRORS:
                 status = 409
             return None, _refusal(name, status), refusal.code
-
-    def _expired_dispatch(self, call: AuthenticatedCall, db: Any) -> str | None:
-        """The dispatch id whose lease row is the host's expired-unreleased one."""
-        standing, refusal, _ = self._guarded(
-            db, lambda store: store.standing(self._host(call))
-        )
-        if refusal is not None or standing.standing != "expired_unreleased":
-            return None
-        return str(standing.dispatch_run).rsplit("#", 1)[-1]
 
     # ── lease/acquire ───────────────────────────────────────────────────────
 
@@ -336,29 +330,28 @@ class LeaseHandlers:
                 max_ttl=bounds.max_ttl,
             )
 
-        def take(marker: str | None) -> Any:
-            return self._guarded(
-                db,
-                lambda store: store.acquire(
-                    target_ref=call.principal.target_ref,
-                    host_id=self._host(call),
-                    dispatch_run=dispatch_run(call.principal.target_ref, dispatch_id),
-                    ttl_seconds=ttl,
-                    max_seconds=bounds.max_seconds,
-                    lease_class=bounds.lease_class,
-                    principal_ref=call.principal.principal_ref,
-                    reconcile_marker=marker,
-                ),
-                _ACQUIRE_NAMES,
+        def acquire(store: Any, marker: str | None) -> Any:
+            return store.acquire(
+                target_ref=call.principal.target_ref,
+                host_id=self._host(call),
+                dispatch_run=dispatch_run(call.principal.target_ref, dispatch_id),
+                ttl_seconds=ttl,
+                max_seconds=bounds.max_seconds,
+                lease_class=bounds.lease_class,
+                principal_ref=call.principal.principal_ref,
+                reconcile_marker=marker,
             )
 
-        lease, refusal, code = take(None)
-        if code == "reconcile-marker-required":
-            # The host's last lease expired unreleased. Control decides the marker
-            # over the verified reconcile observation of THAT dispatch; CP names the
-            # dispatch (from the lease row) and says whether it was consumed.
-            expired = self._expired_dispatch(call, db)
-            if expired is not None:
+        def take(store: Any) -> Any:
+            try:
+                return acquire(store, None)
+            except MarkerRequired as needed:
+                # The host's last lease expired unreleased, and the function still
+                # holds the host row lock in THIS transaction. Control decides the
+                # marker over the verified reconcile observation of the EXPIRED
+                # dispatch; CP names that dispatch (from the lease row) and says
+                # whether it was consumed. CP derives nothing.
+                expired = needed.expired_dispatch_run.rsplit("#", 1)[-1]
                 marker = self._port.reconcile_marker(
                     db,
                     target_ref=call.principal.target_ref,
@@ -367,8 +360,11 @@ class LeaseHandlers:
                         db, target_ref=call.principal.target_ref, dispatch_id=expired
                     ),
                 )
-                if marker is not None:
-                    lease, refusal, code = take(marker)
+                if marker is None:
+                    raise
+                return acquire(store, marker)
+
+        lease, refusal, _ = self._guarded(db, take, _ACQUIRE_NAMES)
         if refusal is not None:
             return refusal
         assert isinstance(lease, DeployLease)  # noqa: S101 - typing narrow

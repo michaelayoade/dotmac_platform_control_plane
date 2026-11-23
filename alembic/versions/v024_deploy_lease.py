@@ -9,12 +9,16 @@ deploy or one role job. This is the *production class* beside the rehearsal clas
 * **A new schema, `cp_deploy_lease`, not new objects in `cp_lane3`.** The
   rehearsal store's integrity pins (`lane3_store_integrity`) are an EXACT set of
   `cp_lane3` functions, triggers, constraints and indexes, and the standing rule
-  is that no runtime role holds anything in `cp_lane3`. A deploy class inside
-  `cp_lane3` would either break both or need the runtime role granted into it.
-  Here the CP runtime role holds `USAGE` on `cp_deploy_lease` and `EXECUTE` on
-  five functions of it, and NOTHING in `cp_lane3` (not `store_now()`, not
-  `USAGE`): the functions are `SECURITY DEFINER`, owned by the migrator, and
-  reach `cp_lane3` themselves.
+  is that no runtime role holds anything in `cp_lane3`. The functions are
+  `SECURITY DEFINER`, owned by the migrator, and reach `cp_lane3` themselves.
+* **The grant goes to a DEDICATED role, never to `platform_api`** (architect
+  review of PR 269, ruling 6). The app, relay and ops containers all connect as
+  `platform_api`, and under W-i the database trusts the caller's asserted
+  principal, so that role must hold nothing here. `platform_target_lease` (a plain
+  LOGIN role, made by the governed role op, never by this migration) alone gets
+  USAGE on the schema and EXECUTE on the five functions: here if it exists when the
+  migration runs, otherwise by `role_grant_statements()` once the role op has made
+  it. The target-API lease store connects with that role only.
 * **One writer per host across both classes (M10).** Both classes take the SAME
   row lock: `cp_lane3.host_current_lease`, `FOR UPDATE`, keyed by host. The
   deploy functions read and move that row's `lease_id` pointer, so a host held
@@ -58,8 +62,9 @@ deploy or one role job. This is the *production class* beside the rehearsal clas
 
 ## Refusal codes
 
-The CLOSED code set of `lease_store.REFUSAL_CODES`, plus two added for this class
-(`reconcile-marker-required`, `lease-max-reached`, `lease-not-renewable`). Mapping
+The CLOSED code set of `lease_store.REFUSAL_CODES`, plus four added for this class
+(`reconcile-marker-required`, raised by the store from the function's own answer,, `lease-max-reached`, `lease-not-renewable`,
+`lease-superseded`). Mapping
 used by the deploy class: an unknown lease or a malformed identity is
 `lease-role-unbound`; a lease held by another run, `lease-held-by-another-run`;
 an expired-unreleased host without a marker, `reconcile-marker-required`; a host
@@ -97,6 +102,14 @@ REFUSAL_SQLSTATE = "L3001"
 
 SCHEMA = "cp_deploy_lease"
 #: The CP runtime role that serves the target API. Granted, never created, here.
+#: The dedicated LOGIN role that alone may call the lease functions (architect review
+#: of PR 269, ruling 6). This migration NEVER creates it: the governed role op (F-G)
+#: does, with its credential delivered by CP secret delivery. If it exists when this
+#: migration runs the grants are made here; if not they are made by the same
+#: statements (`role_grant_statements`) once the role op has created it.
+LEASE_ROLE = "platform_target_lease"
+#: The CP application role (app, relay and ops containers all connect as it). It is
+#: NOT granted anything here, and the read-back proves it holds nothing.
 RUNTIME_ROLE = "platform_api"
 
 _GUARD = "public.forbid_mutation_of_append_only_table()"
@@ -139,6 +152,8 @@ TABLES_SQL = (
     f" AND char_length(dispatch_run) <= {_RUN_MAX}),"
     f" principal_ref text NOT NULL CHECK (principal_ref ~ {_PRINTABLE}),"
     f" reconcile_marker_ref text UNIQUE CHECK (reconcile_marker_ref ~ {_MARKER}),"
+    # the expired dispatch's run that the marker reopened (audit; Control's decision)
+    f" reopened_from_run text CHECK (reopened_from_run ~ {_RUN}),"
     " acquired_at timestamptz NOT NULL,"
     " expires_at timestamptz NOT NULL,"
     # per-grant TTL (the plan's lease_ttl_seconds) and the total the plan sizes
@@ -201,7 +216,9 @@ FUNCTIONS_SQL = (
     "p_run text, p_ttl integer, p_max integer, p_class text, p_principal text, "
     "p_marker text DEFAULT NULL) "
     "RETURNS TABLE (o_lease_id uuid, o_ttl integer, o_acquired_at timestamptz, "
-    "o_expires_at timestamptz, o_store_now timestamptz) " + _DEFINER + " AS $$ "
+    "o_expires_at timestamptz, o_store_now timestamptz, o_expired_run text) "
+    + _DEFINER
+    + " AS $$ "
     "DECLARE v_now timestamptz; v_acq timestamptz; v_prev uuid; v_exp timestamptz; "
     "v_dl record; v_rl record; v_new uuid; v_needs_marker boolean := false; "
     "BEGIN "
@@ -247,11 +264,17 @@ FUNCTIONS_SQL = (
     "IF v_dl.dispatch_run = p_run AND v_dl.principal_ref = p_principal "
     "AND v_dl.target_ref = p_target_ref THEN "
     "RETURN QUERY SELECT l.lease_id, "
-    "ceil(extract(epoch FROM (v_exp - v_now)))::integer, l.acquired_at, v_exp, v_now "
+    "ceil(extract(epoch FROM (v_exp - v_now)))::integer, l.acquired_at, v_exp, "
+    "v_now, NULL::text "
     f"FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_prev; "
     "RETURN; END IF; " + _refuse("lease-held-by-another-run") + " END IF; "
     # expired unreleased: only a reconcile marker reopens the host
-    "IF p_marker IS NULL THEN " + _refuse("reconcile-marker-required") + " END IF; "
+    # NOT an exception: the row lock must outlive this call so the caller reads
+    # Control's marker for exactly this dispatch UNDER the lock, in this
+    # transaction, and calls again. The expired lease's run is what Control needs.
+    "IF p_marker IS NULL THEN "
+    "RETURN QUERY SELECT NULL::uuid, NULL::integer, NULL::timestamptz, "
+    "NULL::timestamptz, v_now, v_dl.dispatch_run; RETURN; END IF; "
     "v_needs_marker := true; "
     "END IF; END IF; "
     "IF v_needs_marker AND EXISTS (SELECT 1 "
@@ -261,13 +284,15 @@ FUNCTIONS_SQL = (
     + " END IF; "
     "v_new := gen_random_uuid(); "
     f"INSERT INTO {SCHEMA}.deploy_host_leases (lease_id, host_id, target_ref, "
-    "dispatch_run, principal_ref, reconcile_marker_ref, acquired_at, expires_at, "
+    "dispatch_run, principal_ref, reconcile_marker_ref, reopened_from_run, "
+    "acquired_at, expires_at, "
     "lease_class, ttl_seconds, max_seconds) VALUES (v_new, p_host, p_target_ref, "
-    "p_run, p_principal, CASE WHEN v_needs_marker THEN p_marker END, v_acq, "
+    "p_run, p_principal, CASE WHEN v_needs_marker THEN p_marker END, "
+    "CASE WHEN v_needs_marker THEN v_dl.dispatch_run END, v_acq, "
     "v_acq + p_ttl * interval '1 second', p_class, p_ttl, p_max); "
     "UPDATE cp_lane3.host_current_lease SET lease_id = v_new WHERE host_id = p_host; "
     "RETURN QUERY SELECT l.lease_id, l.ttl_seconds, l.acquired_at, l.expires_at, "
-    f"v_now FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_new; END $$",
+    f"v_now, NULL::text FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_new; END $$",
     # deploy_covers: live, unreleased, held by THIS dispatch run, on store time.
     f"CREATE FUNCTION {SCHEMA}.deploy_covers(p_lease uuid, p_run text) "
     "RETURNS timestamptz " + _DEFINER + " AS $$ "
@@ -279,6 +304,10 @@ FUNCTIONS_SQL = (
     f"IF EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
     f"WHERE x.lease_id = p_lease) OR v_now >= {_EFF}(p_lease) THEN "
     + _refuse("lease-expired")
+    + " END IF; "
+    "IF (SELECT hc.lease_id FROM cp_lane3.host_current_lease hc "
+    "WHERE hc.host_id = v_l.host_id) IS DISTINCT FROM p_lease THEN "
+    + _refuse("lease-superseded")
     + " END IF; "
     "IF p_run IS NULL OR v_l.dispatch_run <> p_run THEN "
     + _refuse("lease-foreign-run")
@@ -305,6 +334,10 @@ FUNCTIONS_SQL = (
     + " END IF; "
     f"v_cur := {_EFF}(p_lease); "
     "IF v_now >= v_cur THEN " + _refuse("lease-expired") + " END IF; "
+    "IF (SELECT hc.lease_id FROM cp_lane3.host_current_lease hc "
+    "WHERE hc.host_id = v_l.host_id) IS DISTINCT FROM p_lease THEN "
+    + _refuse("lease-superseded")
+    + " END IF; "
     "IF v_l.lease_class = 'run_job' THEN "
     + _refuse("lease-not-renewable")
     + " END IF; "
@@ -345,6 +378,10 @@ FUNCTIONS_SQL = (
     + _refuse("lease-already-released")
     + " END IF; "
     f"IF v_now >= {_EFF}(p_lease) THEN " + _refuse("lease-expired") + " END IF; "
+    "IF (SELECT hc.lease_id FROM cp_lane3.host_current_lease hc "
+    "WHERE hc.host_id = v_l.host_id) IS DISTINCT FROM p_lease THEN "
+    + _refuse("lease-superseded")
+    + " END IF; "
     f"INSERT INTO {SCHEMA}.deploy_host_lease_releases (lease_id, released_at, "
     "host_mutated, released_by) VALUES (p_lease, v_now, p_host_mutated, "
     "p_principal) RETURNING released_at INTO v_at; "
@@ -385,7 +422,7 @@ INTERNAL_FUNCTIONS = ("stamp_deploy_release_time()", "effective_expiry(uuid)")
 #
 # Counts ACL entries whose grantee is neither the object's owner nor the one
 # intended grant. A NULL ACL is the type's DEFAULT, which `acldefault` expands.
-_RT = f"(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = '{RUNTIME_ROLE}')"
+_RT = f"(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = '{LEASE_ROLE}')"
 
 SCHEMA_ACL_SQL = (
     "SELECT count(*) FROM pg_catalog.pg_namespace n, "
@@ -438,9 +475,24 @@ DEFAULT_ACL_SQL = (
     "JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace "
     f"WHERE n.nspname = '{SCHEMA}'"
 )
-#: The runtime role still holds nothing in the rehearsal schema.
+#: The application role holds nothing in the rehearsal schema.
 LANE3_REACH_SQL = (
     f"SELECT pg_catalog.has_schema_privilege('{RUNTIME_ROLE}', 'cp_lane3', 'USAGE')"
+)
+#: ...and nothing in the deploy lease schema either: not USAGE, not one function.
+APP_ROLE_REACH_SQL = (
+    f"SELECT pg_catalog.has_schema_privilege('{RUNTIME_ROLE}', '{SCHEMA}', 'USAGE') "
+    "OR EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n "
+    "ON n.oid = p.pronamespace WHERE n.nspname = "
+    f"'{SCHEMA}' AND pg_catalog.has_function_privilege("
+    f"'{RUNTIME_ROLE}', p.oid, 'EXECUTE'))"
+)
+LEASE_ROLE_EXISTS_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_roles WHERE rolname = " f"'{LEASE_ROLE}'"
+)
+#: The lease role holds nothing in the rehearsal schema (evaluated only if it exists).
+LEASE_ROLE_LANE3_SQL = (
+    f"SELECT pg_catalog.has_schema_privilege('{LEASE_ROLE}', 'cp_lane3', 'USAGE')"
 )
 OWNER_NOT_MIGRATOR_SQL = (
     "SELECT count(*) FROM ("
@@ -462,8 +514,9 @@ PREFLIGHT_ROLE_SQL = (
     "SELECT rolsuper, rolcreaterole FROM pg_catalog.pg_roles "
     "WHERE rolname = current_user"
 )
-PREFLIGHT_RUNTIME_ROLE_SQL = (
-    f"SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = '{RUNTIME_ROLE}'"
+PREFLIGHT_LEASE_ROLE_SQL = (
+    "SELECT rolsuper, rolcanlogin, rolcreaterole FROM pg_catalog.pg_roles "
+    f"WHERE rolname = '{LEASE_ROLE}'"
 )
 PREFLIGHT_EVENT_TRIGGERS_SQL = "SELECT count(*) FROM pg_catalog.pg_event_trigger"
 PREFLIGHT_DEFAULT_ACL_SQL = (
@@ -528,13 +581,15 @@ def _preflight(connection) -> None:  # type: ignore[no-untyped-def]
             refuse("migration-role-is-superuser")
         if row[1] is not False:
             refuse("migration-role-has-createrole")
-        runtime = connection.exec_driver_sql(PREFLIGHT_RUNTIME_ROLE_SQL).one_or_none()
-        if runtime is None:
-            refuse("runtime-role-absent")
-        # Only the attribute that makes a grant meaningless is refused here. The
-        # rest of the attribute set is U16's names-only read-back, not a guess.
-        if runtime[0] is not False:
-            refuse("runtime-role-is-superuser")
+        # The dedicated role is made by the governed role op, not here. If it is
+        # already there it must be a plain LOGIN role.
+        lease_role = connection.exec_driver_sql(PREFLIGHT_LEASE_ROLE_SQL).one_or_none()
+        if lease_role is not None and (
+            lease_role[0] is not False
+            or lease_role[1] is not True
+            or lease_role[2] is not False
+        ):
+            refuse("lease-role-is-not-a-plain-login-role")
         if connection.exec_driver_sql(PREFLIGHT_EVENT_TRIGGERS_SQL).scalar_one():
             refuse("event-triggers-exist")
         if connection.exec_driver_sql(PREFLIGHT_DEFAULT_ACL_SQL).scalar_one():
@@ -551,6 +606,19 @@ def _preflight(connection) -> None:  # type: ignore[no-untyped-def]
             != PUBLIC_GUARD_SHA256
         ):
             refuse("append-only-guard-changed")
+
+
+def role_grant_statements() -> tuple[str, ...]:
+    """The ONLY grants of this class: USAGE on the schema and EXECUTE on the five
+    functions, to the dedicated lease role. Run by the migration if the role exists,
+    otherwise by the governed role op once it has created the role."""
+    return (
+        f"GRANT USAGE ON SCHEMA {SCHEMA} TO {LEASE_ROLE}",
+        *(
+            f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{signature} TO {LEASE_ROLE}"
+            for signature in RUNTIME_ROLE_FUNCTIONS
+        ),
+    )
 
 
 def upgrade() -> None:
@@ -571,34 +639,42 @@ def upgrade() -> None:
         connection.exec_driver_sql(
             f"REVOKE ALL ON FUNCTION {SCHEMA}.{signature} FROM PUBLIC"
         )
-    # The one grant of this migration (W-i): the runtime role may call the five
-    # functions and nothing else. No table, no sequence, nothing in cp_lane3.
-    connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA {SCHEMA} TO {RUNTIME_ROLE}")
-    for signature in RUNTIME_ROLE_FUNCTIONS:
-        connection.exec_driver_sql(
-            f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{signature} TO {RUNTIME_ROLE}"
-        )
+    with _pinned_search_path(connection):
+        granted = bool(connection.exec_driver_sql(LEASE_ROLE_EXISTS_SQL).scalar_one())
+    if granted:
+        run(role_grant_statements())
     with _pinned_search_path(connection):
         for sql, message in (
-            (SCHEMA_ACL_SQL, "an ACL entry on the schema beyond the one grant"),
+            (SCHEMA_ACL_SQL, "an ACL entry on the schema beyond the lease role's"),
             (RELATION_ACL_SQL, "an ACL entry on a table or sequence"),
             (COLUMN_ACL_SQL, "a column ACL entry"),
-            (FUNCTION_ACL_SQL, "an ACL entry on a function beyond the five grants"),
+            (FUNCTION_ACL_SQL, "an ACL entry on a function beyond the lease role's"),
             (DEFAULT_ACL_SQL, "a default-privilege rule names the schema"),
             (OWNER_NOT_MIGRATOR_SQL, "an object not owned by the migrating role"),
         ):
             if connection.exec_driver_sql(sql).scalar_one():
                 raise RuntimeError(f"v024_deploy_lease: {message}")
-        if connection.exec_driver_sql(SCHEMA_GRANT_PRESENT_SQL).scalar_one() != 1:
-            raise RuntimeError("v024_deploy_lease: the schema grant is not in place")
-        if connection.exec_driver_sql(FUNCTION_GRANT_COUNT_SQL).scalar_one() != len(
-            RUNTIME_ROLE_FUNCTIONS
-        ):
-            raise RuntimeError("v024_deploy_lease: the function grants are not exact")
+        if connection.exec_driver_sql(APP_ROLE_REACH_SQL).scalar_one():
+            raise RuntimeError(
+                "v024_deploy_lease: the application role reaches the lease schema"
+            )
         if connection.exec_driver_sql(LANE3_REACH_SQL).scalar_one():
             raise RuntimeError(
-                "v024_deploy_lease: the runtime role reaches the rehearsal schema"
+                "v024_deploy_lease: the application role reaches the rehearsal schema"
             )
+        if granted:
+            if connection.exec_driver_sql(SCHEMA_GRANT_PRESENT_SQL).scalar_one() != 1:
+                raise RuntimeError("v024_deploy_lease: the schema grant is missing")
+            if connection.exec_driver_sql(FUNCTION_GRANT_COUNT_SQL).scalar_one() != len(
+                RUNTIME_ROLE_FUNCTIONS
+            ):
+                raise RuntimeError(
+                    "v024_deploy_lease: the function grants are not exact"
+                )
+            if connection.exec_driver_sql(LEASE_ROLE_LANE3_SQL).scalar_one():
+                raise RuntimeError(
+                    "v024_deploy_lease: the lease role reaches the rehearsal schema"
+                )
 
 
 def downgrade() -> None:

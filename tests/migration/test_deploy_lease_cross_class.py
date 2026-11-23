@@ -60,10 +60,18 @@ DEPLOY = _load("test_deploy_lease_for_cross_class", HERE / "test_deploy_lease.py
 VENDORED = SUPPORT.load_vendored()
 
 
+@pytest.fixture(scope="module")
+def lease_role(postgres_url: str) -> Any:
+    DEPLOY.make_lease_role(postgres_url)
+    yield DEPLOY.LEASE_ROLE
+    DEPLOY.drop_lease_role(postgres_url)
+
+
 @pytest.fixture
-def env(lane3_cases: Any, postgres_url: str, url_for: Any) -> Any:
+def env(lane3_cases: Any, postgres_url: str, url_for: Any, lease_role: str) -> Any:
     db = lane3_cases.new()
-    runtime = DEPLOY.Runtime(db, url_for, postgres_url, "platform_api")
+    DEPLOY.grant_lease_role(db)
+    runtime = DEPLOY.Runtime(db, url_for, postgres_url, lease_role)
     try:
         yield db, runtime
     finally:

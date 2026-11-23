@@ -72,10 +72,21 @@ def test_the_closed_set_holds_no_stray_member() -> None:
             ),
         )
     )
+    # `reconcile-marker-required` is not raised in SQL: the function answers it and the
+    # store raises it, so it is read from the store module's literals
+    deploy |= set(
+        re.findall(
+            r'"(reconcile-marker-required)"',
+            (ROOT / "src" / "vendor_cp" / "deployment" / "deploy_lease.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+    )
     assert {
         "lease-max-reached",
         "reconcile-marker-required",
         "lease-not-renewable",
+        "lease-superseded",
     } <= deploy
     used = _sql_codes() | _python_literals() | deploy
     assert lease_store.REFUSAL_CODES - used == set()

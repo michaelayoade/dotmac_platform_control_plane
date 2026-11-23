@@ -17,7 +17,6 @@ is touched.
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import sys
@@ -44,6 +43,7 @@ from target_api_support import (  # noqa: E402
     send,
 )
 
+from vendor_cp.deployment.deploy_lease import DeployLeaseStore
 from vendor_cp.deployment.deploy_lease_handlers import (
     LEASE_ERRORS,
     LeaseHandlers,
@@ -51,6 +51,22 @@ from vendor_cp.deployment.deploy_lease_handlers import (
 )
 from vendor_cp.deployment.lease_store import REFUSAL_CODES
 from vendor_cp.deployment.target_api import contract as c
+
+
+def _load_deploy_helpers() -> Any:
+    import importlib.util
+
+    name = "test_deploy_lease_helpers"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parent / "test_deploy_lease.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
 
 VECTOR_FILE = (
     Path(__file__).resolve().parents[1]
@@ -62,6 +78,7 @@ VECTOR_FILE = (
 #: until Control CI is green; a re-vendor changes this pin in the same change.
 PINNED_V2_SHA256 = "95756ba1d9a1e4c12cafef82ba4fb7e343c29c677772087bec2dd3bbc5374988"
 V2 = json.loads(VECTOR_FILE.read_bytes())
+DEPLOY = _load_deploy_helpers()
 
 _SEED = b64u(bytes(range(1, 33)))
 _PUBLIC = b64u(
@@ -123,10 +140,11 @@ class _Replay:
         self.at = 0
 
         @contextmanager
-        def sessions() -> Any:
+        def stores(_request_db: Any) -> Any:
+            # the lease role's own transaction, exactly as `lease_store_scope`
             session = Session(engine)
             try:
-                yield session
+                yield DeployLeaseStore(session)
                 session.commit()
             except BaseException:
                 session.rollback()
@@ -137,9 +155,11 @@ class _Replay:
         runtime = build_runtime(
             directory=StaticDirectory(record(public_key_b64u=_PUBLIC)),
             response_seed=_RESPONSE_SEED,
-            handlers=LeaseHandlers(inner=RecordingHandlers(), port=self.port),
+            handlers=LeaseHandlers(
+                inner=RecordingHandlers(), stores=stores, port=self.port
+            ),
         )
-        self.client = client_for(dataclasses.replace(runtime, sessions=sessions))
+        self.client = client_for(runtime)
 
     def clock_to(self, at: int) -> None:
         target = self.base.timestamp() + at
@@ -163,16 +183,26 @@ class _Replay:
         )
 
 
+@pytest.fixture(scope="module")
+def lease_role(postgres_url: str) -> Any:
+    DEPLOY.make_lease_role(postgres_url)
+    yield DEPLOY.LEASE_ROLE
+    DEPLOY.drop_lease_role(postgres_url)
+
+
 @pytest.fixture
-def replay_factory(lane3_cases: Any, postgres_url: str, url_for: Any, monkeypatch: Any):
+def replay_factory(
+    lane3_cases: Any, postgres_url: str, url_for: Any, monkeypatch: Any, lease_role: str
+):
     from sqlalchemy import create_engine
 
     engines: list[Any] = []
 
     def make() -> _Replay:
         db = lane3_cases.new()
+        DEPLOY.grant_lease_role(db)
         engine = create_engine(
-            url_for(postgres_url, db.admin.url.database, user="platform_api")
+            url_for(postgres_url, db.admin.url.database, user=lease_role)
         )
         engines.append(engine)
         return _Replay(db, engine, monkeypatch)

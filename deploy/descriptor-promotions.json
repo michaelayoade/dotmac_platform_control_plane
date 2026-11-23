@@ -254,9 +254,9 @@
       "promoted_at": "2026-11-23",
       "kind": "composition_change",
       "candidate": "deploy/candidates/2026-11-23-deploy-lease.toml",
-      "descriptor_sha256": "sha256:36c6a4f616bf1cd8568161d61d53990f7d4ad4597e10e6c2baa1def383fa64fd",
+      "descriptor_sha256": "sha256:cfa471524ac235fe1bf76bff70e767ab04126e0a8260c4a868a045eaa31348e4",
       "supersedes": "sha256:6becbdb31ca0af59b198cd7b82b9c1637aeddbfbd544174a27f4920896e67e07",
-      "summary": "Declares vendor v024_deploy_lease in place of v023_lane3_store, and the cp_deploy_lease schema it creates: the production (deploy) lease class, written only through five SECURITY DEFINER functions. The CP runtime role platform_api is granted USAGE on that schema and EXECUTE on those five functions, and nothing in cp_lane3 or on any table. The descriptor declares the schema, one permitted isolation entry for platform_api and three denied entries for the other runtime roles.",
+      "summary": "Declares vendor v024_deploy_lease in place of v023_lane3_store, and the cp_deploy_lease schema it creates: the production (deploy) lease class, written only through five SECURITY DEFINER functions. Only a dedicated LOGIN role, platform_target_lease (made by the governed role op, never by the migration), is granted USAGE on that schema and EXECUTE on those five functions; platform_api and every other standing role hold nothing there or in cp_lane3. The descriptor declares the schema and four denied isolation entries (app_user, platform_api and both outbox dispatchers).",
       "changed_sections": [
         "migration",
         "database"

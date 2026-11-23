@@ -58,6 +58,7 @@ from vendor_cp.deployment.deploy_lease import (
     DeployRelease,
     DeployRenewal,
     DeployStanding,
+    MarkerRequired,
 )
 from vendor_cp.deployment.deploy_lease_consume import LeaseCoveringBackend
 from vendor_cp.deployment.deploy_lease_handlers import (
@@ -131,7 +132,7 @@ class FakeStore:
         self.fault: bool = False
         self.replay: bool = False
         self.standing_value = "held"
-        self.refuse_first: str | None = None
+        self.refuse_first: bool = False
 
     def _go(self, name: str, **kw: Any) -> None:
         self.calls.append((name, kw))
@@ -143,7 +144,8 @@ class FakeStore:
     def acquire(self, **kw: Any) -> DeployLease:
         if self.refuse_first and kw["reconcile_marker"] is None:
             self.calls.append(("acquire", kw))
-            raise DeployLeaseRefused(self.refuse_first)
+            # the function ANSWERS "marker required" with the expired lease's run
+            raise MarkerRequired(f"{TARGET}#d-expired")
         self._go("acquire", **kw)
         ttl = kw["ttl_seconds"]
         return DeployLease(UUID(_LEASE), ttl, _NOW, _NOW + timedelta(seconds=ttl), _NOW)
@@ -182,21 +184,16 @@ class Rig:
         self.store = FakeStore()
         self.inner = RecordingHandlers(HandlerResult(200, {"consumed": True}))
         self.nonces = MemoryNonces()
-        self.savepoints = 0
+        self.scopes = 0
         self.port = port or FakePort(plans or {"d-1": _SERVING}, marker)
         rig = self
 
         @contextmanager
-        def savepoint(db: Any) -> Any:
-            rig.savepoints += 1
-            yield
+        def stores(db: Any) -> Any:
+            rig.scopes += 1  # one transaction of the lease role
+            yield rig.store
 
-        handlers = LeaseHandlers(
-            inner=self.inner,
-            port=self.port,
-            store_factory=lambda db: self.store,
-            savepoint=savepoint,
-        )
+        handlers = LeaseHandlers(inner=self.inner, port=self.port, stores=stores)
         runtime = build_runtime(
             directory=StaticDirectory(record(public_key_b64u=_PUBLIC)),
             response_seed=_RESPONSE_SEED,
@@ -272,28 +269,28 @@ def test_no_marker_is_asked_for_unless_the_host_expired_unreleased() -> None:
 
 
 def test_the_marker_comes_only_from_controls_port_over_the_expired_dispatch() -> None:
-    """After an expired-unreleased lease CP names that dispatch (from the lease row)
-    and says whether it was consumed; Control's port decides the marker."""
+    """After an expired-unreleased lease the function answers with the expired
+    dispatch; CP asks Control's port about exactly that dispatch (and says whether it
+    was consumed), then acquires again in the SAME lease transaction."""
     rig = Rig(marker=_MARKER)
-    rig.store.refuse_first = "reconcile-marker-required"
-    rig.store.standing_value = "expired_unreleased"
+    rig.store.refuse_first = True
     rig.port.consumed = True
     response = _acquire(rig, 600)
     assert response.status_code == 200
-    assert rig.port.decisions == [("d-1", True)]  # the lease row's dispatch, consumed
-    names = [n for n, _ in rig.store.calls]
-    assert names == ["acquire", "standing", "acquire"]
-    assert rig.store.calls[2][1]["reconcile_marker"] == _MARKER
+    assert rig.port.decisions == [("d-expired", True)]  # the lease row's dispatch
+    assert [n for n, _ in rig.store.calls] == ["acquire", "acquire"]
+    assert rig.store.calls[1][1]["reconcile_marker"] == _MARKER
+    assert rig.scopes == 1  # both calls ran in one transaction
 
 
 def test_without_a_marker_from_control_the_acquire_stays_refused() -> None:
     rig = Rig(marker=None)
-    rig.store.refuse_first = "reconcile-marker-required"
-    rig.store.standing_value = "expired_unreleased"
+    rig.store.refuse_first = True
     response = _acquire(rig, 600)
     assert response.status_code == 409
     assert response.json()["error"] == "reconcile_marker_required"
-    assert [n for n, _ in rig.store.calls] == ["acquire", "standing"]
+    assert [n for n, _ in rig.store.calls] == ["acquire"]  # no second attempt
+    assert rig.port.decisions == [("d-expired", False)]
 
 
 def test_a_missing_reconcile_marker_is_a_signed_409_reconcile_marker_required() -> None:
@@ -388,7 +385,7 @@ def test_a_store_refusal_is_a_typed_signed_answer_and_the_nonce_is_spent(
     assert response.json()["error"] == name
     assert "X-Dotmac-Response-Signature" in response.headers
     assert len(rig.nonces.spent) == 1
-    assert rig.savepoints >= 1  # the refusal rolled back a savepoint only
+    assert rig.scopes >= 1  # the refusal rolled back that lease transaction only
 
 
 def test_a_store_fault_is_not_a_typed_answer() -> None:
@@ -583,14 +580,11 @@ def _renew_rig() -> tuple[LeaseHandlers, FakeStore]:
     store = FakeStore()
 
     @contextmanager
-    def savepoint(_db: Any) -> Any:
-        yield
+    def stores(_db: Any) -> Any:
+        yield store
 
     handlers = LeaseHandlers(
-        inner=RecordingHandlers(),
-        port=FakePort({}),
-        store_factory=lambda _db: store,
-        savepoint=savepoint,
+        inner=RecordingHandlers(), port=FakePort({}), stores=stores
     )
     return handlers, store
 
@@ -709,12 +703,10 @@ def _consume_rig(db: Any) -> tuple[Any, FakeStore, _Backend, Any]:
     store, inner = FakeStore(), _Backend()
 
     @contextmanager
-    def savepoint(_db: Any) -> Any:
-        yield
+    def stores(_db: Any) -> Any:
+        yield store
 
-    backend = LeaseCoveringBackend(
-        inner, store_factory=lambda _db: store, savepoint=savepoint
-    )
+    backend = LeaseCoveringBackend(inner, stores=stores)
     handlers = TargetApiHandlers(
         consumption=ConsumptionService(backend),
         materials=MaterialsHandler(None),

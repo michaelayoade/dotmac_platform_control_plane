@@ -43,6 +43,7 @@ __all__ = [
     "DeployLeaseRefused",
     "DeployLeaseStore",
     "DeployRelease",
+    "MarkerRequired",
     "DeployRenewal",
     "DeployStanding",
     "LeaseBounds",
@@ -77,6 +78,20 @@ class DeployLeaseRefused(Exception):  # noqa: N818 - a refusal is the vocabulary
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class MarkerRequired(DeployLeaseRefused):
+    """The host's last lease expired unreleased and no marker was supplied.
+
+    `deploy_acquire` ANSWERS this (it does not raise inside the database), so the
+    row lock it took stays held until the caller's transaction ends: the caller
+    reads Control's marker for `expired_dispatch_run` under that lock and calls
+    again in the same transaction.
+    """
+
+    def __init__(self, expired_dispatch_run: str) -> None:
+        super().__init__("reconcile-marker-required")
+        self.expired_dispatch_run = expired_dispatch_run
 
 
 class LeasePlanRefused(Exception):  # noqa: N818
@@ -251,9 +266,11 @@ class DeployLeaseStore:
         principal_ref: str,
         reconcile_marker: str | None = None,
     ) -> DeployLease:
-        """Take the host's lease on the shared row lock, or raise a refusal."""
+        """Take the host's lease on the shared row lock, or raise a refusal. Raises
+        `MarkerRequired` (lock still held) when the host expired unreleased."""
         row = self._one(
-            "SELECT o_lease_id, o_ttl, o_acquired_at, o_expires_at, o_store_now "
+            "SELECT o_lease_id, o_ttl, o_acquired_at, o_expires_at, o_store_now, "
+            "o_expired_run "
             "FROM cp_deploy_lease.deploy_acquire(:target_ref, :host, :run, "
             "CAST(:ttl AS integer), CAST(:max AS integer), :class, :principal, "
             ":marker)",
@@ -268,6 +285,8 @@ class DeployLeaseStore:
                 "marker": reconcile_marker,
             },
         )
+        if row[0] is None:  # answered, not raised: the host row lock is still held
+            raise MarkerRequired(str(row[5]))
         return DeployLease(row[0], row[1], row[2], row[3], row[4])
 
     def covers(self, *, lease_id: UUID | str, dispatch_run: str) -> datetime:

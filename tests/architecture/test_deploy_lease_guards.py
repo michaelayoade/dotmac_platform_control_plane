@@ -82,20 +82,23 @@ def test_the_migration_is_expand_only_and_creates_no_role() -> None:
         assert forbidden not in code.split('"""', 2)[-1], forbidden
 
 
-def test_the_only_grants_are_usage_on_own_schema_and_execute_on_five_functions() -> (
-    None
-):
+def test_the_only_grants_are_to_the_dedicated_role_and_never_to_platform_api() -> None:
     module = _module()
     source = MIGRATION.read_text(encoding="utf-8")
     grants = re.findall(r'f?"(GRANT [^"]+)"', source)
     assert sorted(grants) == sorted(
         [
-            "GRANT USAGE ON SCHEMA {SCHEMA} TO {RUNTIME_ROLE}",
-            "GRANT EXECUTE ON FUNCTION {SCHEMA}.{signature} TO {RUNTIME_ROLE}",
+            "GRANT USAGE ON SCHEMA {SCHEMA} TO {LEASE_ROLE}",
+            "GRANT EXECUTE ON FUNCTION {SCHEMA}.{signature} TO {LEASE_ROLE}",
         ]
     )
     assert module.SCHEMA == "cp_deploy_lease"  # type: ignore[attr-defined]
+    assert module.LEASE_ROLE == "platform_target_lease"  # type: ignore[attr-defined]
     assert module.RUNTIME_ROLE == "platform_api"  # type: ignore[attr-defined]
+    statements = module.role_grant_statements()  # type: ignore[attr-defined]
+    assert len(statements) == 6
+    assert all(" TO platform_target_lease" in s for s in statements)
+    assert not [s for s in statements if "platform_api" in s]
     functions = module.RUNTIME_ROLE_FUNCTIONS  # type: ignore[attr-defined]
     assert sorted(f.split("(")[0] for f in functions) == [
         "deploy_acquire",
@@ -105,6 +108,8 @@ def test_the_only_grants_are_usage_on_own_schema_and_execute_on_five_functions()
         "deploy_standing",
     ]
     assert "GRANT" not in "".join(_statements())
+    code = source.split('"""', 2)[-1]
+    assert "CREATE ROLE" not in code  # the governed role op makes the role
 
 
 def test_every_function_is_definer_pinned_and_refuses_with_the_lease_sqlstate() -> None:

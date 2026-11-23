@@ -8,12 +8,14 @@ attestation re-verification, the approval-guarded finalizer) to the backend it
 wraps, so consumption is impossible without a covering lease and the wrapped
 backend never needs to know a lease exists.
 
-The call runs inside a SAVEPOINT. A refusal (`lease-expired`: released or past its
-store-time expiry, `lease-foreign-run`, `lease-role-unbound`: no such lease) rolls
-back only the savepoint and answers `False`, which consume turns into
-`no_covering_lease`; the surrounding transaction stays healthy so the nonce still
-commits. A store fault (unreachable, error) is raised: the request rolls back and
-the caller retries. A lease id that is not a UUID is not a covering lease.
+The call runs on the DEDICATED lease role's own transaction (`stores`), not the
+request's: `platform_api` holds nothing in the lease schema. A refusal
+(`lease-expired`: released or past its store-time expiry, `lease-foreign-run`,
+`lease-role-unbound`: no such lease, `lease-superseded`: the host pointer moved)
+answers `False`, which consume turns into `no_covering_lease`; the request's own
+transaction is untouched, so the nonce still commits. A store fault (unreachable,
+error) is raised: the request rolls back and the caller retries. A lease id that
+is not a UUID is not a covering lease.
 
 The run is `deploy_lease.dispatch_run(target_ref, dispatch_id)`, built from the
 dispatch's own target, never from the request.
@@ -29,11 +31,7 @@ from typing import Any, Final
 
 from sqlalchemy.orm import Session
 
-from vendor_cp.deployment.deploy_lease import (
-    DeployLeaseRefused,
-    DeployLeaseStore,
-    dispatch_run,
-)
+from vendor_cp.deployment.deploy_lease import DeployLeaseRefused, dispatch_run
 from vendor_cp.deployment.target_api.consumption import ConsumptionBackend, Resolution
 
 __all__ = ["COVERING_REFUSALS", "LeaseCoveringBackend"]
@@ -41,7 +39,12 @@ __all__ = ["COVERING_REFUSALS", "LeaseCoveringBackend"]
 #: The store refusals that mean "no lease covers this run" (everything else a
 #: `covers` can say is a store fault and is raised).
 COVERING_REFUSALS: Final = frozenset(
-    {"lease-expired", "lease-foreign-run", "lease-role-unbound"}
+    {
+        "lease-expired",
+        "lease-foreign-run",
+        "lease-role-unbound",
+        "lease-superseded",
+    }
 )
 _UUID: Final = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -53,14 +56,10 @@ class LeaseCoveringBackend:
         self,
         inner: ConsumptionBackend,
         *,
-        store_factory: Callable[[Any], Any] = DeployLeaseStore,
-        savepoint: Callable[[Any], AbstractContextManager[Any]] = lambda db: (
-            db.begin_nested()
-        ),
+        stores: Callable[[Any], AbstractContextManager[Any]],
     ) -> None:
         self._inner = inner
-        self._store_factory = store_factory
-        self._savepoint = savepoint
+        self._stores = stores
 
     def resolve(
         self, db: Session, *, request: Mapping[str, object], store_now: datetime
@@ -84,8 +83,8 @@ class LeaseCoveringBackend:
         if _UUID.fullmatch(lease_id) is None:
             return False
         try:
-            with self._savepoint(db):
-                self._store_factory(db).covers(
+            with self._stores(db) as store:
+                store.covers(
                     lease_id=lease_id,
                     dispatch_run=dispatch_run(target_ref, dispatch_id),
                 )
