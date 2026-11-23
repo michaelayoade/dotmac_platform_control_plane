@@ -729,3 +729,53 @@ def test_the_schema_holds_exactly_two_tables_and_no_rehearsal_object_moved(
         ).scalar_one()
     assert tables == {"deploy_host_leases", "deploy_host_lease_releases"}
     assert rehearsal == 6  # the six v023 tables: nothing added to `cp_lane3`
+
+
+# ── the names-only F-G read-back (plan for prod) ────────────────────────────
+
+
+def _readback(db: Any, phase: str) -> Any:
+    from vendor_cp.deployment import deploy_lease_readback as rb
+    from vendor_cp.deployment.lane3_store_integrity import (
+        begin_read_only,
+        session_execute,
+    )
+
+    source = rb.migration()
+    with db.admin.connect() as conn:
+        execute = session_execute(conn)
+        begin_read_only(execute)
+        if phase == "after":
+            return rb.run_after(execute, source=source)
+        return rb.run_before(execute, source=source)
+
+
+def test_the_after_read_back_holds_on_the_migrated_database(env: Any) -> None:
+    db, _rt = env
+    results = _readback(db, "after")
+    assert [name for name, held in results if not held] == []
+    assert len(results) == 9
+
+
+def test_the_after_read_back_names_a_leak(env: Any) -> None:
+    db, _rt = env
+    with db.admin.begin() as conn:
+        conn.execute(
+            text("GRANT SELECT ON cp_deploy_lease.deploy_host_leases TO platform_api")
+        )
+    failed = [name for name, held in _readback(db, "after") if not held]
+    assert failed == ["no-table-or-sequence-acl"]
+
+
+def test_the_before_read_back_reports_the_runtime_roles_attributes_by_name(
+    env: Any,
+) -> None:
+    db, _rt = env
+    checks, info = _readback(db, "before")
+    held = dict(checks)
+    assert held["runtime-role-exists"] and held["runtime-role-nosuperuser"]
+    # the schema exists in the case database, so the pre-migration check says so
+    assert held["schema-cp_deploy_lease-absent"] is False
+    assert "info runtime_role=platform_api" in info
+    assert "info role_superuser=false" in info
+    assert not [line for line in info if "=" in line and not line.startswith("info ")]
