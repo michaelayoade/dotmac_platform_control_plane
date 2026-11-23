@@ -329,14 +329,14 @@ FUNCTION_ACL_SQL = (
     "pg_catalog.acldefault('f'::\"char\", p.proowner))) a "
     f"WHERE n.nspname = '{SCHEMA}' AND a.grantee <> p.proowner "
     f"AND NOT (a.grantee = {_RT} AND a.privilege_type = 'EXECUTE' "
-    "AND NOT a.is_grantable AND p.proname LIKE 'deploy\\_%')"
+    "AND NOT a.is_grantable AND left(p.proname, 7) = 'deploy_')"
 )
 FUNCTION_GRANT_COUNT_SQL = (
     "SELECT count(*) FROM pg_catalog.pg_proc p "
     "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace, "
     "LATERAL pg_catalog.aclexplode(p.proacl) a "
     f"WHERE n.nspname = '{SCHEMA}' AND a.grantee = {_RT} "
-    "AND a.privilege_type = 'EXECUTE' AND p.proname LIKE 'deploy\\_%'"
+    "AND a.privilege_type = 'EXECUTE' AND left(p.proname, 7) = 'deploy_'"
 )
 DEFAULT_ACL_SQL = (
     "SELECT count(*) FROM pg_catalog.pg_default_acl d "
