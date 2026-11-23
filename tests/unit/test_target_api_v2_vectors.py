@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
 from target_api_support import (
     BASE,
@@ -65,6 +68,16 @@ LATER_OR_OTHER_OWNER = {
 METADATA = {"contract", "extends", "file", "note"}
 
 
+@pytest.fixture
+def db() -> Iterator[Session]:
+    engine = create_test_engine()
+    try:
+        with isolated_session(engine) as session:
+            yield session
+    finally:
+        engine.dispose()
+
+
 def test_v2_vector_file_is_vendored_byte_identical_and_pinned() -> None:
     assert hashlib.sha256(V2_FILE.read_bytes()).hexdigest() == PINNED_V2_SHA256
     assert V2["file"] == "target_api_v2.json"
@@ -75,7 +88,7 @@ def test_every_v2_group_is_accounted_for() -> None:
     assert set(V2) == set(ROUTER_REPLAYED) | set(LATER_OR_OTHER_OWNER) | METADATA
 
 
-def _rig(db_forwarded: list[Any]) -> Any:
+def _rig(db_forwarded: list[Any], db: Session) -> Any:
     def fake_record(session: Session, command: Any) -> Any:
         db_forwarded.append(command)
         return SimpleNamespace(
@@ -102,13 +115,9 @@ def _rig(db_forwarded: list[Any]) -> Any:
         ),
         # the v2 file publishes the same test seeds as v1
         denied=frozenset(),
-        session=_Db(),
+        session=db,
     )
     return client_for(runtime)
-
-
-class _Db:
-    """The sink's mismatch path writes an audit row; replays of valid wires don't."""
 
 
 _COUNTER = iter(range(1, 10_000))
@@ -131,28 +140,36 @@ def _post(client: Any, body: bytes) -> Any:
     )
 
 
-def test_router_replays_agent_observation_ok_wires_to_control_unchanged() -> None:
+def test_router_replays_agent_observation_ok_wires_to_control_unchanged(
+    db: Session,
+) -> None:
     for row in V2["agent_observation"]["ok"]:
         forwarded: list[Any] = []
         body = row["wire_utf8"].encode()
         assert observation_claims(body) == (KEY["key_id"], TARGET)
-        response = _post(_rig(forwarded), body)
+        response = _post(_rig(forwarded, db), body)
         assert response.status_code == 200, row["report_id"]
         (command,) = forwarded
         assert command.observation == body
 
 
-def test_router_replays_agent_observation_refusals() -> None:
+def test_router_replays_agent_observation_refusals(db: Session) -> None:
     for row in V2["agent_observation"]["refused_verify"]:
         forwarded: list[Any] = []
         body = row["wire_utf8"].encode()
-        # Signature verification is Control's: the sink only forwards.
-        assert _post(_rig(forwarded), body).status_code == 200, row["name"]
-        assert forwarded[0].observation == body
+        response = _post(_rig(forwarded, db), body)
+        # Signature verification is Control's: the sink forwards what claims to be
+        # the caller's own, and refuses (403, audited) what claims to be another's.
+        if observation_claims(body) == (KEY["key_id"], TARGET):
+            assert response.status_code == 200, row["name"]
+            assert forwarded[0].observation == body
+        else:
+            assert response.status_code == 403, row["name"]
+            assert forwarded == []
     for row in V2["agent_observation"]["refused_parse"]:
         forwarded = []
         body = bytes.fromhex(row["body_hex"])
-        response = _post(_rig(forwarded), body)
+        response = _post(_rig(forwarded, db), body)
         # Either the router refuses the JSON itself (duplicate key, not JSON), or
         # Control gets the exact bytes and refuses them as malformed. Never
         # accepted by this layer.
