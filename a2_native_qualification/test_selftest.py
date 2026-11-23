@@ -170,6 +170,8 @@ class ReceiptTests(unittest.TestCase):
                         str(tmp / "absent3.json"),
                         "--ci-runs",
                         str(tmp / "absent5.json"),
+                        "--observe-result",
+                        str(tmp / "absent6.json"),
                         "--control-junit",
                         str(tmp / "absent4.json"),
                         "--recovery-junit",
@@ -198,6 +200,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(doc["gate2_item"], "NATIVE_PG")
         self.assertIn("r.json", sums)
         self.assertEqual(doc["recovery_contract"]["status"], "FAIL")
+        self.assertEqual(doc["recovery_observe_native"]["status"], "FAIL")
         self.assertEqual(
             {s["id"]: s["status"] for s in doc["scenarios"]}[
                 "a_standing_withdrawal_locking"
@@ -238,6 +241,77 @@ class WheelhouseTests(unittest.TestCase):
         self.assertIn("dotmac-kernel==0.1.0 --hash=sha256:", text)
         self.assertEqual(len(m["wheels"]), 1)
         self.assertEqual(len(m["lock_sha256"]), 64)
+
+
+class C4Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        sys.path.insert(0, str(HERE / "c4"))
+        import c4
+
+        self.c4 = c4
+
+    def good_readback(self) -> dict:
+        return {
+            "canlogin": True,
+            "privileged_flags": False,
+            "connlimit": 2,
+            "valid_until_set": True,
+            "config": [
+                "default_transaction_read_only=on",
+                "statement_timeout=5s",
+                "lock_timeout=2s",
+                "idle_in_transaction_session_timeout=10s",
+            ],
+            "table_grants": ["SELECT"] * 4,
+            "column_privileges": 0,
+            "memberships": 0,
+            "db_create": False,
+            "schema_create": False,
+            "other_tables_select": [False, False],
+        }
+
+    def test_verifier_shape(self) -> None:
+        v = self.c4.scram_verifier("pw")
+        self.assertTrue(v.startswith("SCRAM-SHA-256$4096:"))
+
+    def test_readback_accepts_the_spec_and_refuses_each_drift(self) -> None:
+        self.assertTrue(all(self.c4.judge_readback(self.good_readback()).values()))
+        for key, bad in (
+            ("privileged_flags", True),
+            ("connlimit", 3),
+            ("table_grants", ["SELECT"] * 3),
+            ("table_grants", ["SELECT"] * 3 + ["UPDATE"]),
+            ("column_privileges", 1),
+            ("memberships", 1),
+            ("db_create", True),
+            ("other_tables_select", [True, False]),
+            ("config", ["statement_timeout=5s"]),
+        ):
+            doc = self.good_readback()
+            doc[key] = bad
+            self.assertFalse(all(self.c4.judge_readback(doc).values()), key)
+
+    def test_rendered_sql_has_no_placeholders_left(self) -> None:
+        sql = self.c4.render_create("r1", "db")
+        for token in ("rN", "<cp_db_name>", "<UTC now"):
+            self.assertNotIn(token, sql)
+
+    def test_observation_must_decode_with_a_parsed_authorization(self) -> None:
+        good = {
+            "observation": {
+                "schema": "a2_recovery_oracle_observation.v1",
+                "rows": {
+                    "command_ledger": [{}],
+                    "rollout": [{"has_authorization": True}],
+                    "attempts_and_settlements": [],
+                },
+            },
+            "original_authorization": {"k": 1},
+        }
+        self.assertTrue(all(self.c4.judge_observation(json.dumps(good)).values()))
+        self.assertFalse(all(self.c4.judge_observation("not json").values()))
+        good["original_authorization"] = {}
+        self.assertFalse(all(self.c4.judge_observation(json.dumps(good)).values()))
 
 
 class BaoGuardTests(unittest.TestCase):

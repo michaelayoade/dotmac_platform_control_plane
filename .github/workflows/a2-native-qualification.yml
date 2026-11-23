@@ -316,6 +316,57 @@ jobs:
             --build-arg "SOURCE_REVISION=${CP_COMMIT}" \
             --tag a2-native-qual-cp:local cp-src
           echo "CP_IMAGE_ID=$(docker image inspect --format '{{.Id}}' a2-native-qual-cp:local)" >> "$GITHUB_ENV"
+      - name: C4 recovery-observe native proof (kit-v5 container code in the built CP image)
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/out"
+          c4="$GITHUB_WORKSPACE/a2_native_qualification/c4"
+          work="$(mktemp -d)"
+          role_suffix="r${GITHUB_RUN_ID}"
+          role="a2_recovery_observer_${role_suffix}"
+          psql_() { docker compose -f cp-src/docker-compose.test.yml exec -T postgres psql -U postgres -d vendor_cp_test -v ON_ERROR_STOP=1 "$@"; }
+          fail() {
+            printf '{"status":"FAIL","stage":"%s","script":"a2_recovery_observe_container.py"}\n' "$1" > "$out/recovery-observe-native.json"
+            echo "recovery_observe_native: FAIL at $1"
+            exit 0
+          }
+          # 1. The vendored script must equal the pinned kit-v5 bytes.
+          grep -qxF "$(sha256sum "$c4/a2_recovery_observe_container.py" | cut -d' ' -f1)  a2_recovery_observe_container.py" "$c4/PINS" || fail pin_mismatch
+          script_sha="$(sha256sum "$c4/a2_recovery_observe_container.py" | cut -d' ' -f1)"
+          # 2. Seed one requested rollout (original authorization committed, no dispatch)
+          #    in the migrated real schema, with Control's own test doubles.
+          (cd control-src && poetry install --no-interaction >/dev/null 2>&1 \
+            && PYTHONPATH="$PWD" poetry run python "$c4/seed.py" \
+              "postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test" > "$work/coords.json") || fail seed
+          read -r ROLLOUT_REF PLAN_ID C1 C2 < <(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["rollout_ref"], d["plan_id"], d["rollout_command_id"], d["dispatch_command_id"])' "$work/coords.json") || fail coords
+          # 3. Create the observer role exactly as REVIEW-P2-L1 r3 C5 specifies.
+          umask 077
+          python3 -I -c 'import secrets; print(secrets.token_urlsafe(32))' > "$work/pw"
+          echo "::add-mask::$(cat "$work/pw")"
+          python3 -I "$c4/c4.py" scram "$work/pw" > "$work/verifier"
+          python3 -I "$c4/c4.py" render "$role_suffix" vendor_cp_test > "$work/create.sql"
+          psql_ -v "scram_verifier=$(cat "$work/verifier")" < "$work/create.sql" >/dev/null || fail observer_create
+          python3 -I "$c4/c4.py" readback-sql "$role" vendor_cp_test | psql_ -At > "$work/readback.json" || fail readback
+          # 4. Run the kit code, unchanged, inside the built CP image as that role.
+          printf 'A2_OBSERVE_DSN=postgresql://%s:%s@127.0.0.1:5439/vendor_cp_test?application_name=a2-recovery-observe\n' "$role" "$(cat "$work/pw")" > "$work/dsn.env"
+          docker run --rm -i --pull=never --network host --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp --pids-limit 64 --memory 512m \
+            --env-file "$work/dsn.env" a2-native-qual-cp:local \
+            python - "$ROLLOUT_REF" "$PLAN_ID" "$C1" "$C2" < "$c4/a2_recovery_observe_container.py" \
+            > "$work/stdout" 2> "$work/stderr"
+          rc=$?
+          # 5. Sensitivity: the observer must be unable to write.
+          psql_wrc=0
+          PGOPTIONS="" docker compose -f cp-src/docker-compose.test.yml exec -T postgres \
+            psql -U "$role" -d vendor_cp_test -v ON_ERROR_STOP=1 -c "UPDATE mod_deploy.rollouts SET status = status" >/dev/null 2>&1 || psql_wrc=$?
+          python3 -I "$c4/c4.py" result "$work/readback.json" "$work/stdout" "$work/stderr" "$rc" "$psql_wrc" "$script_sha" "${CP_IMAGE_ID:-unbuilt}" "$out/recovery-observe-native.json"
+          # Names-only drop, as r3 specifies (the CI database is disposable anyway).
+          psql_ -c "REVOKE ALL ON mod_deploy.rollouts, mod_deploy.rollout_attempts, mod_deploy.rollout_attempt_settlements, public.platform_idempotency_records FROM ${role}; REVOKE USAGE ON SCHEMA mod_deploy, public FROM ${role}; REVOKE CONNECT ON DATABASE vendor_cp_test FROM ${role}; DROP ROLE ${role};" >/dev/null 2>&1 || true
+          exit 0
       - name: Write the receipt
         if: always()
         run: |
@@ -334,6 +385,7 @@ jobs:
             --pytest-rc "${PYTEST_RC:-255}" \
             --wheelhouse-manifest "$RUNNER_TEMP/out/wheelhouse-manifest.json" \
             --ci-runs "$RUNNER_TEMP/out/ci-runs.json" \
+            --observe-result "$RUNNER_TEMP/out/recovery-observe-native.json" \
             --control-junit "$RUNNER_TEMP/out/control-junit.xml" \
             --recovery-junit "$RUNNER_TEMP/out/recovery-junit.xml" \
             --recovery-cp-commit "$RECOVERY_CP_COMMIT" \
