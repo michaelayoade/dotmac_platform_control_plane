@@ -80,6 +80,8 @@ jobs:
       REQUIRE_POSTGRES_TESTS: "1"
       LANE3_REQUIRE_FOUNDATION: "1"
       D16_DISPOSABLE_PG16: "1"
+      # The installed wheel carries no migration lineage; it travels as data.
+      VENDOR_MIGRATION_ROOT: ${{ github.workspace }}/cp-src
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -396,6 +398,13 @@ jobs:
           disable_mlock = true
           api_addr      = "http://127.0.0.1:8200"
           ui            = false
+          audit "file" "qualification" {
+            description = "disposable qualification audit sink"
+            options {
+              file_path = "/bao-audit/audit.log"
+              mode      = "0644"
+            }
+          }
           HCL
           docker pull "$OPENBAO_IMAGE"
           docker run -d --name a2-native-bao \

@@ -107,17 +107,10 @@ def run(addr: str, audit_container_path: str, audit_host_path: Path) -> dict[str
     version = str(health.get("version", ""))
     not_dev = bool(health.get("initialized")) and not health.get("sealed", True)
 
+    # The audit device is declared in the server config (API enabling is refused).
     secrets_used: list[str] = [root, init["keys"][0]]
     for step, (method, path, body) in {
         "mount": ("POST", "sys/mounts/kv", {"type": "kv", "options": {"version": "2"}}),
-        "audit": (
-            "PUT",
-            "sys/audit/file",
-            {
-                "type": "file",
-                "options": {"file_path": audit_container_path, "mode": "0644"},
-            },
-        ),
         "pol-recovery": (
             "PUT",
             "sys/policies/acl/purpose-recovery",
@@ -150,6 +143,10 @@ def run(addr: str, audit_container_path: str, audit_host_path: Path) -> dict[str
         )
         if code not in (200, 204):
             raise SystemExit("dispatch seed failed")
+
+    code, audit_doc = bao.call("GET", "sys/audit", root)
+    if code != 200 or "qualification/" not in (audit_doc.get("data") or audit_doc):
+        raise SystemExit("the declared file audit device is not enabled")
 
     checks: list[dict[str, Any]] = []
 
