@@ -577,6 +577,7 @@ def test_deploy_leases_on_two_hosts_do_not_exclude_each_other(env: Any) -> None:
 def test_deploy_evidence_is_append_only_even_for_the_owner(env: Any) -> None:
     db, rt = env
     lease = rt.acquire()
+    rt.renew(lease)  # a renewal row, so the row triggers have something to refuse
     rt.release(lease)
     for statement in (
         "UPDATE cp_deploy_lease.deploy_host_leases SET ttl_seconds = 1",
