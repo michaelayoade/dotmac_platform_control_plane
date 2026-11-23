@@ -91,6 +91,10 @@ class Resolution:
     #: Identifies the resolved context; a re-resolve must reproduce it.
     resolution_id: str
     context: Mapping[str, object]
+    #: The plan's operation (`deploy`, `rollback`, `run_job`) and its frozen
+    #: snapshot, as Control holds them. Absent for a backend that does not say.
+    operation: str | None = None
+    plan_snapshot: Mapping[str, Any] | None = None
 
 
 class ConsumptionBackend(Protocol):
@@ -218,6 +222,35 @@ def _committed(db: Session, dispatch_id: str) -> Mapping[str, Any] | None:
     return dict(result) if isinstance(result, dict) else None
 
 
+def _plan_fields(resolution: Resolution) -> dict[str, object]:
+    """What the target needs from the plan, under Control's own key names.
+
+    `dispatched_job` is `plan_snapshot.deploy_binding.dispatched_job` VERBATIM and
+    `plan_image` is the primary service's entry of `deploy_binding.images`
+    (`service`, `source`, `planned_repository`, `planned_digest`, ...) VERBATIM.
+    A `run_job` plan must carry a job and any other operation must not
+    (`dispatched_job_mismatch`); a run_job plan without a primary image is refused.
+    """
+    if resolution.operation is None or resolution.plan_snapshot is None:
+        return {}
+    binding = resolution.plan_snapshot.get("deploy_binding")
+    job = binding.get("dispatched_job") if isinstance(binding, Mapping) else None
+    fields: dict[str, object] = {"operation": resolution.operation}
+    if resolution.operation != "run_job":
+        if job is not None:
+            raise ConsumptionRefused("dispatched_job_mismatch")
+        return fields
+    if not isinstance(job, Mapping):
+        raise ConsumptionRefused("dispatched_job_mismatch")
+    try:
+        image = c.primary_image(resolution.plan_snapshot)
+    except c.TargetApiError:
+        raise ConsumptionRefused("plan_image_missing") from None
+    fields["dispatched_job"] = dict(job)
+    fields["plan_image"] = dict(image)
+    return fields
+
+
 class ConsumptionService:
     def __init__(self, backend: ConsumptionBackend) -> None:
         self._backend = backend
@@ -231,6 +264,7 @@ class ConsumptionService:
                 db, request=request, store_now=call.store_now
             )
             _own(call, resolution.target_ref)
+            plan = _plan_fields(resolution)
         except ConsumptionRefused as refusal:
             return _refusal(refusal)
         return HandlerResult(
@@ -239,6 +273,7 @@ class ConsumptionService:
                 "dispatch_id": resolution.dispatch_id,
                 "resolution_id": resolution.resolution_id,
                 "context": dict(resolution.context),
+                **plan,
             },
         )
 

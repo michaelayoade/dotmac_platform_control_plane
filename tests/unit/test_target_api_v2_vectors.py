@@ -33,6 +33,7 @@ from vendor_cp.deployment.target_api.consumption import (
     ConsumptionService,
     MaterialsHandler,
     ObservationHandler,
+    Resolution,
     TargetApiHandlers,
     UnwiredBackend,
 )
@@ -54,10 +55,10 @@ _RESPONSE_SEED = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8"
 
 ROUTER_REPLAYED = {
     "agent_observation": "test_router_replays_agent_observation_*",
+    "binding": "test_resolve_replays_the_binding_vectors_with_control_plan_key_names",
 }
 LATER_OR_OTHER_OWNER = {
     "attestation_pair": "consume backend, once #270 pins an a18 with the pair verifier",
-    "binding": "agent + Control: job params render and serving",
     "constants": "lease constants and endpoints_added: lane 5c (lease API)",
     "lease_body_vectors": "lane 5c",
     "lease_scenarios": "lane 5c",
@@ -189,3 +190,84 @@ def test_an_ok_wire_claiming_another_credential_or_target_is_not_forwarded() -> 
         body = row["wire_utf8"].replace(old, new).encode()
         assert observation_claims(body) is not None
         assert observation_claims(body) != (KEY["key_id"], TARGET)
+
+
+# ── resolve carries the plan's job and image (Foundation operator-job entry) ──
+
+
+class _PlanBackend(UnwiredBackend):
+    def __init__(self, operation: str, snapshot: Any) -> None:
+        self._operation = operation
+        self._snapshot = snapshot
+
+    def resolve(self, db: Any, *, request: Any, store_now: Any) -> Resolution:
+        return Resolution(
+            dispatch_id="dispatch-0001",
+            target_ref=TARGET,
+            resolution_id="res-1",
+            context={},
+            operation=self._operation,
+            plan_snapshot=self._snapshot,
+        )
+
+
+def _resolve(db: Session, operation: str, snapshot: Any) -> Any:
+    runtime = build_runtime(
+        directory=StaticDirectory(
+            record(public_key_b64u=KEY["public_b64u"], credential_id=KEY["key_id"])
+        ),
+        response_seed=_RESPONSE_SEED,
+        handlers=TargetApiHandlers(
+            consumption=ConsumptionService(_PlanBackend(operation, snapshot)),
+            materials=MaterialsHandler(None),
+            observations=ObservationHandler(None),
+        ),
+        denied=frozenset(),
+        session=db,
+    )
+    path = f"{BASE}/targets/{TARGET}/resolve"
+    body = b'{"dispatch_id":"dispatch-0001"}'
+    return send(
+        client_for(runtime),
+        method="POST",
+        path=path,
+        body=body,
+        headers=request_headers(
+            KEY["seed_b64u"],
+            method="POST",
+            path=path,
+            body=body,
+            nonce=f"{next(_COUNTER) + 9000:032x}",
+        ),
+    )
+
+
+def test_resolve_replays_the_binding_vectors_with_control_plan_key_names(
+    db: Session,
+) -> None:
+    job = V2["binding"]["job"]
+    snapshot = job["snapshot"]
+    binding = snapshot["deploy_binding"]
+    body = _resolve(db, job["operation"], snapshot).json()
+    assert body["operation"] == "run_job"
+    # verbatim: the signed plan's own values under the plan's own key names
+    assert body["dispatched_job"] == binding["dispatched_job"]
+    assert body["plan_image"] == binding["images"][0]
+    assert set(body["dispatched_job"]) >= {"argv", "materials", "name", "params"}
+    assert body["plan_image"]["source"] == "present"
+
+    serving = V2["binding"]["serving"]["deploy"]
+    deploy = _resolve(db, serving["operation"], serving["snapshot"]).json()
+    assert deploy["operation"] == "deploy"
+    assert "dispatched_job" not in deploy and "plan_image" not in deploy
+
+
+def test_resolve_refuses_the_dispatched_job_mismatch_vectors(db: Session) -> None:
+    rows = [
+        r for r in V2["binding"]["refused"] if r["code"] == "dispatched_job_mismatch"
+    ]
+    assert len(rows) == 2
+    for row in rows:
+        response = _resolve(db, row["operation"], row["snapshot"])
+        assert response.status_code == 409, row["name"]
+        assert response.json()["error"] == "dispatched_job_mismatch", row["name"]
