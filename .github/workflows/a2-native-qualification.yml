@@ -42,7 +42,7 @@ permissions:
 
 env:
   CP_REF_DEFAULT: 8e469b2fea9a007988c3815d138875c6df82aa11
-  CONTROL_REF_DEFAULT: 2ea62ee84e1ffdd4674c67b3fe66c2bc6c570006
+  CONTROL_REF_DEFAULT: 314039111cec4eb99cd4511a01c3ac769cebab70
   # CP draft #272 (recovery source): carries conformance/recovery_source/test_contract.py.
   RECOVERY_CP_REF: 73f88f1c82e0001d456ce787ba2176c27c1111fe
   # The Starter commit CP #269's own Lane 3 step pins for the Foundation import.
@@ -223,7 +223,11 @@ jobs:
             set -e
             poetry install --no-root --no-interaction --no-ansi
             poetry build --no-interaction --no-ansi
-            poetry run python -m pip install --disable-pip-version-check --no-deps --no-index --force-reinstall dist/*.whl "$RUNNER_TEMP"/control-dist/*.whl
+            # Control and ALL its runtime deps come from the hash-pinned lock and the
+            # wheelhouse, offline: the one install path that is proven. The CP wheel
+            # goes on top without dependencies.
+            poetry run python -m pip install --disable-pip-version-check --require-hashes --no-index --find-links "$RUNNER_TEMP/out/wheelhouse" -r "$RUNNER_TEMP/out/runtime-lock.txt"
+            poetry run python -m pip install --disable-pip-version-check --no-deps --no-index dist/*.whl
             # The suite must import the INSTALLED Control wheel and CP wheel,
             # never a sibling source tree.
             poetry run python -c 'import dotmac_deployment_control as c, vendor_cp, sys; sys.exit(0 if "site-packages" in c.__file__ and "site-packages" in vendor_cp.__file__ else 1)'
