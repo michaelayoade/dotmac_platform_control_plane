@@ -797,3 +797,23 @@ def test_the_covering_backend_delegates_everything_else(db: Any) -> None:
     backend.reverify_attestation(db, resolution=res, request={})
     backend.commit_consumption(db, resolution=res, request={}, store_now=_NOW)
     assert inner.calls == ["resolve", "reverify", "commit_consumption"]
+
+
+def test_a_superseded_lease_is_a_signed_409_lease_superseded_on_every_route() -> None:
+    """Control v2: covers, renew and release of a lease the host has moved on from
+    are refused `lease_superseded` (covers is NOT answered `false` here)."""
+    rig = Rig()
+    rig.store.refuse = "lease-superseded"
+    for route, body in (
+        ("lease/covers", {"lease_id": _LEASE, "dispatch_run": "d-1"}),
+        ("lease/release", {"lease_id": _LEASE, "host_mutated": False}),
+    ):
+        response = rig.call("POST", route, body)
+        assert response.status_code == 409, route
+        assert response.json()["error"] == "lease_superseded", route
+    handlers, store = _renew_rig()
+    store.refuse = "lease-superseded"
+    result = handlers.handle(
+        _renew_call(), None, {"lease_id": _LEASE, "dispatch_run": "d-1"}
+    )
+    assert (result.status, result.body["error"]) == (409, "lease_superseded")

@@ -74,9 +74,9 @@ VECTOR_FILE = (
     / "target_api"
     / "target_api_v2.json"
 )
-#: Control `contract/target_api_v2.json` at control-a18-20261122 2370860. Provisional
+#: Control `contract/target_api_v2.json` at control-a18-20261122 dfe7133a. Provisional
 #: until Control CI is green; a re-vendor changes this pin in the same change.
-PINNED_V2_SHA256 = "95756ba1d9a1e4c12cafef82ba4fb7e343c29c677772087bec2dd3bbc5374988"
+PINNED_V2_SHA256 = "4d847889d516d0613e0214c7b24c718ec9828c661be8bd0170b24a8e3da9be33"
 V2 = json.loads(VECTOR_FILE.read_bytes())
 DEPLOY = _load_deploy_helpers()
 
@@ -103,7 +103,7 @@ def test_the_vendored_v2_contract_is_byte_identical_to_the_pin() -> None:
     assert V2["constants"]["endpoints_added"] == [["POST", "lease/renew", "agent"]]
     assert set(V2["constants"]["lease_errors"]) == LEASE_ERRORS  # incl. not_renewable
     assert set(V2["constants"]["lease_errors"].values()) == {409}
-    assert len(V2["lease_scenarios"]) == 11
+    assert len(V2["lease_scenarios"]) == 14
 
 
 class _Port:
@@ -227,7 +227,7 @@ def _wire_body(
     return body
 
 
-@pytest.mark.parametrize("index", range(11))
+@pytest.mark.parametrize("index", range(14))
 def test_every_v2_lease_scenario_replays_through_the_real_router(
     replay_factory: Any, index: int
 ) -> None:

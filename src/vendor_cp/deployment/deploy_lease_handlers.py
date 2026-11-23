@@ -103,6 +103,8 @@ _STATUS: Final = {
     "lease-foreign-run": 409,
     "lease-already-released": 409,
     "lease-max-reached": 409,
+    "lease-not-renewable": 409,
+    "lease-superseded": 409,
     "reconcile-marker-required": 409,
     "reprovision-receipt-spent": 409,
     "lease-ttl-invalid": 400,
@@ -120,6 +122,7 @@ LEASE_ERRORS: Final = frozenset(
         "lease_max_reached",
         "lease_held",
         "lease_not_renewable",
+        "lease_superseded",
         "reconcile_marker_required",
     }
 )

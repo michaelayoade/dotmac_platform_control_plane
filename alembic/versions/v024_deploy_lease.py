@@ -302,13 +302,14 @@ FUNCTIONS_SQL = (
     "IF NOT FOUND THEN " + _refuse("lease-role-unbound") + " END IF; "
     "v_now := cp_lane3.store_now(); "
     f"IF EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
-    f"WHERE x.lease_id = p_lease) OR v_now >= {_EFF}(p_lease) THEN "
-    + _refuse("lease-expired")
-    + " END IF; "
+    "WHERE x.lease_id = p_lease) THEN " + _refuse("lease-expired") + " END IF; "
+    # superseded outranks expired: a lease the host moved on from is not "expired",
+    # it is no longer THIS host's lease (v2: covers/renew/release are `lease_superseded`)
     "IF (SELECT hc.lease_id FROM cp_lane3.host_current_lease hc "
     "WHERE hc.host_id = v_l.host_id) IS DISTINCT FROM p_lease THEN "
     + _refuse("lease-superseded")
     + " END IF; "
+    f"IF v_now >= {_EFF}(p_lease) THEN " + _refuse("lease-expired") + " END IF; "
     "IF p_run IS NULL OR v_l.dispatch_run <> p_run THEN "
     + _refuse("lease-foreign-run")
     + " END IF; "
@@ -333,11 +334,11 @@ FUNCTIONS_SQL = (
     + _refuse("lease-foreign-run")
     + " END IF; "
     f"v_cur := {_EFF}(p_lease); "
-    "IF v_now >= v_cur THEN " + _refuse("lease-expired") + " END IF; "
     "IF (SELECT hc.lease_id FROM cp_lane3.host_current_lease hc "
     "WHERE hc.host_id = v_l.host_id) IS DISTINCT FROM p_lease THEN "
     + _refuse("lease-superseded")
     + " END IF; "
+    "IF v_now >= v_cur THEN " + _refuse("lease-expired") + " END IF; "
     "IF v_l.lease_class = 'run_job' THEN "
     + _refuse("lease-not-renewable")
     + " END IF; "
@@ -377,11 +378,11 @@ FUNCTIONS_SQL = (
     "RETURN QUERY SELECT v_rel.released_at, true; RETURN; END IF; "
     + _refuse("lease-already-released")
     + " END IF; "
-    f"IF v_now >= {_EFF}(p_lease) THEN " + _refuse("lease-expired") + " END IF; "
     "IF (SELECT hc.lease_id FROM cp_lane3.host_current_lease hc "
     "WHERE hc.host_id = v_l.host_id) IS DISTINCT FROM p_lease THEN "
     + _refuse("lease-superseded")
     + " END IF; "
+    f"IF v_now >= {_EFF}(p_lease) THEN " + _refuse("lease-expired") + " END IF; "
     f"INSERT INTO {SCHEMA}.deploy_host_lease_releases (lease_id, released_at, "
     "host_mutated, released_by) VALUES (p_lease, v_now, p_host_mutated, "
     "p_principal) RETURNING released_at INTO v_at; "
