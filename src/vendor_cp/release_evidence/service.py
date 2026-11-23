@@ -58,6 +58,26 @@ class ReleaseEvidenceConflict(ConflictError):
     """Immutable catalogue evidence already says something different."""
 
 
+class ReleaseIdentity(Protocol):
+    """The immutable container-image identity every evidence command carries.
+
+    The artifact helpers below read only these five attributes, so one
+    publish-or-replay implementation serves the product-manifest command and the
+    deploy-unit command alike (see `vendor_cp.release_evidence.deploy_unit`).
+    """
+
+    @property
+    def product_code(self) -> str: ...
+    @property
+    def product_version(self) -> str: ...
+    @property
+    def artifact_digest(self) -> str: ...
+    @property
+    def artifact_ref(self) -> str: ...
+    @property
+    def source_revision(self) -> str: ...
+
+
 class ProductManifestStore(Protocol):
     """Hold canonical bytes and return the immutable URI recorded for them."""
 
@@ -173,9 +193,7 @@ def _fingerprint(command: ProductReleaseEvidenceCommand) -> str:
     )
 
 
-def _existing_artifact(
-    db: Session, command: ProductReleaseEvidenceCommand
-) -> ReleaseArtifact | None:
+def _existing_artifact(db: Session, command: ReleaseIdentity) -> ReleaseArtifact | None:
     by_digest = db.scalar(
         select(ReleaseArtifact).where(ReleaseArtifact.digest == command.artifact_digest)
     )
@@ -224,33 +242,34 @@ def _existing_attestation(
     artifact: ReleaseArtifact,
     digest: str,
     uri: str,
+    kind: AttestationKind = AttestationKind.PRODUCT_MANIFEST,
 ) -> ArtifactAttestation | None:
     attestations = list(
         db.scalars(
             select(ArtifactAttestation).where(
                 ArtifactAttestation.artifact_id == artifact.id,
-                ArtifactAttestation.attestation_kind
-                == AttestationKind.PRODUCT_MANIFEST.value,
+                ArtifactAttestation.attestation_kind == kind.value,
             )
         )
     )
+    label = kind.value.replace("_", "-")
     if not attestations:
         return None
     if len(attestations) != 1:
         raise ReleaseEvidenceConflict(
-            "catalogued artifact has ambiguous product-manifest attestations"
+            f"catalogued artifact has ambiguous {label} attestations"
         )
     attestation = attestations[0]
     if attestation.digest != digest or attestation.uri != uri:
         raise ReleaseEvidenceConflict(
-            "catalogued product-manifest attestation conflicts with supplied evidence"
+            f"catalogued {label} attestation conflicts with supplied evidence"
         )
     return attestation
 
 
 def _publish_or_replay(
     db: Session,
-    command: ProductReleaseEvidenceCommand,
+    command: ReleaseIdentity,
     *,
     artifact_digest: Digest,
     artifact_ref: str,
@@ -286,6 +305,7 @@ def _attest_or_replay(
     artifact: ReleaseArtifact,
     digest: str,
     uri: str,
+    kind: AttestationKind = AttestationKind.PRODUCT_MANIFEST,
 ) -> tuple[ArtifactAttestation, bool]:
     # Serialize all product-manifest decisions for one artifact. A row lock is
     # deliberately unavailable: Release Catalog gives platform_api SELECT and
@@ -301,9 +321,11 @@ def _attest_or_replay(
                 "SELECT pg_advisory_xact_lock("
                 "hashtextextended(CAST(:identity AS text), 0))"
             ),
-            {"identity": f"product_manifest:{artifact.id}"},
+            {"identity": f"{kind.value}:{artifact.id}"},
         )
-    attestation = _existing_attestation(db, artifact=artifact, digest=digest, uri=uri)
+    attestation = _existing_attestation(
+        db, artifact=artifact, digest=digest, uri=uri, kind=kind
+    )
     if attestation is not None:
         return attestation, True
     try:
@@ -311,7 +333,7 @@ def _attest_or_replay(
             attestation = attest_artifact(
                 db,
                 artifact_id=artifact.id,
-                attestation_kind=AttestationKind.PRODUCT_MANIFEST,
+                attestation_kind=kind,
                 uri=uri,
                 digest=digest,
             )
@@ -321,6 +343,7 @@ def _attest_or_replay(
             artifact=artifact,
             digest=digest,
             uri=uri,
+            kind=kind,
         )
         if attestation is None:
             raise
@@ -430,6 +453,7 @@ def ingest_product_release_evidence(
 
 __all__ = [
     "DirectoryProductManifestStore",
+    "ReleaseIdentity",
     "ProductManifestStore",
     "ProductReleaseEvidenceCommand",
     "ProductReleaseEvidenceResult",

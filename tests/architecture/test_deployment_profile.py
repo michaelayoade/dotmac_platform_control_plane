@@ -82,6 +82,7 @@ from vendor_cp.deployment_profile import (
     NEVER_WITHHELD_SURFACES,
     PRODUCTION_BOOTSTRAP,
     PRODUCTION_COMPOSED_V1,
+    PRODUCTION_DEPLOY_CONTROL_V1,
     PRODUCTION_KEYLESS_V1,
     PROFILE_ENV_VAR,
     PROFILES,
@@ -638,6 +639,77 @@ def test_keyless_profile_publishes_deploy_agent_and_preserves_bootstrap_routes()
         PROVISIONING_PREFIX,
     ):
         assert not _under(paths, prefix), prefix
+
+
+def test_m4_profile_adds_only_deployment_control_to_bootstrap() -> None:
+    """P-CP1 M4: the opt-in Deployment Control profile, and nothing else new."""
+    bootstrap = deployment_profile(PRODUCTION_BOOTSTRAP)
+    profile = deployment_profile(PRODUCTION_DEPLOY_CONTROL_V1)
+    assert profile.version == "1"
+    assert not profile.laboratory
+    assert profile.production_accepted
+    assert set(profile.surface_inventory) == {
+        "accounts",
+        "allocations",
+        "console",
+        "contracts",
+        "deployment_control",
+        "readiness",
+        "vendor_approvals",
+        "withdrawal_conflicts",
+    }
+    assert set(profile.surface_inventory) == set(bootstrap.surface_inventory) | {
+        "deployment_control"
+    }
+    # The frozen deploy-agent API stays withheld (M1): this profile is not the
+    # keyless profile and does not publish it.
+    assert "deploy_agent" in profile.withheld_surfaces
+    assert bootstrap.withheld_surfaces == profile.withheld_surfaces | {
+        "deployment_control"
+    }
+    # Existing profiles are unchanged (M4: "existing profiles stay unchanged").
+    assert bootstrap.version == "6"
+    assert deployment_profile(PRODUCTION_KEYLESS_V1).version == "1"
+    assert deployment_profile(PRODUCTION_COMPOSED_V1).version == "5"
+
+
+def test_m4_profile_publishes_control_surface_and_preserves_bootstrap_routes() -> None:
+    signatures = _route_signatures(
+        assembly.build_spec(deployment_profile(PRODUCTION_DEPLOY_CONTROL_V1))
+    )
+    bootstrap = _route_signatures(
+        assembly.build_spec(deployment_profile(PRODUCTION_BOOTSTRAP))
+    )
+    # Control a18 mounts its screens at several prefixes (deployments,
+    # deployment-sets, deploy-settings, arrivals), so select by owner, not path.
+    control = {s for s in signatures if ":deployment_control:" in s[2]}
+    # SENSITIVITY: the surface is really there, not an empty comparison.
+    assert control, sorted(signatures)
+    assert signatures - control == bootstrap
+    assert not {s for s in bootstrap if ":deployment_control:" in s[2]}
+    # Platform-admin session only: every Control route is a web:platform_admin
+    # route, none is a target-signed or bearer API route.
+    assert all(s[2].startswith("web:platform_admin:") for s in control), control
+    paths = {signature[0] for signature in signatures}
+    # Neither the frozen agent API nor a target-signed router rides along.
+    assert not _under(paths, "/platform/deploy/")
+    for prefix in (LICENSING_PREFIX, OFFERS_PREFIX, PROVISIONING_PREFIX):
+        assert not _under(paths, prefix), prefix
+    assert "/health/ready" in paths
+
+
+def test_m4_profile_is_declared_not_adopted() -> None:
+    """Adoption is its own governed act: no script or input names it yet."""
+    root = Path(__file__).resolve().parents[2]
+    for relative in (
+        "scripts/deploy_production.sh",
+        "src/vendor_cp/deployment/candidate_compose_inputs.py",
+        "src/vendor_cp/deployment/cp_transition_host.py",
+        ".github/candidate/acceptance.sh",
+    ):
+        assert (
+            PRODUCTION_DEPLOY_CONTROL_V1 not in (root / relative).read_text()
+        ), relative
 
 
 def test_production_composed_v1_publishes_exactly_its_declared_inventory() -> None:

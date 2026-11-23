@@ -13,8 +13,9 @@ lifecycle — never a product's tenants, subscribers, or customer data.
   **only** from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`).
   The testing extra supports tests only; runtime code never imports it. No
   copied kernel code or private imports (deny-case D5).
-- **Release Catalog:** `dotmac-release-catalog==0.1.0a4`, exact-pinned from the
-  same registry. The assembly composes its manifest and public Alembic lineage;
+- **Release Catalog:** `dotmac-release-catalog` 0.1.0a6, **PROVISIONAL**: a
+  git-sha pin to Starter PR #1145 (unreleased), re-pinned to the released
+  version from the same registry before anything merges. The assembly composes its manifest and public Alembic lineage;
   its `mod_rel` platform-catalog tables remain inaccessible to `app_user`.
 - **Entitlement Allocation:** `dotmac-entitlement-allocation==0.1.0a4`, also
   exact-pinned and composed through its public manifest and Alembic locator.

@@ -425,6 +425,86 @@ def release_record(args: argparse.Namespace) -> Result:
         )
 
 
+def release_record_deploy_unit(args: argparse.Namespace) -> Result:
+    """Catalogue one release's descriptor and its product.toml (attended write)."""
+    from vendor_cp.config import vendor_settings
+    from vendor_cp.release_evidence.deploy_unit import (
+        DeployUnitEvidenceCommand,
+        HeldDocuments,
+        record_deploy_unit_evidence,
+    )
+
+    if bool(args.product_spec_path) != bool(args.product_spec_digest):
+        raise refuse(
+            "usage.invalid_argument",
+            "--product-spec-path and --product-spec-digest come together",
+        )
+    deploy_unit = read_bytes(args.deploy_unit_path, what="deploy-unit descriptor")
+    product_spec = (
+        read_bytes(args.product_spec_path, what="product.toml")
+        if args.product_spec_path
+        else None
+    )
+    with platform_db() as db:
+        outcome = record_deploy_unit_evidence(
+            db,
+            DeployUnitEvidenceCommand(
+                command_id=args.command_id,
+                product_code=args.product_code,
+                product_version=args.product_version,
+                artifact_digest=args.artifact_digest,
+                artifact_ref=args.artifact_ref,
+                source_revision=args.source_revision,
+                descriptor_path=args.descriptor_path,
+                deploy_unit_digest=args.deploy_unit_digest,
+                deploy_unit=deploy_unit,
+                actor_admin_id=None,
+                operator_ref=args.operator_ref,
+                product_spec=product_spec,
+                product_spec_digest=args.product_spec_digest or None,
+            ),
+            held=HeldDocuments.under(vendor_settings.held_documents_directory),
+        )
+        references = {
+            "artifact_id": str(outcome.artifact_id),
+            "attestation_id": str(outcome.attestation_id),
+            "deploy_unit_uri": outcome.deploy_unit_uri,
+        }
+        if outcome.product_spec_attestation_id is not None:
+            references["product_spec_attestation_id"] = str(
+                outcome.product_spec_attestation_id
+            )
+        return Result(
+            command="release record-deploy-unit",
+            data={"replayed": outcome.replayed},
+            references=references,
+        )
+
+
+def release_verify_held_documents(args: argparse.Namespace) -> Result:
+    """Restore read-back: every document attestation resolves to matching bytes."""
+    from vendor_cp.config import vendor_settings
+    from vendor_cp.release_evidence.deploy_unit import (
+        HeldDocuments,
+        verify_held_documents,
+    )
+
+    with platform_db() as db:
+        problems = verify_held_documents(
+            db, HeldDocuments.under(vendor_settings.held_documents_directory)
+        )
+    if problems:
+        raise refuse(
+            "integrity.declaration_mismatch",
+            "; ".join(problems),
+        )
+    return Result(
+        command="release verify-held-documents",
+        data={"problems": 0},
+        message="every document attestation has matching held bytes",
+    )
+
+
 def release_pins(args: argparse.Namespace) -> Result:
     from vendor_cp.config import load_vendor_settings
 
@@ -1198,5 +1278,7 @@ __all__ = [
     "release_catalogue",
     "release_pins",
     "release_record",
+    "release_record_deploy_unit",
+    "release_verify_held_documents",
     "withdrawal_conflicts_list",
 ]

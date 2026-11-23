@@ -261,6 +261,39 @@ def build_parser() -> _Parser:
         record.add_argument(flag, required=True)
     record.set_defaults(handler=commands.release_record)
 
+    record_deploy_unit = _command(
+        release_sub,
+        "release",
+        "record-deploy-unit",
+        "catalogue a release's deploy-unit.toml and product.toml",
+    )
+    for flag in (
+        "--command-id",
+        "--product-code",
+        "--product-version",
+        "--artifact-digest",
+        "--artifact-ref",
+        "--source-revision",
+        "--descriptor-path",
+        "--deploy-unit-digest",
+        "--deploy-unit-path",
+        "--operator-ref",
+    ):
+        record_deploy_unit.add_argument(flag, required=True)
+    # The product.toml named by the descriptor's `spec`: required for a primary,
+    # optional only for a companion whose product.toml is still pending.
+    record_deploy_unit.add_argument("--product-spec-path")
+    record_deploy_unit.add_argument("--product-spec-digest")
+    record_deploy_unit.set_defaults(handler=commands.release_record_deploy_unit)
+
+    verify_held = _command(
+        release_sub,
+        "release",
+        "verify-held-documents",
+        "check every deploy_unit/product_spec attestation resolves to held bytes",
+    )
+    verify_held.set_defaults(handler=commands.release_verify_held_documents)
+
     pins = _command(release_sub, "release", "pins", "show the configured release pins")
     pins.set_defaults(handler=commands.release_pins)
 

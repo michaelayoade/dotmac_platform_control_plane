@@ -47,7 +47,7 @@
       "code": "deployment_control",
       "contract_version": 2,
       "distribution": "dotmac-deployment-control",
-      "version": "0.1.0a17"
+      "version": "0.1.0a18"
     },
     {
       "code": "entitlement_allocation",
@@ -81,7 +81,7 @@
       "code": "release_catalog",
       "contract_version": 2,
       "distribution": "dotmac-release-catalog",
-      "version": "0.1.0a4"
+      "version": "0.1.0a6"
     },
     {
       "code": "release_evidence",

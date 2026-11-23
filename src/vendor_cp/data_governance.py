@@ -570,6 +570,27 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "the per-subject lock target every admission and root mutation takes "
         "FOR UPDATE; append-only by trigger, so a row is never removed",
     ),
+    _gauge(
+        "mod_deploy",
+        "deploy_settings",
+        "the named Control settings (pull allowlist, legacy allowlist and "
+        "ceiling, role-job windows) as CURRENT state. Control a18 updates a row "
+        "in place and never deletes one; each change is recorded in the "
+        "platform audit trail with its approver, so the history is retained "
+        "there and no row is ever removed",
+    ),
+    _retain(
+        "mod_deploy",
+        "deployment_sets",
+        "a primary plan and its companion with the one approval over the set "
+        "digest: the evidence of what Michael approved to run together",
+    ),
+    _retain(
+        "mod_deploy",
+        "legacy_env_policy_versions",
+        "append-only: one row per policy VERSION of a target's legacy env file "
+        "(sha, names, expiry, retirement); a change is a new row, never an edit",
+    ),
     _retain("mod_deploy", "deployment_plans", "what a deployment was told to do"),
     _retain(
         "mod_deploy",
