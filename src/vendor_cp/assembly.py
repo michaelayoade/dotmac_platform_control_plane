@@ -31,6 +31,7 @@ from vendor_cp.deploy_agent.feature import feature as deploy_agent_feature
 from vendor_cp.deploy_agent.runtime import (
     install_runtime as install_deploy_agent_runtime,
 )
+from vendor_cp.deployment.target_api.feature import feature as deploy_target_api_feature
 from vendor_cp.deployment_profile import (
     VendorDeploymentProfile,
     admit_surfaces,
@@ -100,6 +101,9 @@ STATEFUL_MODULES = (
 # (ADR-0019).
 VENDOR_SURFACES = (
     release_evidence_feature,
+    # Declarations only (an audit action); it bears no route, so no profile
+    # inventories it. The target API's router is mounted by lane 5a.
+    deploy_target_api_feature,
     # Composed first among the route-bearing surfaces and withheld by none. A
     # deployment that cannot say whether it is ready is one an orchestrator will
     # assume is — which is the failure `/health/ready` exists to end, so the ability
