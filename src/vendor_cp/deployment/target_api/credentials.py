@@ -103,7 +103,8 @@ class ControlObservationSink:
             write_platform_audit_event(
                 db,
                 actor_admin_id=None,
-                action=OBSERVATION_MISMATCH_ACTION,
+                # a literal: the audit-vocabulary sweep reads `action=` literals
+                action="vendor.deploy_target_api.observation_principal_mismatch",
                 entity_type="target_credential",
                 entity_id=call.principal.credential_id,
                 details={
