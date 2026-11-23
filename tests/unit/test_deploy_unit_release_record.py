@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 from dotmac_deployment_control import (
-    ReleaseDescriptorRefusedError,
     ReleaseDescriptorUnavailableError,
 )
 from dotmac_deployment_control.release_descriptor import verify_release_descriptor
@@ -39,7 +38,9 @@ from vendor_cp.release_evidence.deploy_unit import (
     PRIMARY_DESCRIPTOR_PATH,
     DeployUnitEvidenceCommand,
     DirectoryDeployUnitStore,
+    HeldDocuments,
     record_deploy_unit_evidence,
+    verify_held_documents,
 )
 from vendor_cp.release_evidence.service import (
     ReleaseEvidenceConflict,
@@ -109,7 +110,7 @@ def test_record_holds_bytes_and_attests_one_audited_deploy_unit(
     command = _command()
     with isolated_session(engine) as db:
         result = record_deploy_unit_evidence(
-            db, command, document_store=DirectoryDeployUnitStore(tmp_path)
+            db, command, held=HeldDocuments.under(tmp_path)
         )
         artifact = db.get(ReleaseArtifact, result.artifact_id)
         attestation = db.get(ArtifactAttestation, result.attestation_id)
@@ -134,9 +135,7 @@ def test_record_needs_no_kernel_product_manifest(
 ) -> None:
     """ERP v2 and Integrator emit none: no PRODUCT_MANIFEST row is implied."""
     with isolated_session(engine) as db:
-        record_deploy_unit_evidence(
-            db, _command(), document_store=DirectoryDeployUnitStore(tmp_path)
-        )
+        record_deploy_unit_evidence(db, _command(), held=HeldDocuments.under(tmp_path))
         kinds = list(db.scalars(select(ArtifactAttestation.attestation_kind)))
     assert kinds == [AttestationKind.DEPLOY_UNIT.value]
 
@@ -144,12 +143,12 @@ def test_record_needs_no_kernel_product_manifest(
 def test_semantic_replay_does_not_reaudit_and_every_delivery_is_recorded(
     engine: Engine, tmp_path: Path
 ) -> None:
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = HeldDocuments.under(tmp_path)
     with isolated_session(engine) as db:
-        first = record_deploy_unit_evidence(db, _command(), document_store=store)
-        same = record_deploy_unit_evidence(db, _command(), document_store=store)
+        first = record_deploy_unit_evidence(db, _command(), held=store)
+        same = record_deploy_unit_evidence(db, _command(), held=store)
         other = record_deploy_unit_evidence(
-            db, _command(command_id="integrator-build-2"), document_store=store
+            db, _command(command_id="integrator-build-2"), held=store
         )
         assert db.scalar(select(func.count()).select_from(ReleaseArtifact)) == 1
         assert db.scalar(select(func.count()).select_from(ArtifactAttestation)) == 1
@@ -161,25 +160,25 @@ def test_semantic_replay_does_not_reaudit_and_every_delivery_is_recorded(
 def test_a_different_descriptor_on_the_same_artifact_is_a_conflict(
     engine: Engine, tmp_path: Path
 ) -> None:
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = HeldDocuments.under(tmp_path)
     changed = _COMPANION + b"# changed\n"
     with isolated_session(engine) as db:
-        record_deploy_unit_evidence(db, _command(), document_store=store)
+        record_deploy_unit_evidence(db, _command(), held=store)
         with pytest.raises(ReleaseEvidenceConflict):
             record_deploy_unit_evidence(
                 db,
                 _command(changed, command_id="integrator-build-2"),
-                document_store=store,
+                held=store,
             )
 
 
 def test_a_different_image_for_the_same_release_is_a_conflict(
     engine: Engine, tmp_path: Path
 ) -> None:
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = HeldDocuments.under(tmp_path)
     other_digest = f"sha256:{'d' * 64}"
     with isolated_session(engine) as db:
-        record_deploy_unit_evidence(db, _command(), document_store=store)
+        record_deploy_unit_evidence(db, _command(), held=store)
         with pytest.raises(ReleaseEvidenceConflict):
             record_deploy_unit_evidence(
                 db,
@@ -188,7 +187,7 @@ def test_a_different_image_for_the_same_release_is_a_conflict(
                     artifact_digest=other_digest,
                     artifact_ref=f"{_REPOSITORY}@{other_digest}",
                 ),
-                document_store=store,
+                held=store,
             )
 
 
@@ -223,7 +222,7 @@ def test_malformed_descriptor_evidence_is_refused_before_anything_is_written(
             record_deploy_unit_evidence(
                 db,
                 _command(**overrides),
-                document_store=DirectoryDeployUnitStore(tmp_path),
+                held=HeldDocuments.under(tmp_path),
             )
         assert db.scalar(select(func.count()).select_from(ReleaseArtifact)) == 0
     assert not list(tmp_path.iterdir())
@@ -250,11 +249,11 @@ def test_command_refuses_a_bad_path_revision_or_operator(
 def test_store_refuses_to_serve_or_keep_bytes_that_do_not_match(
     tmp_path: Path,
 ) -> None:
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = DirectoryDeployUnitStore(tmp_path / "held")
     with pytest.raises(ReleaseEvidenceError):
         store.hold(b"x", digest=_digest(b"y"))
     store.hold(_COMPANION, digest=_digest(_COMPANION))
-    target = next(tmp_path.iterdir())
+    target = next((tmp_path / "held").iterdir())
     target.chmod(0o600)
     target.write_bytes(b"tampered")
     with pytest.raises(ReleaseEvidenceError):
@@ -263,12 +262,30 @@ def test_store_refuses_to_serve_or_keep_bytes_that_do_not_match(
         store.hold(_COMPANION, digest=_digest(_COMPANION))
 
 
+def test_held_store_is_private_and_write_once(tmp_path: Path) -> None:
+    root = tmp_path / "held" / "deploy-units"
+    store = DirectoryDeployUnitStore(root)
+    uri = store.hold(_COMPANION, digest=_digest(_COMPANION))
+    assert root.stat().st_mode & 0o777 == 0o700
+    held = Path(uri.removeprefix("file://"))
+    assert held.stat().st_mode & 0o777 == 0o600
+    # An identical re-hold is a replay; the address is never rewritten.
+    assert store.hold(_COMPANION, digest=_digest(_COMPANION)) == uri
+    assert held.read_bytes() == _COMPANION
+
+
+def test_the_held_documents_default_is_durable_and_never_under_run() -> None:
+    from vendor_cp.config import VendorSettings
+
+    default = VendorSettings(provider_mode="fake").held_documents_directory
+    assert str(default).startswith("/var/lib/dotmac/vendor-control-plane/")
+    assert not str(default).startswith(("/run", "/tmp", "/dev/shm"))  # noqa: S108
+
+
 # ── the ReleaseDescriptorSource adapter, and Control's own verification ──────
 
 
-def _source(
-    db: Session, store: DirectoryDeployUnitStore
-) -> CatalogueReleaseDescriptorSource:
+def _source(db: Session, store: HeldDocuments) -> CatalogueReleaseDescriptorSource:
     return CatalogueReleaseDescriptorSource(
         session_scope=lambda: nullcontext(db), store=lambda: store
     )
@@ -277,9 +294,9 @@ def _source(
 def test_source_returns_evidence_that_controls_own_verification_accepts(
     engine: Engine, tmp_path: Path
 ) -> None:
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = HeldDocuments.under(tmp_path)
     with isolated_session(engine) as db:
-        record_deploy_unit_evidence(db, _command(), document_store=store)
+        record_deploy_unit_evidence(db, _command(), held=store)
         verified = verify_release_descriptor(
             _source(db, store),
             release_ref=f"{_PRODUCT}@{_VERSION}",
@@ -295,39 +312,180 @@ def test_source_returns_evidence_that_controls_own_verification_accepts(
     assert verified.digest == evidence.attested_digest == _digest(_COMPANION)
 
 
-def test_a_primary_descriptor_cannot_resolve_until_product_toml_evidence_exists(
+_SPEC = b'product = "erp_v2"\n'
+_HAS_SPEC_KIND = any(k.value == "product_spec" for k in AttestationKind)
+needs_spec_kind = pytest.mark.skipif(
+    not _HAS_SPEC_KIND,
+    reason="PRODUCT_SPEC is not in the PROVISIONAL catalogue pin yet (#1145)",
+)
+
+
+def _primary(**overrides: object) -> DeployUnitEvidenceCommand:
+    values: dict[str, object] = {
+        "product_code": "erp_v2",
+        "product_version": "2.1.0",
+        "artifact_ref": f"{_REPOSITORY}@{_IMAGE_DIGEST}",
+        "product_spec": _SPEC,
+        "product_spec_digest": _digest(_SPEC),
+    }
+    values.update(overrides)
+    return _command(_PRIMARY, path=PRIMARY_DESCRIPTOR_PATH, **values)
+
+
+def test_a_primary_release_cannot_be_recorded_without_its_product_toml(
     engine: Engine, tmp_path: Path
 ) -> None:
-    """DOCUMENTED GAP (open question): the catalogue attests no product.toml.
+    with isolated_session(engine) as db:
+        with pytest.raises(ReleaseEvidenceError):
+            record_deploy_unit_evidence(
+                db,
+                _primary(product_spec=None, product_spec_digest=None),
+                held=HeldDocuments.under(tmp_path),
+            )
+        assert db.scalar(select(func.count()).select_from(ReleaseArtifact)) == 0
 
-    Control accepts an absent product.toml only for a companion path, so a
-    primary descriptor is refused by CONTROL (not silently accepted here).
-    """
-    store = DirectoryDeployUnitStore(tmp_path)
+
+def test_the_product_toml_and_digest_come_together_and_must_match(
+    engine: Engine, tmp_path: Path
+) -> None:
+    held = HeldDocuments.under(tmp_path)
+    with isolated_session(engine) as db:
+        for bad in (
+            {"product_spec_digest": None},
+            {"product_spec": None},
+            {"product_spec_digest": _digest(b"other")},
+            {
+                "product_spec": b"not = [toml",
+                "product_spec_digest": _digest(b"not = [toml"),
+            },
+        ):
+            with pytest.raises(ReleaseEvidenceError):
+                record_deploy_unit_evidence(db, _primary(**bad), held=held)
+
+
+@needs_spec_kind
+def test_a_primary_records_both_documents_in_one_transaction_and_resolves(
+    engine: Engine, tmp_path: Path
+) -> None:
+    held = HeldDocuments.under(tmp_path)
+    with isolated_session(engine) as db:
+        result = record_deploy_unit_evidence(db, _primary(), held=held)
+        assert result.product_spec_attestation_id is not None
+        assert result.product_spec_uri is not None
+        assert result.product_spec_uri.endswith("#deploy/product.toml")
+        kinds = sorted(db.scalars(select(ArtifactAttestation.attestation_kind)))
+        assert kinds == ["deploy_unit", "product_spec"]
+        verified = verify_release_descriptor(
+            _source(db, held),
+            release_ref="erp_v2@2.1.0",
+            product_code="erp_v2",
+            descriptor_path=PRIMARY_DESCRIPTOR_PATH,
+            legacy_allowed=False,
+        )
+        assert verified.product_toml_sha256 == _digest(_SPEC)
+        assert verified.evidence.product_toml_path == "deploy/product.toml"
+        assert verify_held_documents(db, held) == ()
+
+
+@needs_spec_kind
+def test_a_primary_resolves_only_from_the_artifact_of_its_own_product(
+    engine: Engine, tmp_path: Path
+) -> None:
+    held = HeldDocuments.under(tmp_path)
     with isolated_session(engine) as db:
         record_deploy_unit_evidence(
-            db,
-            _command(_PRIMARY, path=PRIMARY_DESCRIPTOR_PATH),
-            document_store=store,
+            db, _primary(product_code="some-other-product"), held=held
         )
-        with pytest.raises(ReleaseDescriptorRefusedError) as caught:
-            verify_release_descriptor(
-                _source(db, store),
-                release_ref=f"{_PRODUCT}@{_VERSION}",
+        with pytest.raises(ReleaseDescriptorUnavailableError, match="own"):
+            _source(db, held).resolve(
+                "some-other-product@2.1.0",
                 product_code="erp_v2",
                 descriptor_path=PRIMARY_DESCRIPTOR_PATH,
-                legacy_allowed=False,
             )
-    assert caught.value.code == ReleaseDescriptorRefusedError.EVIDENCE_MISMATCH
+
+
+@needs_spec_kind
+def test_a_primary_with_no_product_spec_attestation_is_refused(
+    engine: Engine, tmp_path: Path
+) -> None:
+    from dotmac_release_catalog import (
+        ArtifactKind,
+        Digest,
+        attest_artifact,
+        publish_artifact,
+    )
+
+    held = HeldDocuments.under(tmp_path)
+    uri = held.deploy_units.hold(_PRIMARY, digest=_digest(_PRIMARY))
+    with isolated_session(engine) as db:
+        artifact = publish_artifact(
+            db,
+            product_code="erp_v2",
+            version="2.1.0",
+            artifact_kind=ArtifactKind.CONTAINER_IMAGE,
+            digest=Digest.parse(_IMAGE_DIGEST),
+            artifact_ref=_ARTIFACT_REF,
+            source_revision=_REVISION,
+        )
+        attest_artifact(
+            db,
+            artifact_id=artifact.id,
+            attestation_kind=AttestationKind.DEPLOY_UNIT,
+            uri=f"{uri}#{PRIMARY_DESCRIPTOR_PATH}",
+            digest=_digest(_PRIMARY),
+        )
+        with pytest.raises(ReleaseDescriptorUnavailableError, match="product_spec"):
+            _source(db, held).resolve(
+                "erp_v2@2.1.0",
+                product_code="erp_v2",
+                descriptor_path=PRIMARY_DESCRIPTOR_PATH,
+            )
+
+
+@needs_spec_kind
+def test_two_product_spec_attestations_for_one_path_are_ambiguous(
+    engine: Engine, tmp_path: Path
+) -> None:
+    from dotmac_release_catalog import attest_artifact
+
+    held = HeldDocuments.under(tmp_path)
+    with isolated_session(engine) as db:
+        result = record_deploy_unit_evidence(db, _primary(), held=held)
+        attest_artifact(
+            db,
+            artifact_id=result.artifact_id,
+            attestation_kind=AttestationKind("product_spec"),
+            uri="file:///elsewhere#deploy/product.toml",
+            digest=_digest(b"second"),
+        )
+        with pytest.raises(ReleaseDescriptorUnavailableError, match="ambiguous"):
+            _source(db, held).resolve(
+                "erp_v2@2.1.0",
+                product_code="erp_v2",
+                descriptor_path=PRIMARY_DESCRIPTOR_PATH,
+            )
+
+
+def test_restore_read_back_names_every_attestation_whose_bytes_are_missing(
+    engine: Engine, tmp_path: Path
+) -> None:
+    held = HeldDocuments.under(tmp_path)
+    with isolated_session(engine) as db:
+        record_deploy_unit_evidence(db, _command(), held=held)
+        assert verify_held_documents(db, held) == ()
+        next((tmp_path / "deploy-units").iterdir()).unlink()
+        problems = verify_held_documents(db, held)
+    assert len(problems) == 1 and "missing or do not match" in problems[0]
+    assert str(tmp_path) not in problems[0]  # value-free
 
 
 def test_source_refuses_when_the_held_bytes_are_gone_or_changed(
     engine: Engine, tmp_path: Path
 ) -> None:
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = HeldDocuments.under(tmp_path)
     with isolated_session(engine) as db:
-        record_deploy_unit_evidence(db, _command(), document_store=store)
-        held = next(tmp_path.iterdir())
+        record_deploy_unit_evidence(db, _command(), held=store)
+        held = next((tmp_path / "deploy-units").iterdir())
         held.chmod(0o600)
         held.write_bytes(_COMPANION + b"#x\n")
         with pytest.raises(ReleaseDescriptorUnavailableError):
@@ -348,9 +506,9 @@ def test_source_refuses_when_the_held_bytes_are_gone_or_changed(
 def test_source_refuses_a_descriptor_attested_for_another_path(
     engine: Engine, tmp_path: Path
 ) -> None:
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = HeldDocuments.under(tmp_path)
     with isolated_session(engine) as db:
-        record_deploy_unit_evidence(db, _command(), document_store=store)
+        record_deploy_unit_evidence(db, _command(), held=store)
         with pytest.raises(ReleaseDescriptorUnavailableError):
             _source(db, store).resolve(
                 f"{_PRODUCT}@{_VERSION}",
@@ -362,7 +520,7 @@ def test_source_refuses_a_descriptor_attested_for_another_path(
 def test_source_refuses_an_unknown_release_a_missing_attestation_and_bad_refs(
     engine: Engine, tmp_path: Path
 ) -> None:
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = HeldDocuments.under(tmp_path)
     with isolated_session(engine) as db:
         source = _source(db, store)
         for ref in ("nope@1.0.0", f"{_PRODUCT}", "UPPER@1", f"{_PRODUCT}@", "a@b@c"):
@@ -397,7 +555,7 @@ def test_source_refuses_an_artifact_with_no_deploy_unit_attestation(
             source_revision=_REVISION,
         )
         with pytest.raises(ReleaseDescriptorUnavailableError):
-            _source(db, DirectoryDeployUnitStore(tmp_path)).resolve(
+            _source(db, HeldDocuments.under(tmp_path)).resolve(
                 f"{_PRODUCT}@{_VERSION}",
                 product_code="x",
                 descriptor_path=COMPANION_DESCRIPTOR_PATH,
@@ -409,9 +567,9 @@ def test_source_refuses_two_deploy_unit_attestations_as_ambiguous(
 ) -> None:
     from dotmac_release_catalog import attest_artifact
 
-    store = DirectoryDeployUnitStore(tmp_path)
+    store = HeldDocuments.under(tmp_path)
     with isolated_session(engine) as db:
-        result = record_deploy_unit_evidence(db, _command(), document_store=store)
+        result = record_deploy_unit_evidence(db, _command(), held=store)
         attest_artifact(
             db,
             artifact_id=result.artifact_id,

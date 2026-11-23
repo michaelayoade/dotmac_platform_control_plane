@@ -32,6 +32,16 @@ class VendorSettings:
     # exact artifact digest.
     product_release_pins: tuple[tuple[str, ProductReleasePin], ...] = ()
     product_manifest_directory: Path = Path("/run/dotmac/product-manifests")
+    # Release record documents (`deploy-units/`, `product-specs/`): content-
+    # addressed and write-once, on the CP's DURABLE volume and never under /run.
+    # Control re-reads these bytes at every propose, and the digests are
+    # immutable, so bytes lost at a reboot cannot be re-derived: every plan for
+    # the release would be refused until an attended production re-record. Dirs
+    # 0700, files 0600, CP runtime uid. Part of the CP backup set beside the
+    # catalogue rows (`dotmac-platform release verify-held-documents`).
+    held_documents_directory: Path = Path(
+        "/var/lib/dotmac/vendor-control-plane/held-documents"
+    )
     # WS8 licence signing (see vendor_cp.licensing.signing_adapter). "ephemeral" (an
     # in-memory keypair, dev/test only) or "configured" (a real key read from
     # licence_signing_key_file). Ephemeral is the DEFAULT so a missing
@@ -180,6 +190,12 @@ def load_vendor_settings() -> VendorSettings:
             os.getenv(
                 "VENDOR_PRODUCT_MANIFEST_DIRECTORY",
                 "/run/dotmac/product-manifests",
+            )
+        ),
+        held_documents_directory=Path(
+            os.getenv(
+                "VENDOR_HELD_DOCUMENTS_DIRECTORY",
+                "/var/lib/dotmac/vendor-control-plane/held-documents",
             )
         ),
         licence_signing_mode=signing,

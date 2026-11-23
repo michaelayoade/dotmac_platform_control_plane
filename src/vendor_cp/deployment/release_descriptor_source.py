@@ -20,16 +20,23 @@ descriptor path other than the two the contract allows; no artifact; no
 a different descriptor path than the one asked for; held bytes that are missing
 or do not match the attested digest.
 
-`product_toml_*` are left absent. The catalogue has no attestation for the
-released `product.toml` (only `deploy_unit` was added), so Control accepts that
-only for a companion path and refuses every plan otherwise. Where a primary
-descriptor's `product.toml` sha comes from is an OPEN QUESTION for the release
-record design, recorded in the draft PR rather than invented here.
+A PRIMARY descriptor resolves only from the artifact whose catalogue product
+equals the descriptor's own `product`; a companion descriptor resolves only via
+the `deploy_unit` attestation whose fragment is its path, on whichever artifact
+carries it. Exactly one container-image artifact must exist for the ref.
+
+`product_toml_path` / `product_toml_sha256` come from the `product_spec`
+attestation whose fragment is the descriptor's `spec` path (catalogue a6), with
+the sha recomputed over the held bytes. A primary with none is refused; two
+attestations for one path with different digests are `ambiguous`. A companion
+whose product.toml is pending (I3) leaves both absent, and Control then refuses
+every plan for it.
 """
 
 from __future__ import annotations
 
 import re
+import tomllib
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Final
@@ -49,7 +56,10 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.release_evidence.deploy_unit import (
     DESCRIPTOR_PATHS,
-    DeployUnitStore,
+    PRIMARY_DESCRIPTOR_PATH,
+    SPEC_PATHS,
+    HeldDocuments,
+    product_spec_kind,
     split_attestation_uri,
 )
 from vendor_cp.release_evidence.service import ReleaseEvidenceError
@@ -97,13 +107,22 @@ class _Guarded:
         return self._inner.__exit__(*exc)  # type: ignore[arg-type]
 
 
-def _default_store() -> DeployUnitStore:
+def _default_store() -> HeldDocuments:
     from vendor_cp.config import vendor_settings
-    from vendor_cp.release_evidence.deploy_unit import DirectoryDeployUnitStore
 
-    return DirectoryDeployUnitStore(
-        root=vendor_settings.product_manifest_directory / "deploy-units"
-    )
+    return HeldDocuments.under(vendor_settings.held_documents_directory)
+
+
+def _distinct(
+    rows: list[ArtifactAttestation], *, path: str, what: str
+) -> ArtifactAttestation | None:
+    """The one attestation for `path`; two with different digests are ambiguous."""
+    matching = [r for r in rows if split_attestation_uri(r.uri)[1] == path]
+    if len({r.digest for r in matching}) > 1:
+        raise ReleaseDescriptorUnavailableError(
+            f"the release has ambiguous {what} attestations for that path"
+        )
+    return matching[0] if matching else None
 
 
 class CatalogueReleaseDescriptorSource:
@@ -113,7 +132,7 @@ class CatalogueReleaseDescriptorSource:
         self,
         *,
         session_scope: SessionScope = _default_session_scope,
-        store: Callable[[], DeployUnitStore] = _default_store,
+        store: Callable[[], HeldDocuments] = _default_store,
     ) -> None:
         self._session_scope = session_scope
         self._store = store
@@ -126,59 +145,96 @@ class CatalogueReleaseDescriptorSource:
             raise ReleaseDescriptorUnavailableError(
                 "the descriptor path is not one the deploy contract allows"
             )
+        spec_kind: str | None
+        try:
+            spec_kind = product_spec_kind().value
+        except ReleaseEvidenceError:
+            spec_kind = None
         with self._session_scope() as db:
-            artifact = db.scalar(
-                select(ReleaseArtifact).where(
-                    ReleaseArtifact.product_code == catalogue_product,
-                    ReleaseArtifact.version == version,
-                    ReleaseArtifact.artifact_kind == ArtifactKind.CONTAINER_IMAGE.value,
-                )
-            )
-            if artifact is None:
-                raise ReleaseDescriptorUnavailableError(
-                    "the catalogue has no container image for that release"
-                )
-            attestations = list(
+            artifacts = list(
                 db.scalars(
-                    select(ArtifactAttestation).where(
-                        ArtifactAttestation.artifact_id == artifact.id,
-                        ArtifactAttestation.attestation_kind
-                        == AttestationKind.DEPLOY_UNIT.value,
+                    select(ReleaseArtifact).where(
+                        ReleaseArtifact.product_code == catalogue_product,
+                        ReleaseArtifact.version == version,
+                        ReleaseArtifact.artifact_kind
+                        == ArtifactKind.CONTAINER_IMAGE.value,
                     )
                 )
             )
-            if not attestations:
+            if len(artifacts) != 1:
                 raise ReleaseDescriptorUnavailableError(
-                    "the release has no deploy_unit attestation"
+                    "the catalogue does not hold exactly one container image "
+                    "for that release"
                 )
-            if len(attestations) != 1:
-                raise ReleaseDescriptorUnavailableError(
-                    "the release has ambiguous deploy_unit attestations"
+            artifact = artifacts[0]
+            rows = list(
+                db.scalars(
+                    select(ArtifactAttestation).where(
+                        ArtifactAttestation.artifact_id == artifact.id,
+                        ArtifactAttestation.attestation_kind.in_(
+                            [AttestationKind.DEPLOY_UNIT.value, spec_kind or ""]
+                        ),
+                    )
                 )
-            attestation = attestations[0]
-            _held, attested_path = split_attestation_uri(attestation.uri)
-            if attested_path != descriptor_path:
+            )
+            unit = _distinct(
+                [r for r in rows if r.attestation_kind == "deploy_unit"],
+                path=descriptor_path,
+                what="deploy_unit",
+            )
+            if unit is None:
                 raise ReleaseDescriptorUnavailableError(
-                    "the attested descriptor is for a different path"
+                    "the release has no deploy_unit attestation for that path"
                 )
             ref, _, digest = artifact.artifact_ref.rpartition("@")
             if not ref or digest != artifact.digest:
                 raise ReleaseDescriptorUnavailableError(
                     "the artifact reference does not pin the artifact digest"
                 )
-            attested_digest = attestation.digest
             source_revision = artifact.source_revision
             if source_revision is None:
                 raise ReleaseDescriptorUnavailableError(
                     "the catalogued artifact records no source revision"
                 )
             image_digest = artifact.digest
+            attested_digest = unit.digest
+            spec_rows = [r for r in rows if r.attestation_kind == spec_kind]
+        held = self._store()
         try:
-            payload = self._store().read(digest=attested_digest)
-        except (ReleaseEvidenceError, OSError):
+            payload = held.deploy_units.read(digest=attested_digest)
+            document = tomllib.loads(payload.decode("utf-8"))
+        except (ReleaseEvidenceError, OSError, UnicodeDecodeError, ValueError):
             raise ReleaseDescriptorUnavailableError(
                 "the attested descriptor bytes are not held, or do not match"
             ) from None
+        if (
+            descriptor_path == PRIMARY_DESCRIPTOR_PATH
+            and document.get("product") != catalogue_product
+        ):
+            raise ReleaseDescriptorUnavailableError(
+                "a primary descriptor resolves only from the artifact of its own "
+                "product"
+            )
+        spec_path = document.get("spec")
+        if spec_path != SPEC_PATHS[descriptor_path]:
+            raise ReleaseDescriptorUnavailableError(
+                "the descriptor's spec is not the path its location requires"
+            )
+        spec = _distinct(spec_rows, path=spec_path, what="product_spec")
+        spec_sha: str | None = None
+        if spec is None:
+            if descriptor_path == PRIMARY_DESCRIPTOR_PATH:
+                raise ReleaseDescriptorUnavailableError(
+                    "a primary release has no product_spec attestation"
+                )
+        else:
+            try:
+                held.product_specs.read(digest=spec.digest)  # recomputes the sha
+            except (ReleaseEvidenceError, OSError):
+                raise ReleaseDescriptorUnavailableError(
+                    "the attested product.toml bytes are not held, or do not match"
+                ) from None
+            spec_sha = spec.digest
         return ReleaseDescriptorEvidence(
             release_ref=release_ref,
             product_code=product_code,
@@ -188,4 +244,6 @@ class CatalogueReleaseDescriptorSource:
             image_digest=image_digest,
             deploy_unit_bytes=payload,
             attested_digest=attested_digest,
+            product_toml_path=None if spec_sha is None else spec_path,
+            product_toml_sha256=spec_sha,
         )
