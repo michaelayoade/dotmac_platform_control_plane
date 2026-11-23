@@ -152,7 +152,7 @@ jobs:
       - name: Build the Control wheel
         run: |
           set -euo pipefail
-          poetry -C control-src build --format wheel --output "$RUNNER_TEMP/control-dist"
+          (cd control-src && poetry build --format wheel --output "$RUNNER_TEMP/control-dist")
           control_wheel="$(ls "$RUNNER_TEMP"/control-dist/*.whl)"
           echo "CONTROL_WHEEL_NAME=$(basename "$control_wheel")" >> "$GITHUB_ENV"
           echo "CONTROL_WHEEL_SHA256=$(sha256sum "$control_wheel" | cut -d' ' -f1)" >> "$GITHUB_ENV"

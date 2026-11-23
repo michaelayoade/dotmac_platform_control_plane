@@ -139,9 +139,11 @@ def run(addr: str, audit_container_path: str, audit_host_path: Path) -> dict[str
             {"data": {"marker": "synthetic"}},
         ),
     }.items():
-        code, _ = bao.call(method, path, root, body)
+        code, doc = bao.call(method, path, root, body)
         if code not in (200, 204):
-            raise SystemExit(f"setup step {step} failed: http {code}")
+            # Server error TEXT only (never a token or request body).
+            errors = "; ".join(str(e) for e in doc.get("errors", []))[:300]
+            raise SystemExit(f"setup step {step} failed: http {code}: {errors}")
     for i in range(DISPATCHES):
         code, _ = bao.call(
             "POST", f"kv/data/recovery/dispatch-{i}", root, {"data": {"n": str(i)}}
