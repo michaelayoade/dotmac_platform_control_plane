@@ -62,6 +62,20 @@ snip readback $(common readback) >"$work/sens-readback.txt" 2>"$work/sens-readba
 snip secdef-names $(common secdef-names | sed 's/--env-file [^ ]* //') >"$work/sens-names.txt" 2>/dev/null
 pg -c "DROP FUNCTION public.a2_ci_sensitivity_probe()" >/dev/null 2>&1; stage probe_drop $?
 
+# 5d. Sensitivity (architect r8 D1): each is grant -> readback -> revoke, and the
+#     EXACT set of false rows is judged by observer_result.py.
+ROLE="a2_recovery_observer_r${N}"
+sens() {  # name grant revoke
+  pg -c "$2" >/dev/null 2>&1; g=$?
+  snip readback $(common readback) >"$work/sens-$1.txt" 2>/dev/null
+  pg -c "$3" >/dev/null 2>&1; r=$?
+  stage "sens_$1" $((g + r))
+}
+sens a "GRANT SELECT (id) ON mod_deploy.deployment_plans TO ${ROLE}" "REVOKE SELECT (id) ON mod_deploy.deployment_plans FROM ${ROLE}"
+sens b "GRANT UPDATE (status) ON mod_deploy.rollouts TO ${ROLE}" "REVOKE UPDATE (status) ON mod_deploy.rollouts FROM ${ROLE}"
+sens c "GRANT SELECT (id) ON mod_deploy.deployment_plans TO PUBLIC" "REVOKE SELECT (id) ON mod_deploy.deployment_plans FROM PUBLIC"
+snip readback $(common readback) >"$work/final-readback.txt" 2>"$work/final-readback.err"; stage final_readback $?
+
 # 6. log in with the snippet-written DSN
 dsn="$(sudo grep '^A2_OBSERVER_DSN=' "$ENVF" | cut -d= -f2-)"
 if [ -n "$dsn" ]; then

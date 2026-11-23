@@ -49,5 +49,12 @@
         "tests/migration/test_target_consume_concurrency.py::test_consume_exactly_once_concurrent"
       ]
     }
-  ]
+  ],
+  "recovery_suite": {
+    "invocation": "pytest --noconftest (the reviewed #272 invocation; CONFORMANCE_DATABASE_URL is never set)",
+    "files": {
+      "conformance/recovery_source/test_contract.py": 14,
+      "tests/unit/test_foundation_execution_approval.py": 24
+    }
+  }
 }

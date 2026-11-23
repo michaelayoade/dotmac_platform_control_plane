@@ -172,6 +172,8 @@ class ReceiptTests(unittest.TestCase):
                         str(tmp / "absent5.json"),
                         "--observer-sql-result",
                         str(tmp / "absent7.json"),
+                        "--recovery-collect",
+                        str(tmp / "absent8.txt"),
                         "--observe-result",
                         str(tmp / "absent6.json"),
                         "--control-junit",
@@ -324,73 +326,176 @@ class ObserverResultTests(unittest.TestCase):
 
         self.m = observer_result
         self.stages = {s: "0" for s in observer_result.STAGES}
-        self.login = {
-            "select_four_tables_ok": True,
-            "select_deployment_plans_refused": True,
-            "insert_rollouts_refused": True,
-            "read_only_switched_off": True,
-            "insert_still_refused_after_read_only_off": True,
-            "tls_session": True,
-        }
+        self.login = dict.fromkeys(observer_result.LOGIN_KEYS, True)
+        self.base = ["no_column_level_grants_to_role|true"]
+        self.good_rows = [f"{r}|true" for r in ("a", "b", *observer_result.NEW_ROWS)]
 
-    def test_all_true_passes(self) -> None:
-        r = self.m.judge(
-            self.stages,
-            ["a|true", "b|true"],
-            self.login,
-            ["role_absent|true"],
-            ["secdef_reachable|none"],
-            ["no_reachable_security_definer_functions_outside_allowlist|false"],
-            ["secdef_reachable|public.a2_ci_sensitivity_probe()"],
-        )
-        self.assertEqual(r["status"], "PASS")
+    def sens(self, **over: list[str]) -> dict[str, list[str]]:
+        def with_false(*names: str) -> list[str]:
+            return [
+                f"{r}|{'false' if r in names else 'true'}"
+                for r in ("a", "b", *self.m.NEW_ROWS, self.m.SECDEF_ROW)
+            ]
+
+        out = {
+            "probe": with_false(self.m.SECDEF_ROW),
+            "a": with_false(self.m.ROLE_ROW),
+            "b": with_false(self.m.ROLE_ROW),
+            "c": with_false(self.m.PUBLIC_ROW),
+            "final": with_false(),
+        }
+        out.update(over)
+        return out
+
+    def judge(self, **over):
+        args = {
+            "stages": self.stages,
+            "readback": self.good_rows,
+            "login": self.login,
+            "absence": ["role_absent|true"],
+            "names": ["secdef_reachable|none"],
+            "sens": self.sens(),
+            "sens_names": ["secdef_reachable|public.a2_ci_sensitivity_probe()"],
+        }
+        args.update(over)
+        return self.m.judge(**args)
+
+    def test_all_expected_passes_and_marks_the_pin_pending(self) -> None:
+        r = self.judge()
+        self.assertEqual(r["status"], "PASS", r["failed_checks"])
+        self.assertEqual(r["pin"]["status"], "PENDING_MICHAEL_APPROVAL")
 
     def test_one_false_readback_row_fails_and_is_named(self) -> None:
-        r = self.m.judge(
-            self.stages,
-            ["a|true", "no_execute_on_security_definer_functions|false"],
-            self.login,
-            ["role_absent|true"],
-        )
+        rows = [*self.good_rows, "some_row|false"]
+        r = self.judge(readback=rows)
         self.assertEqual(r["status"], "FAIL")
-        self.assertIn(
-            "readback_no_execute_on_security_definer_functions", r["failed_checks"]
+        self.assertIn("readback_some_row", r["failed_checks"])
+
+    def test_sensitivity_requires_the_exact_false_set(self) -> None:
+        extra = self.sens(a=[*self.sens()["a"], "no_write_on_the_four_tables|false"])
+        self.assertEqual(self.judge(sens=extra)["status"], "FAIL")
+        wrong_row = self.sens(c=self.sens()["a"])
+        self.assertEqual(self.judge(sens=wrong_row)["status"], "FAIL")
+        none_false = self.sens(b=self.sens()["final"])
+        self.assertEqual(self.judge(sens=none_false)["status"], "FAIL")
+        missing = self.sens()
+        del missing["probe"]
+        self.assertEqual(self.judge(sens=missing)["status"], "FAIL")
+
+    def test_final_readback_after_revokes_must_be_all_true(self) -> None:
+        dirty = self.sens(final=self.sens()["a"])
+        self.assertEqual(self.judge(sens=dirty)["status"], "FAIL")
+
+    def test_missing_new_rows_or_pieces_fail(self) -> None:
+        self.assertEqual(self.judge(readback=["a|true"])["status"], "FAIL")
+        self.assertEqual(self.judge(readback=[])["status"], "FAIL")
+        self.assertEqual(self.judge(login={})["status"], "FAIL")
+        self.assertEqual(self.judge(absence=[])["status"], "FAIL")
+        self.assertEqual(self.judge(sens_names=[])["status"], "FAIL")
+
+
+class VendoredReadbackTests(unittest.TestCase):
+    def test_readback_has_the_column_rows_and_not_the_defective_view(self) -> None:
+        text = (HERE / "observer" / "a2-observer-readback.sql.tmpl").read_text()
+        code = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("--")
+        )
+        self.assertNotIn("information_schema.column_privileges", code)
+        self.assertIn("aclexplode(a.attacl)", code)
+        for name in (
+            "no_column_level_grants_to_role",
+            "no_column_level_grants_to_public_outside_catalogs",
+        ):
+            self.assertIn(name, code)
+        self.assertIn(") a(name) WHERE", code)
+
+    def test_pins_cover_the_vendored_bytes(self) -> None:
+        import hashlib
+
+        pins = {}
+        for line in (HERE / "observer" / "PINS").read_text().splitlines():
+            if line and not line.startswith("#"):
+                digest, name = line.split("  ")
+                pins[name] = digest
+        self.assertEqual(len(pins), 6)
+        for name, digest in pins.items():
+            data = (HERE / "observer" / name).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), digest, name)
+        self.assertEqual(
+            pins["a2-observer-readback.sql.tmpl"],
+            "94fb64b6b9825b7ba628d43ac4e0fbc49d911f5a20ebbe95a07b59d4dfa79e68",
         )
 
-    def test_sensitivity_requires_a_false_row_and_the_probe_listed(self) -> None:
-        row = "no_reachable_security_definer_functions_outside_allowlist"
-        ok = self.m.judge(
-            self.stages,
-            ["a|true"],
-            self.login,
-            ["role_absent|true"],
-            ["secdef_reachable|none"],
-            [f"{row}|false"],
-            ["secdef_reachable|public.a2_ci_sensitivity_probe()"],
-        )
-        self.assertEqual(ok["status"], "PASS")
-        no_probe = self.m.judge(
-            self.stages,
-            ["a|true"],
-            self.login,
-            ["role_absent|true"],
-            ["secdef_reachable|none"],
-            [f"{row}|true"],
-            ["secdef_reachable|none"],
-        )
-        self.assertEqual(no_probe["status"], "FAIL")
 
-    def test_missing_pieces_fail(self) -> None:
+class RecoverySuiteTests(unittest.TestCase):
+    PINS = {"x/a.py": 2, "y/b.py": 1}
+
+    def junit(self, tmp: Path, cases: list[tuple[str, str, str]]) -> Path:
+        body = "".join(case(c, n, child) for c, n, child in cases)
+        return junit_file(tmp, body)
+
+    def collect(self, tmp: Path, n_a: int, n_b: int) -> Path:
+        p = tmp / "c.txt"
+        lines = [f"x/a.py::t{i}" for i in range(n_a)] + [
+            f"y/b.py::t{i}" for i in range(n_b)
+        ]
+        p.write_text("\n".join(lines) + "\n")
+        return p
+
+    def good(self) -> list[tuple[str, str, str]]:
+        return [("x.a", "t0", ""), ("x.a", "t1", ""), ("y.b", "t0", "")]
+
+    def test_exact_counts_and_no_skips_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            r = qual.judge_recovery_suite(
+                self.junit(tmp, self.good()), self.PINS, self.collect(tmp, 2, 1)
+            )
+        self.assertEqual(r["status"], "PASS")
+
+    def test_wrong_counts_skips_and_failures_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            col = self.collect(tmp, 2, 1)
+            short = self.good()[:2]
+            self.assertEqual(
+                qual.judge_recovery_suite(self.junit(tmp, short), self.PINS, col)[
+                    "status"
+                ],
+                "FAIL",
+            )
+            skipped = [*self.good()[:2], ("y.b", "t0", "<skipped/>")]
+            self.assertEqual(
+                qual.judge_recovery_suite(self.junit(tmp, skipped), self.PINS, col)[
+                    "status"
+                ],
+                "FAIL",
+            )
+            failed = [*self.good()[:2], ("y.b", "t0", "<failure/>")]
+            self.assertEqual(
+                qual.judge_recovery_suite(self.junit(tmp, failed), self.PINS, col)[
+                    "status"
+                ],
+                "FAIL",
+            )
+            self.assertEqual(
+                qual.judge_recovery_suite(
+                    self.junit(tmp, self.good()), self.PINS, self.collect(tmp, 3, 1)
+                )["status"],
+                "FAIL",
+            )
+            self.assertEqual(
+                qual.judge_recovery_suite(self.junit(tmp, self.good()), self.PINS)[
+                    "status"
+                ],
+                "FAIL",
+            )
+
+    def test_shipped_pins_are_14_and_24(self) -> None:
+        pins = qual.load_recovery_pins(HERE / "scenarios.json")
         self.assertEqual(
-            self.m.judge(self.stages, [], self.login, ["role_absent|true"])["status"],
-            "FAIL",
-        )
-        self.assertEqual(
-            self.m.judge(self.stages, ["a|true"], {}, ["role_absent|true"])["status"],
-            "FAIL",
-        )
-        self.assertEqual(
-            self.m.judge(self.stages, ["a|true"], self.login, [])["status"], "FAIL"
+            sorted(pins.values()),
+            [14, 24],
         )
 
 

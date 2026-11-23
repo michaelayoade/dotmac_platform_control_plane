@@ -133,18 +133,50 @@ def judge_scenarios(
     return out
 
 
-def judge_recovery_suite(path: Path) -> dict[str, Any]:
-    """The whole recovery contract file must run and pass (a skip is a failure)."""
+def load_recovery_pins(path: Path) -> dict[str, int]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    files = doc["recovery_suite"]["files"]
+    if not files or any(not isinstance(v, int) or v < 1 for v in files.values()):
+        raise ValueError("malformed recovery_suite pins")
+    return dict(files)
+
+
+def _count_by_file(cases: list[dict[str, str]], files: list[str]) -> dict[str, int]:
+    counts = dict.fromkeys(files, 0)
+    for c in cases:
+        for f in files:
+            module = f.removesuffix(".py").replace("/", ".")
+            if c["classname"] == module or c["classname"].startswith(module + "."):
+                counts[f] += 1
+    return counts
+
+
+def judge_recovery_suite(
+    path: Path, pins: dict[str, int], collect: Path | None = None
+) -> dict[str, Any]:
+    """Every pinned file must run, with its exact case count: 0 fail/error/skip."""
     cases = parse_junit(path) if path.is_file() else []
     counts = {"passed": 0, "failed": 0, "skipped": 0}
     for c in cases:
         counts[c["outcome"]] += 1
-    ok = bool(cases) and counts["failed"] == 0 and counts["skipped"] == 0
+    files = list(pins)
+    ran = _count_by_file(cases, files)
+    collected: dict[str, int] = dict.fromkeys(files, 0)
+    if collect is not None and collect.is_file():
+        for line in collect.read_text(encoding="utf-8").splitlines():
+            for f in files:
+                if line.startswith(f + "::"):
+                    collected[f] += 1
+    counts_ok = ran == pins and collected == pins and len(cases) == sum(pins.values())
+    ok = counts_ok and counts["failed"] == 0 and counts["skipped"] == 0
     return {
         "id": "recovery_contract_suite",
-        "title": "conformance/recovery_source/test_contract.py against the "
+        "title": "pytest --noconftest over the pinned recovery files, against the "
         "P0-built Control wheel",
-        "suite": "conformance/recovery_source/test_contract.py",
+        "files": files,
+        "pinned_counts": pins,
+        "collected_counts": collected,
+        "ran_counts": ran,
         "status": "PASS" if ok else "FAIL",
         "cases": len(cases),
         **counts,
@@ -225,7 +257,25 @@ def wheelhouse_block(path: Path) -> dict[str, Any]:
     _digest(doc["lock_sha256"], "lock sha")
     for w in doc["wheels"]:
         _digest(w["sha256"], "wheel sha")
-    return {"status": "PRESENT", **doc, "offline_install_verified": True}
+    resolved = {
+        name: next(
+            (
+                w["wheel"].split("-")[1]
+                for w in doc["wheels"]
+                if w["wheel"].lower().startswith(name + "-")
+            ),
+            None,
+        )
+        for name in ("dotmac_kernel", "fastapi")
+    }
+    return {
+        "status": "PRESENT",
+        **doc,
+        "offline_install_verified": True,
+        "resolved_closure_note": "the recovery suite is qualified on this sha-pinned "
+        "closure, not CP's own lock",
+        "resolved_versions": resolved,
+    }
 
 
 def ci_runs_block(path: Path) -> dict[str, Any]:
@@ -247,7 +297,11 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
     if control_junit.is_file():
         cases += parse_junit(control_junit)
     judged = judge_scenarios(scenarios, cases)
-    recovery = judge_recovery_suite(Path(args.recovery_junit))
+    recovery = judge_recovery_suite(
+        Path(args.recovery_junit),
+        load_recovery_pins(Path(args.scenarios)),
+        Path(args.recovery_collect),
+    )
     judged.append(recovery)
     observe_path = Path(args.observe_result)
     observe = (
@@ -300,7 +354,10 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
         "recovery_observe_native": observe,
         "observer_sql_native": observer_sql,
         "recovery_contract": {
-            "suite": recovery["suite"],
+            "files": recovery["files"],
+            "pinned_counts": recovery["pinned_counts"],
+            "collected_counts": recovery["collected_counts"],
+            "ran_counts": recovery["ran_counts"],
             "cp_repository": args.cp_repo,
             "cp_recovery_commit": _sha(args.recovery_cp_commit, "recovery cp commit"),
             "control_wheel_sha256": args.control_wheel_sha256,
@@ -397,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
         "foundation-commit",
         "recovery-junit", "wheelhouse-manifest", "control-junit", "ci-runs",
         "observe-result",
+        "recovery-collect",
         "observer-sql-result",
         "recovery-cp-commit", "recovery-parity",
     ):  # fmt: skip

@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sys
 from datetime import UTC, datetime, timedelta
@@ -139,6 +140,10 @@ def main(argv: list[str]) -> int:
             "kit": "kit-v5",
             "image_id": image_id,
             "dsn_scheme": "postgresql",
+            "seed_pairing": {
+                "seed_control_ref": os.environ.get("C4_SEED_REF", ""),
+                "image_control_version": os.environ.get("C4_IMAGE_CONTROL_VERSION", ""),
+            },
             "stop_name": stop,
             "stdout_sha256": hashlib.sha256(stdout.encode()).hexdigest(),
             "checks": checks,
