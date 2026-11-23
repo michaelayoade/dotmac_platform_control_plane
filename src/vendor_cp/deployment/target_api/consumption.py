@@ -367,7 +367,7 @@ class MaterialsHandler:
 class ObservationSink(Protocol):
     def record(
         self, db: Session, *, call: AuthenticatedCall, body: bytes
-    ) -> HandlerResult: ...
+    ) -> Mapping[str, object]: ...
 
 
 class ObservationHandler:
@@ -377,7 +377,9 @@ class ObservationHandler:
     def post(self, call: AuthenticatedCall, db: Session) -> HandlerResult:
         if self._sink is None:
             return HandlerResult(503, {"error": "observations_not_composed"})
-        return self._sink.record(db, call=call, body=call.body)
+        return HandlerResult(
+            200, dict(self._sink.record(db, call=call, body=call.body))
+        )
 
 
 class TargetApiHandlers:
