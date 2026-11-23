@@ -10,7 +10,7 @@ From the CP worktree, the source-only qualification environment used on
 2026-11-23 was:
 
 ```sh
-PYTHONPATH=src:../control/src:/Users/michaelayoade/Documents/projects/dotmac_starter_mt/.venv/lib/python3.12/site-packages:/Users/michaelayoade/Documents/projects/dotmac_starter_mt/packages/dotmac-kernel/src \
+PYTHONPATH=src:$CONTROL_SRC:$VENV/lib/python3.12/site-packages:$KERNEL_SRC \
 ../control/.venv-recovery-tests/bin/python -m pytest --noconftest \
   conformance/recovery_source/test_contract.py \
   tests/unit/test_foundation_execution_approval.py -q
