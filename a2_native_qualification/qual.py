@@ -167,6 +167,9 @@ def judge_recovery_suite(
             for f in files:
                 if line.startswith(f + "::"):
                     collected[f] += 1
+                elif line.startswith(f + ": "):  # quiet form: "path: N"
+                    tail = line[len(f) + 2 :].strip()
+                    collected[f] += int(tail) if tail.isdigit() else 0
     counts_ok = ran == pins and collected == pins and len(cases) == sum(pins.values())
     ok = counts_ok and counts["failed"] == 0 and counts["skipped"] == 0
     return {

@@ -340,6 +340,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -uo pipefail
+          set +e   # every stage is judged explicitly; none may abort the step
           out="$RUNNER_TEMP/out"
           c4="$GITHUB_WORKSPACE/a2_native_qualification/c4"
           work="$(mktemp -d)"

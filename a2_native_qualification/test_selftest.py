@@ -491,6 +491,21 @@ class RecoverySuiteTests(unittest.TestCase):
                 "FAIL",
             )
 
+    def test_quiet_collect_form_counts_too(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            quiet = tmp / "q.txt"
+            quiet.write_text("x/a.py: 2\ny/b.py: 1\n")
+            r = qual.judge_recovery_suite(
+                self.junit(tmp, self.good()), self.PINS, quiet
+            )
+            self.assertEqual(r["status"], "PASS")
+            quiet.write_text("x/a.py: 2\ny/b.py: 2\n")
+            r = qual.judge_recovery_suite(
+                self.junit(tmp, self.good()), self.PINS, quiet
+            )
+            self.assertEqual(r["status"], "FAIL")
+
     def test_shipped_pins_are_14_and_24(self) -> None:
         pins = qual.load_recovery_pins(HERE / "scenarios.json")
         self.assertEqual(
