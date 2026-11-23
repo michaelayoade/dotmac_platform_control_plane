@@ -170,6 +170,12 @@ class ReceiptTests(unittest.TestCase):
                         "postgres:16",
                         "--pytest-rc",
                         "1",
+                        "--recovery-junit",
+                        str(tmp / "absent2.xml"),
+                        "--recovery-cp-commit",
+                        "8" * 40,
+                        "--recovery-parity",
+                        "true",
                         "--foundation-repo",
                         "o/f",
                         "--foundation-commit",
@@ -189,6 +195,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertTrue(doc["values_free"])
         self.assertEqual(doc["gate2_item"], "NATIVE_PG")
         self.assertIn("r.json", sums)
+        self.assertEqual(doc["recovery_contract"]["status"], "FAIL")
         self.assertEqual(
             {s["id"]: s["status"] for s in doc["scenarios"]}[
                 "a_standing_withdrawal_locking"

@@ -124,6 +124,24 @@ def judge_scenarios(
     return out
 
 
+def judge_recovery_suite(path: Path) -> dict[str, Any]:
+    """The whole recovery contract file must run and pass (a skip is a failure)."""
+    cases = parse_junit(path) if path.is_file() else []
+    counts = {"passed": 0, "failed": 0, "skipped": 0}
+    for c in cases:
+        counts[c["outcome"]] += 1
+    ok = bool(cases) and counts["failed"] == 0 and counts["skipped"] == 0
+    return {
+        "id": "recovery_contract_suite",
+        "title": "conformance/recovery_source/test_contract.py against the "
+        "P0-built Control wheel",
+        "suite": "conformance/recovery_source/test_contract.py",
+        "status": "PASS" if ok else "FAIL",
+        "cases": len(cases),
+        **counts,
+    }
+
+
 def overall(scenarios: list[dict[str, Any]]) -> str:
     states = {s["status"] for s in scenarios}
     if states == {"PASS"}:
@@ -170,6 +188,8 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
     junit = Path(args.junit)
     cases = parse_junit(junit) if junit.is_file() else []
     judged = judge_scenarios(scenarios, cases)
+    recovery = judge_recovery_suite(Path(args.recovery_junit))
+    judged.append(recovery)
     log = Path(args.log)
     return {
         "schema": PG_SCHEMA,
@@ -203,6 +223,18 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
                 "sha256": _digest(args.control_wheel_sha256, "control wheel"),
             },
             "cp_image_id": args.cp_image_id,
+        },
+        "recovery_contract": {
+            "suite": recovery["suite"],
+            "cp_repository": args.cp_repo,
+            "cp_recovery_commit": _sha(args.recovery_cp_commit, "recovery cp commit"),
+            "control_wheel_sha256": args.control_wheel_sha256,
+            "control_commit": args.control_commit,
+            "ran_against_installed_control_wheel": args.recovery_parity == "true",
+            "status": recovery["status"],
+            "junit_sha256": sha256_file(Path(args.recovery_junit))
+            if Path(args.recovery_junit).is_file()
+            else None,
         },
         "installed_artifact_parity": {
             "tests_import_installed_wheel": args.parity == "true",
@@ -274,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         "control-wheel-name", "control-wheel-sha256", "cp-image-id", "parity",
         "server-version", "postgres-image", "pytest-rc", "foundation-repo",
         "foundation-commit",
+        "recovery-junit", "recovery-cp-commit", "recovery-parity",
     ):  # fmt: skip
         pg.add_argument(f"--{flag}", required=True)
     bao = sub.add_parser("bao-receipt")

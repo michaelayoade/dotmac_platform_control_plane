@@ -23,7 +23,7 @@ on:
       control_ref:
         description: >-
           Commit of dotmac_deployment_control whose wheel is built and bound.
-          Default: Control #76 head (v2 vendored in CP #269).
+          Default: Control #76 head (P0-built recovery source).
         required: false
         default: ""
       require_complete:
@@ -42,7 +42,9 @@ permissions:
 
 env:
   CP_REF_DEFAULT: 8e469b2fea9a007988c3815d138875c6df82aa11
-  CONTROL_REF_DEFAULT: dfe7133a6a97441298cdf9dacba6f0e9661698c2
+  CONTROL_REF_DEFAULT: 2ea62ee84e1ffdd4674c67b3fe66c2bc6c570006
+  # CP draft #272 (recovery source): carries conformance/recovery_source/test_contract.py.
+  RECOVERY_CP_REF: 8d7c05ff060e380bd266255b95127c85baef8fcd
   # The Starter commit CP #269's own Lane 3 step pins for the Foundation import.
   FOUNDATION_REF: f50d497e4df178e1411d2b4fccbfa153a21fd12a
   OPENBAO_IMAGE: openbao/openbao@sha256:fdc6da21ca6963560c32336fd7feb9cf2d5e52668f1a1647205a4b41171f0806
@@ -89,6 +91,13 @@ jobs:
           ref: ${{ inputs.cp_ref || env.CP_REF_DEFAULT }}
           path: cp-src
           persist-credentials: false
+      - name: Fetch the CP recovery source (#272) for the recovery contract suite
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_platform_control_plane
+          ref: ${{ env.RECOVERY_CP_REF }}
+          path: cp-recovery-src
+          persist-credentials: false
       - name: Fetch the Control source to build
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,10 +119,12 @@ jobs:
       - name: Record the three source commits
         run: |
           set -euo pipefail
-          for d in cp-src control-src foundation-src; do
+          for d in cp-src cp-recovery-src control-src foundation-src; do
             test -z "$(git -C "$d" status --porcelain=v1 --untracked-files=all)"
           done
           echo "CP_COMMIT=$(git -C cp-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "RECOVERY_CP_COMMIT=$(git -C cp-recovery-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          test "$(git -C cp-recovery-src rev-parse HEAD)" = "$RECOVERY_CP_REF"
           echo "CONTROL_COMMIT=$(git -C control-src rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "FOUNDATION_COMMIT=$(git -C foundation-src rev-parse HEAD)" >> "$GITHUB_ENV"
           test "$(git -C foundation-src rev-parse HEAD)" = "$FOUNDATION_REF"
@@ -175,6 +186,34 @@ jobs:
           rc="${PIPESTATUS[0]}"
           echo "PYTEST_RC=${rc}" >> "$GITHUB_ENV"
           exit 0
+      - name: Recovery contract suite against the BUILT Control wheel (own environment)
+        working-directory: cp-recovery-src
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -uo pipefail
+          # A separate project directory gets its own virtualenv, so the #272
+          # vendor_cp and the Control wheel never touch the pg job's environment.
+          set +e
+          (
+            set -e
+            poetry install --no-root --no-interaction --no-ansi
+            poetry build --no-interaction --no-ansi
+            poetry run python -m pip install --disable-pip-version-check --no-deps --no-index --force-reinstall dist/*.whl "$RUNNER_TEMP"/control-dist/*.whl
+            # The suite must import the INSTALLED Control wheel and CP wheel,
+            # never a sibling source tree.
+            poetry run python -c 'import dotmac_deployment_control as c, vendor_cp, sys; sys.exit(0 if "site-packages" in c.__file__ and "site-packages" in vendor_cp.__file__ else 1)'
+          )
+          prc=$?
+          echo "RECOVERY_PARITY=$([ "$prc" = 0 ] && echo true || echo false)" >> "$GITHUB_ENV"
+          if [ "$prc" = 0 ]; then
+            poetry run pytest -rs -p no:cacheprovider -o junit_family=xunit1 \
+              --junitxml="$RUNNER_TEMP/out/recovery-junit.xml" \
+              conformance/recovery_source/test_contract.py 2>&1 | tee "$RUNNER_TEMP/out/recovery.log"
+          fi
+          exit 0
       - name: Build the CP image locally (bound by id, never pushed)
         env:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
@@ -200,7 +239,10 @@ jobs:
             --control-wheel-name "$CONTROL_WHEEL_NAME" --control-wheel-sha256 "$CONTROL_WHEEL_SHA256" \
             --cp-image-id "${CP_IMAGE_ID:-unbuilt}" --parity "${PARITY:-false}" \
             --server-version "${PG_SERVER_VERSION:-unknown}" --postgres-image "${PG_IMAGE:-unknown}" \
-            --pytest-rc "${PYTEST_RC:-255}"
+            --pytest-rc "${PYTEST_RC:-255}" \
+            --recovery-junit "$RUNNER_TEMP/out/recovery-junit.xml" \
+            --recovery-cp-commit "$RECOVERY_CP_COMMIT" \
+            --recovery-parity "${RECOVERY_PARITY:-false}"
           (cd "$RUNNER_TEMP/out" && sha256sum pg.log pg-junit.xml > a2-native-pg-qualification-inputs.sha256) || true
       - name: Stop PostgreSQL
         if: always()
