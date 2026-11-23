@@ -81,13 +81,7 @@ def test_the_target_api_has_no_database_dsn_engine_or_foundation_import() -> Non
 def test_lane_5b_does_not_compose_the_router_into_any_profile() -> None:
     """Mounting is lane 5a's (the M4 profile); until then nothing is reachable."""
     assembly = (ROOT / "src" / "vendor_cp" / "assembly.py").read_text(encoding="utf-8")
-    # only the route-less declarations (`target_api.feature`) are composed
-    assert "target_api.router" not in assembly
-    assert "target_api.runtime" not in assembly
-    from vendor_cp.deployment.target_api.feature import feature
-
-    assert not feature.routers
-    assert not feature.web_routers
+    assert "target_api" not in assembly
 
 
 def _control_pin() -> int:
