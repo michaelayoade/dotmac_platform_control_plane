@@ -112,6 +112,7 @@ class _Replay:
         self.db, self.engine, self.port = db, engine, _Port()
         self.ids: dict[str, str] = {}
         self.acquired_at: dict[str, int] = {}
+        self.last_run = ""
         self.n = 0
         self.base = db.now()
         self.at = 0
@@ -221,6 +222,7 @@ def test_every_v2_lease_scenario_replays_through_the_real_router(
         args, name = step["args"], step["call"]
         replay.clock_to(step["at"])
         if name == "acquire":
+            replay.last_run = args["dispatch_run"]
             replay.port.plan = LeasePlan(
                 "deploy", None, args["ttl_seconds"], args["lease_max_seconds"]
             )
@@ -231,6 +233,10 @@ def test_every_v2_lease_scenario_replays_through_the_real_router(
         assert "X-Dotmac-Response-Signature" in response.headers, where
         got = response.json()
         got.pop("store_now")  # the router's own CP-time stamp, not a lease field
+        if name == "standing" and got.get("standing") == "expired_unreleased":
+            # Architect r4 ruling 3 (newer than the vendored pin): standing names the
+            # expired dispatch. Drop this when Control's regenerated v2 is re-vendored.
+            assert got.pop("dispatch_run") == replay.last_run, where
         if "error" in step:
             assert got == {"error": step["error"]}, where
             assert step["error"] in LEASE_ERRORS, where
