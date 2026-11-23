@@ -85,7 +85,7 @@ class LeasePlanRefused(Exception):  # noqa: N818
 @dataclass(frozen=True, slots=True)
 class DeployLease:
     lease_id: UUID
-    #: The per-grant TTL the lease was taken with.
+    #: The TTL granted; a replayed acquire answers the REMAINING seconds.
     ttl_seconds: int
     acquired_at: datetime
     expires_at: datetime
@@ -114,6 +114,9 @@ class DeployStanding:
     lease_id: UUID
     expires_at: datetime
     store_now: datetime
+    #: The lease's run (`<target_ref>#<dispatch_id>`): names the dispatch that held
+    #: it, which the agent needs when that lease expired unreleased.
+    dispatch_run: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,10 +301,10 @@ class DeployLeaseStore:
     def standing(self, host_id: str) -> DeployStanding:
         """The host's standing on store time (`held`, `released`, ...)."""
         row = self._one(
-            "SELECT o_standing, o_lease_id, o_expires_at, o_store_now "
+            "SELECT o_standing, o_lease_id, o_expires_at, o_store_now, o_dispatch_run "
             "FROM cp_deploy_lease.deploy_standing(:host)",
             {"host": host_id},
         )
         if row[0] not in STANDINGS:
             raise DeployLeaseRefused(STORE_ERROR)
-        return DeployStanding(row[0], row[1], row[2], row[3])
+        return DeployStanding(row[0], row[1], row[2], row[3], row[4])

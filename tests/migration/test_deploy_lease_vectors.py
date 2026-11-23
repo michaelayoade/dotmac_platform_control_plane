@@ -111,6 +111,7 @@ class _Replay:
         monkeypatch.setitem(c._VERBS, "lease/renew", "POST")
         self.db, self.engine, self.port = db, engine, _Port()
         self.ids: dict[str, str] = {}
+        self.acquired_at: dict[str, int] = {}
         self.n = 0
         self.base = db.now()
         self.at = 0
@@ -236,6 +237,13 @@ def test_every_v2_lease_scenario_replays_through_the_real_router(
             continue
         want = dict(step["body"])
         if name == "acquire":
+            if want["lease_id"] in replay.ids:
+                # Architect r4 ruling 4 (newer than the vendored pin): a replayed
+                # same-run acquire answers the REMAINING ttl. Drop this adjustment
+                # when Control's regenerated v2 is re-vendored.
+                want["ttl_seconds"] -= step["at"] - replay.acquired_at[want["lease_id"]]
+            else:
+                replay.acquired_at[want["lease_id"]] = step["at"]
             replay.ids[want["lease_id"]] = got["lease_id"]
         if "lease_id" in want:
             want["lease_id"] = replay.ids.get(want["lease_id"], want["lease_id"])

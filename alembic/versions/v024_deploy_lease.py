@@ -236,7 +236,8 @@ FUNCTIONS_SQL = (
     # its own live lease back, never a second one
     "IF v_dl.dispatch_run = p_run AND v_dl.principal_ref = p_principal "
     "AND v_dl.target_ref = p_target_ref THEN "
-    "RETURN QUERY SELECT l.lease_id, l.ttl_seconds, l.acquired_at, v_exp, v_now "
+    "RETURN QUERY SELECT l.lease_id, "
+    "ceil(extract(epoch FROM (v_exp - v_now)))::integer, l.acquired_at, v_exp, v_now "
     f"FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_prev; "
     "RETURN; END IF; " + _refuse("lease-held-by-another-run") + " END IF; "
     # expired unreleased: only a reconcile marker reopens the host
@@ -338,7 +339,7 @@ FUNCTIONS_SQL = (
     # deploy_standing: the host's standing on store time, for GET lease/standing.
     f"CREATE FUNCTION {SCHEMA}.deploy_standing(p_host text) "
     "RETURNS TABLE (o_standing text, o_lease_id uuid, o_expires_at timestamptz, "
-    "o_store_now timestamptz) " + _DEFINER + " AS $$ "
+    "o_store_now timestamptz, o_dispatch_run text) " + _DEFINER + " AS $$ "
     "DECLARE v_id uuid; v_l record; v_now timestamptz; v_s text; v_e timestamptz; "
     "BEGIN "
     "SELECT hc.lease_id INTO v_id FROM cp_lane3.host_current_lease hc "
@@ -352,7 +353,7 @@ FUNCTIONS_SQL = (
     "WHERE x.lease_id = v_id) THEN v_s := 'released'; "
     "ELSIF v_now >= v_e THEN v_s := 'expired_unreleased'; "
     "ELSE v_s := 'held'; END IF; "
-    "RETURN QUERY SELECT v_s, v_l.lease_id, v_e, v_now; END $$",
+    "RETURN QUERY SELECT v_s, v_l.lease_id, v_e, v_now, v_l.dispatch_run; END $$",
 )
 
 #: Every function the runtime role is granted. Written down because the grant,

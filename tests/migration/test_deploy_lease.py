@@ -358,11 +358,13 @@ def test_deploy_lease_double_release_refused(env: Any) -> None:
 def test_deploy_lease_reacquire_by_the_same_run_returns_its_lease(env: Any) -> None:
     """A lost response must not strand the agent: the retry gets the SAME lease, and
     a different run, principal or target still does not."""
-    _db, rt = env
+    db, rt = env
     first = rt.acquire()
+    db.advance(None, 10)
     again = rt.acquire(ttl_seconds=600)  # the retry's ttl does not extend or replace
     assert again.lease_id == first.lease_id
     assert again.expires_at == first.expires_at
+    assert again.ttl_seconds == first.ttl_seconds - 10  # the REMAINING ttl
     _refused("lease-held-by-another-run", lambda: rt.acquire(principal_ref="other"))
     _refused("lease-held-by-another-run", lambda: rt.acquire(target_ref="p/e/other"))
     _refused("lease-held-by-another-run", lambda: rt.acquire(dispatch_run="other"))
@@ -996,3 +998,20 @@ def test_deploy_acquire_without_a_marker_after_expiry_is_reconcile_marker_requir
     rt.acquire(ttl_seconds=120)
     db.advance(None, 121)
     _refused("reconcile-marker-required", lambda: rt.acquire(dispatch_run="x"))
+
+
+def test_standing_names_the_expired_dispatch_and_a_deletion_cannot_free_the_host(
+    env: Any,
+) -> None:
+    db, rt = env
+    rt.acquire(ttl_seconds=120, dispatch_run=dispatch_run(TARGET, "d-1"))
+    db.advance(None, 121)
+    standing = rt.standing()
+    assert standing.standing == "expired_unreleased"
+    assert standing.dispatch_run == dispatch_run(TARGET, "d-1")
+    # append-only: deleting the row (even as the owner) is refused, so an expired
+    # host cannot be made to look free; a never-leased host acquires without a marker
+    with pytest.raises(DBAPIError), db.admin.begin() as conn:
+        conn.execute(text("DELETE FROM cp_deploy_lease.deploy_host_leases"))
+    assert rt.standing().standing == "expired_unreleased"
+    rt.acquire(host_id="host-b", dispatch_run="dispatch-run-2")  # no marker needed

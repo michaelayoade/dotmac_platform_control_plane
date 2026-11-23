@@ -119,6 +119,7 @@ class FakeStore:
         self.refuse: str | None = None
         self.fault: bool = False
         self.replay: bool = False
+        self.standing_value = "held"
 
     def _go(self, name: str, **kw: Any) -> None:
         self.calls.append((name, kw))
@@ -146,7 +147,13 @@ class FakeStore:
 
     def standing(self, host_id: str) -> DeployStanding:
         self._go("standing", host_id=host_id)
-        return DeployStanding("held", UUID(_LEASE), _NOW + timedelta(seconds=60), _NOW)
+        return DeployStanding(
+            self.standing_value,
+            UUID(_LEASE),
+            _NOW + timedelta(seconds=60),
+            _NOW,
+            _RUN,
+        )
 
 
 class Rig:
@@ -465,6 +472,16 @@ def test_standing_reads_the_targets_own_host() -> None:
     assert response.status_code == 200
     assert response.json()["standing"] == "held"
     assert rig.store.calls == [("standing", {"host_id": "host-a"})]
+
+
+def test_standing_names_the_expired_dispatch_only_when_expired_unreleased() -> None:
+    rig = Rig()
+    rig.store.standing_value = "expired_unreleased"
+    assert rig.call("GET", "lease/standing").json()["dispatch_run"] == "d-1"
+    rig.store.standing_value = "held"
+    assert "dispatch_run" not in rig.call("GET", "lease/standing").json()
+    rig.store.standing_value = "released"
+    assert rig.call("GET", "lease/standing").json()["standing"] == "free"
 
 
 def test_standing_of_a_never_leased_host_is_free_not_an_error() -> None:
