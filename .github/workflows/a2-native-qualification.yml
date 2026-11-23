@@ -1,0 +1,297 @@
+name: a2-native-qualification
+
+# Foundation a2 Gate 2 items #1 (NATIVE_PG) and #2 (i) (NATIVE_BAO): real
+# PostgreSQL 16 and a real OpenBao 2.5.3 server, on disposable GitHub-hosted
+# runners. Each job emits a VALUES-FREE receipt as a workflow artifact.
+#
+# This workflow PUBLISHES NOTHING: permissions are read-only, there is no push,
+# no registry login, no release step; artifacts are workflow artifacts only. The
+# image is built locally on the runner (to bind its id) and never pushed.
+#
+# Triggers: workflow_dispatch and pull_request only. Never push to main (a CP
+# main merge spends a production image).
+
+on:
+  workflow_dispatch:
+    inputs:
+      cp_ref:
+        description: >-
+          Commit of dotmac_platform_control_plane whose tests and artifacts are
+          qualified. Default: CP #269 head (carries #266 and the consume test).
+        required: false
+        default: ""
+      control_ref:
+        description: >-
+          Commit of dotmac_deployment_control whose wheel is built and bound.
+          Default: Control #76 head (v2 vendored in CP #269).
+        required: false
+        default: ""
+      require_complete:
+        description: >-
+          Fail unless EVERY scenario is PASS (a BLOCKED scenario fails the job).
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/a2-native-qualification.yml"
+      - "a2_native_qualification/**"
+
+permissions:
+  contents: read
+
+env:
+  CP_REF_DEFAULT: 8e469b2fea9a007988c3815d138875c6df82aa11
+  CONTROL_REF_DEFAULT: dfe7133a6a97441298cdf9dacba6f0e9661698c2
+  # The Starter commit CP #269's own Lane 3 step pins for the Foundation import.
+  FOUNDATION_REF: f50d497e4df178e1411d2b4fccbfa153a21fd12a
+  OPENBAO_IMAGE: openbao/openbao@sha256:fdc6da21ca6963560c32336fd7feb9cf2d5e52668f1a1647205a4b41171f0806
+  REQUIRE_COMPLETE: ${{ github.event_name == 'workflow_dispatch' && inputs.require_complete }}
+
+jobs:
+  selftest:
+    # Offline tests of the receipt tooling: synthetic junit, no engine, no secret.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Receipt tooling self-tests
+        run: python -I a2_native_qualification/test_selftest.py
+
+  pg:
+    needs: selftest
+    runs-on: ubuntu-24.04
+    env:
+      COMPOSE_PROJECT_NAME: a2-native-pg-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_DB_PORT: "5439"
+      TEST_RESTORE_DB_PORT: "5440"
+      TEST_DB_HOST: 127.0.0.1
+      TEST_DB_NAME: vendor_cp_test
+      TEST_DB_ADMIN_USER: postgres
+      TEST_DB_ADMIN_PASSWORD: postgres
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5439/vendor_cp_test
+      # A skipped test is not a pass: a missing database is a failure.
+      REQUIRE_POSTGRES_TESTS: "1"
+      LANE3_REQUIRE_FOUNDATION: "1"
+      D16_DISPOSABLE_PG16: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch the CP source under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_platform_control_plane
+          ref: ${{ inputs.cp_ref || env.CP_REF_DEFAULT }}
+          path: cp-src
+          persist-credentials: false
+      - name: Fetch the Control source to build
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_deployment_control
+          ref: ${{ inputs.control_ref || env.CONTROL_REF_DEFAULT }}
+          path: control-src
+          persist-credentials: false
+      - name: Fetch the exact Foundation source (Lane 3 import)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_starter_mt
+          ref: ${{ env.FOUNDATION_REF }}
+          path: foundation-src
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - name: Record the three source commits
+        run: |
+          set -euo pipefail
+          for d in cp-src control-src foundation-src; do
+            test -z "$(git -C "$d" status --porcelain=v1 --untracked-files=all)"
+          done
+          echo "CP_COMMIT=$(git -C cp-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "CONTROL_COMMIT=$(git -C control-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "FOUNDATION_COMMIT=$(git -C foundation-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          test "$(git -C foundation-src rev-parse HEAD)" = "$FOUNDATION_REF"
+          echo "QUAL_WORKFLOW_SHA256=$(sha256sum .github/workflows/a2-native-qualification.yml | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "OUT_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+      - name: Build the Control wheel
+        run: |
+          set -euo pipefail
+          poetry -C control-src build --format wheel --output "$RUNNER_TEMP/control-dist"
+          control_wheel="$(ls "$RUNNER_TEMP"/control-dist/*.whl)"
+          echo "CONTROL_WHEEL_NAME=$(basename "$control_wheel")" >> "$GITHUB_ENV"
+          echo "CONTROL_WHEEL_SHA256=$(sha256sum "$control_wheel" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+      - name: Install CP dependencies and the BUILT CP wheel (not the source tree)
+        working-directory: cp-src
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          poetry install --no-root --no-interaction --no-ansi
+          poetry build --no-interaction --no-ansi
+          cp_wheel="$(ls dist/*.whl)"
+          poetry run python -m pip install --disable-pip-version-check --no-deps --no-index --force-reinstall "$cp_wheel"
+          echo "CP_WHEEL_NAME=$(basename "$cp_wheel")" >> "$GITHUB_ENV"
+          echo "CP_WHEEL_SHA256=$(sha256sum "$cp_wheel" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          # Installed-artifact parity: the tests must import the installed wheel.
+          parity=false
+          if poetry run python -c 'import vendor_cp, sys; sys.exit(0 if "site-packages" in vendor_cp.__file__ else 1)'; then
+            parity=true
+          fi
+          echo "PARITY=$parity" >> "$GITHUB_ENV"
+          test "$parity" = true
+      - name: Start disposable PostgreSQL 16 and migrate
+        working-directory: cp-src
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.test.yml up -d --wait
+          server_version="$(docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d vendor_cp_test -Atc 'SHOW server_version')"
+          test "${server_version%%.*}" = 16
+          echo "PG_SERVER_VERSION=${server_version}" >> "$GITHUB_ENV"
+          echo "PG_IMAGE=$(grep -o 'postgres:16@sha256:[0-9a-f]\{64\}' docker-compose.test.yml | head -1)" >> "$GITHUB_ENV"
+          MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test \
+            poetry run dotmac-platform admin migrate
+      - name: Run the named scenarios (existing CP tests, by name)
+        id: tests
+        working-directory: cp-src
+        env:
+          PYTHONPATH: ${{ github.workspace }}/foundation-src/packages/dotmac-deployment-foundation/src
+          PYTHONDONTWRITEBYTECODE: "1"
+          LANE3_STARTER_SOURCE_DIR: ${{ github.workspace }}/foundation-src
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          mapfile -t targets < <(python3 -I "$GITHUB_WORKSPACE/a2_native_qualification/qual.py" pg-select --scenarios "$GITHUB_WORKSPACE/a2_native_qualification/scenarios.json")
+          # The scenario files are run by name from the checkout under test.
+          set +e
+          poetry run pytest -rs -p no:cacheprovider -o junit_family=xunit1 \
+            --junitxml="$RUNNER_TEMP/out/pg-junit.xml" "${targets[@]}" 2>&1 | tee "$RUNNER_TEMP/out/pg.log"
+          rc="${PIPESTATUS[0]}"
+          echo "PYTEST_RC=${rc}" >> "$GITHUB_ENV"
+          exit 0
+      - name: Build the CP image locally (bound by id, never pushed)
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
+            --build-arg "SOURCE_REVISION=${CP_COMMIT}" \
+            --tag a2-native-qual-cp:local cp-src
+          echo "CP_IMAGE_ID=$(docker image inspect --format '{{.Id}}' a2-native-qual-cp:local)" >> "$GITHUB_ENV"
+      - name: Write the receipt
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 -I a2_native_qualification/qual.py pg-receipt \
+            --scenarios a2_native_qualification/scenarios.json \
+            --junit "$RUNNER_TEMP/out/pg-junit.xml" --log "$RUNNER_TEMP/out/pg.log" \
+            --out-dir "$RUNNER_TEMP/out" --stem "a2-native-pg-qualification-${OUT_DATE}" \
+            --cp-repo michaelayoade/dotmac_platform_control_plane --cp-commit "$CP_COMMIT" \
+            --control-repo michaelayoade/dotmac_deployment_control --control-commit "$CONTROL_COMMIT" \
+            --foundation-repo michaelayoade/dotmac_starter_mt --foundation-commit "$FOUNDATION_COMMIT" \
+            --cp-wheel-name "$CP_WHEEL_NAME" --cp-wheel-sha256 "$CP_WHEEL_SHA256" \
+            --control-wheel-name "$CONTROL_WHEEL_NAME" --control-wheel-sha256 "$CONTROL_WHEEL_SHA256" \
+            --cp-image-id "${CP_IMAGE_ID:-unbuilt}" --parity "${PARITY:-false}" \
+            --server-version "${PG_SERVER_VERSION:-unknown}" --postgres-image "${PG_IMAGE:-unknown}" \
+            --pytest-rc "${PYTEST_RC:-255}"
+          (cd "$RUNNER_TEMP/out" && sha256sum pg.log pg-junit.xml > a2-native-pg-qualification-inputs.sha256) || true
+      - name: Stop PostgreSQL
+        if: always()
+        working-directory: cp-src
+        run: docker compose -f docker-compose.test.yml down -v
+      - name: Retain the receipt (workflow artifact only; nothing is published)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: a2-native-pg-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 90
+      - name: Gate (FAIL always fails; INCOMPLETE fails when completeness is required)
+        run: |
+          set -euo pipefail
+          flag=""
+          if [ "$REQUIRE_COMPLETE" != "true" ]; then flag="--allow-incomplete"; fi
+          python3 -I a2_native_qualification/qual.py gate $flag \
+            --receipt "$RUNNER_TEMP/out/a2-native-pg-qualification-${OUT_DATE}.json"
+
+  bao:
+    needs: selftest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Start a real OpenBao 2.5.3 server (file storage, initialised here)
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/bao"
+          mkdir -p "$work/config" "$work/audit" "$work/data"
+          chmod 777 "$work/audit" "$work/data"
+          cat > "$work/config/bao.hcl" <<'HCL'
+          storage "file" {
+            path = "/openbao/file"
+          }
+          listener "tcp" {
+            address     = "0.0.0.0:8200"
+            tls_disable = true
+          }
+          disable_mlock = true
+          api_addr      = "http://127.0.0.1:8200"
+          ui            = false
+          HCL
+          docker pull "$OPENBAO_IMAGE"
+          docker run -d --name a2-native-bao \
+            -p 127.0.0.1:18201:8200 \
+            -v "$work/config:/cfg:ro" \
+            -v "$work/data:/openbao/file" \
+            -v "$work/audit:/bao-audit" \
+            "$OPENBAO_IMAGE" server -config=/cfg/bao.hcl
+          echo "QUAL_WORKFLOW_SHA256=$(sha256sum .github/workflows/a2-native-qualification.yml | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "OUT_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+      - name: Run the OpenBao checks
+        id: checks
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out"
+          python3 -I a2_native_qualification/bao_qualify.py \
+            --addr http://127.0.0.1:18201 \
+            --audit-container-path /bao-audit/audit.log \
+            --audit-host-path "$RUNNER_TEMP/bao/audit/audit.log" \
+            --out "$out/bao-results.json" 2>&1 | tee "$out/bao.log"
+          exit 0
+      - name: Write the receipt
+        if: always()
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"
+          python3 -I a2_native_qualification/qual.py bao-receipt \
+            --results "$out/bao-results.json" --log "$out/bao.log" \
+            --out-dir "$out" --stem "a2-native-bao-qualification-${OUT_DATE}" \
+            --image "$OPENBAO_IMAGE"
+      - name: Stop OpenBao
+        if: always()
+        run: docker rm -f a2-native-bao || true
+      - name: Retain the receipt (workflow artifact only; nothing is published)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: a2-native-bao-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 90
+      - name: Gate
+        run: |
+          python3 -I a2_native_qualification/qual.py gate \
+            --receipt "$RUNNER_TEMP/out/a2-native-bao-qualification-${OUT_DATE}.json"

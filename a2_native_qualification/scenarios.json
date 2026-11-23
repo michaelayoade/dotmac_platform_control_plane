@@ -1,0 +1,46 @@
+{
+  "schema": "dotmac.a2.native-pg-scenarios.v1",
+  "comment": "Scenario -> existing CP tests, invoked by name from the checkout under test (CP #269 head, which carries #266 and the 5b consume test). Scenarios with an empty test list are BLOCKED on packet P0 (dispatch-only recovery source) and can never read as PASS.",
+  "scenarios": [
+    {
+      "id": "a_standing_withdrawal_locking",
+      "title": "approval standing GRANTED/non-revoked at hold (FOR SHARE) and withdrawal FOR UPDATE conflict",
+      "blocked_on": "P0: dispatch-only recovery source is not yet on a CP/Control branch",
+      "tests": []
+    },
+    {
+      "id": "b_cross_class_host_lock",
+      "title": "v023 rehearsal acquire vs v024 deploy acquire under concurrency: one winner",
+      "tests": [
+        "tests/migration/test_deploy_lease_cross_class.py::test_shared_row_lock_across_classes",
+        "tests/migration/test_deploy_lease_cross_class.py::test_deploy_and_rehearsal_acquires_race_for_one_host",
+        "tests/migration/test_deploy_lease_cross_class.py::test_deploy_lease_released_host_is_refused_by_a_plain_rehearsal_acquire"
+      ]
+    },
+    {
+      "id": "c_expiry_on_store_now",
+      "title": "expiry judged on store_now() for renew, covers and release; a late release is refused",
+      "tests": [
+        "tests/migration/test_deploy_lease.py::test_deploy_lease_covers_is_judged_on_store_time",
+        "tests/migration/test_deploy_lease.py::test_deploy_lease_release_after_expiry_refused",
+        "tests/migration/test_deploy_lease.py::test_deploy_lease_time_is_store_time",
+        "tests/migration/test_deploy_lease.py::test_no_deploy_function_takes_a_time_from_the_caller",
+        "tests/migration/test_deploy_lease.py::test_deploy_lease_renew_never_resurrects_an_expired_or_released_lease",
+        "tests/migration/test_deploy_lease.py::test_a_late_release_is_lease_expired_and_the_host_stays_expired_unreleased"
+      ]
+    },
+    {
+      "id": "d_first_commit_dispatch_only_recovery",
+      "title": "first-commit dispatch-only recovery: same coordinates, fresh hold, one-use, a second use refused",
+      "blocked_on": "P0: dispatch-only recovery source is not yet on a CP/Control branch",
+      "tests": []
+    },
+    {
+      "id": "e_consume_exactly_once",
+      "title": "two concurrent consumes of one dispatch commit exactly once",
+      "tests": [
+        "tests/migration/test_target_consume_concurrency.py::test_consume_exactly_once_concurrent"
+      ]
+    }
+  ]
+}
