@@ -1,0 +1,8 @@
+# Hash-pinned build backend for the Foundation wheel (H1 differential job).
+# Foundation's own build-system requires only `poetry-core` (no dependencies);
+# the job installs it with --require-hashes and builds with --no-build-isolation,
+# so nothing is resolved from an index at build time. Same pin as the Poetry
+# bootstrap (.github/bootstrap/poetry-requirements.txt).
+poetry-core==2.4.0 \
+    --hash=sha256:4305848477da00272bebd3f615bbec87f64bd117cdb858ab660b626a06a9d96c \
+    --hash=sha256:4e8c7496cf797998ffc493f2e23eba4b038c894c08eadacdcdf688945de6b43a

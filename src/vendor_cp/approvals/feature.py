@@ -16,13 +16,9 @@ URL.
 
 from __future__ import annotations
 
-from dotmac_kernel.features import FeatureManifest
+from dataclasses import replace
 
+from vendor_cp.approvals.declaration import declaration
 from vendor_cp.approvals.router import router
 
-feature = FeatureManifest(
-    name="vendor_approvals",
-    routers=[router],
-    core=True,
-    enabled_by_default=True,
-)
+feature = replace(declaration, routers=[router])

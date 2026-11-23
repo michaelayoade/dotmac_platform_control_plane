@@ -228,6 +228,27 @@
       "deploy_ordering": "The D16 fenced transition and isolated restored-database rehearsal remain required before deployment. v022 retains authoritative evidence and refuses downgrade; repair forward. Runtime enablement remains opt-in and is unchanged.",
       "drift_reading": "Relative to the preceding source declaration, v022_deploy_agent replaces v021_issuer_command_receipts. This is not a production observation.",
       "authored_by": "New immutable candidate and append-only composition-change promotion; exact candidate bytes, changed sections, ledger ancestry and carried-forward application coordinates are checked by tests/architecture/test_descriptor_promotion.py."
+    },
+    {
+      "promoted_at": "2026-11-19",
+      "kind": "composition_change",
+      "candidate": "deploy/candidates/2026-11-19-lane3-store.toml",
+      "descriptor_sha256": "sha256:6becbdb31ca0af59b198cd7b82b9c1637aeddbfbd544174a27f4920896e67e07",
+      "supersedes": "sha256:5dfc6b2028a21d009e7394350df4a4f34d98fe16e6cc56f67e40fb4fcfdea381",
+      "summary": "Declares vendor v023_lane3_store in place of v022_deploy_agent, and the cp_lane3 schema it creates: the Lane 3 lease store and the append-only E10 receipt and destruction records, written only through SECURITY DEFINER functions that no runtime role may execute. The composed effective-head and schema checks re-derive the declaration from the installed lineages. Source composition only; no deployment, database application or activation is claimed or authorized.",
+      "changed_sections": [
+        "migration",
+        "database"
+      ],
+      "carried_forward": {
+        "why": "Source composition declares the next migration heads only. No deployment occurs; accepted image, source revision and assembly manifest remain byte-identical. Prospective composition changes separately and cannot assert live adoption.",
+        "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+        "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+        "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      },
+      "deploy_ordering": "A CP production deploy that runs v023 precedes E11 and is an image-spending act that needs its own authorization; this entry authorizes none. v023 is expand-only and retains evidence; it refuses downgrade, so repair forward.",
+      "drift_reading": "Relative to the preceding source declaration, v023_lane3_store replaces v022_deploy_agent and cp_lane3 is added to the expected schemas. This is not a production observation.",
+      "authored_by": "New immutable candidate and append-only composition-change promotion; exact candidate bytes, changed sections, ledger ancestry and carried-forward application coordinates are checked by tests/architecture/test_descriptor_promotion.py."
     }
   ]
 }

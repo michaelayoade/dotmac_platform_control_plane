@@ -411,10 +411,11 @@ def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
     workflow = _text(".github/workflows/ci.yml")
 
     assert "self-hosted" not in workflow
-    # Four hosted jobs: check, postgres, image, kernel-pin. Postgres pins the
+    # Five hosted jobs: check, postgres, vendored-verifier-differential (H1),
+    # image, kernel-pin. Postgres pins the
     # Ubuntu release supplying native PG16 clients. Both counts remain closed,
     # so a job that stops being hosted fails as loudly as one that is added.
-    assert workflow.count("runs-on: ubuntu-latest") == 3
+    assert workflow.count("runs-on: ubuntu-latest") == 4
     assert workflow.count("runs-on: ubuntu-24.04") == 1
     assert re.search(
         r"^  postgres:\n(?:    #[^\n]*\n)*    runs-on: ubuntu-24\.04$",

@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-from dotmac_kernel import FeatureManifest
+from vendor_cp.release_evidence.declaration import declaration
 
-feature = FeatureManifest(
-    name="release_evidence",
-    core=True,
-    enabled_by_default=True,
-    audit_actions=("vendor.release_evidence.catalogued",),
-)
+feature = declaration

@@ -69,8 +69,9 @@ DEPLOYMENT_CONTROL_HEAD = "dc_0016_controller_key_nonreuse"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 # C2 S4 adds `v020_withdrawal_outcomes` above `v019_relay_heartbeat`; D18
-# adds `v021_issuer_command_receipts` above that; deploy-agent evidence adds v022.
-VENDOR_HEAD = "v022_deploy_agent"
+# adds `v021_issuer_command_receipts` above that; deploy-agent evidence adds v022;
+# the Lane 3 lease store adds v023.
+VENDOR_HEAD = "v023_lane3_store"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:
@@ -267,8 +268,7 @@ def test_ci_cluster_rehearses_the_production_role_bootstrap(
             ]
             assert conn.execute(
                 text(
-                    "SELECT rolpassword IS NULL FROM pg_authid "
-                    "WHERE rolname='postgres'"
+                    "SELECT rolpassword IS NULL FROM pg_authid WHERE rolname='postgres'"
                 )
             ).scalar_one()
             assert (
