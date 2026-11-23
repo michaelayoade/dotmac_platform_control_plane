@@ -193,6 +193,7 @@ jobs:
             tests/migration/test_lane3_e10_database.py \
             tests/migration/test_lane3_store_catalogue.py \
             tests/migration/test_lane3_cp6_export.py \
+            tests/migration/test_deploy_lease_cross_class.py \
             tests/unit/test_lane3_vendored_pins.py \
             tests/unit/test_lane3_host_admission_vector.py \
             --junitxml="$RUNNER_TEMP/lane3-store.xml"

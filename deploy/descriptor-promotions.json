@@ -249,6 +249,27 @@
       "deploy_ordering": "A CP production deploy that runs v023 precedes E11 and is an image-spending act that needs its own authorization; this entry authorizes none. v023 is expand-only and retains evidence; it refuses downgrade, so repair forward.",
       "drift_reading": "Relative to the preceding source declaration, v023_lane3_store replaces v022_deploy_agent and cp_lane3 is added to the expected schemas. This is not a production observation.",
       "authored_by": "New immutable candidate and append-only composition-change promotion; exact candidate bytes, changed sections, ledger ancestry and carried-forward application coordinates are checked by tests/architecture/test_descriptor_promotion.py."
+    },
+    {
+      "promoted_at": "2026-11-23",
+      "kind": "composition_change",
+      "candidate": "deploy/candidates/2026-11-23-deploy-lease.toml",
+      "descriptor_sha256": "sha256:3b81b163d5ce9ac39dd8e9c2c117af5ad37cab9db3af8b906ee8ea35d9af231f",
+      "supersedes": "sha256:6becbdb31ca0af59b198cd7b82b9c1637aeddbfbd544174a27f4920896e67e07",
+      "summary": "Declares vendor v024_deploy_lease in place of v023_lane3_store, and the cp_deploy_lease schema it creates: the production (deploy) lease class, written only through four SECURITY DEFINER functions. The CP runtime role platform_api is granted USAGE on that schema and EXECUTE on those four functions, and nothing in cp_lane3 or on any table. The descriptor declares the schema, one permitted isolation entry for platform_api and three denied entries for the other runtime roles.",
+      "changed_sections": [
+        "migration",
+        "database"
+      ],
+      "carried_forward": {
+        "why": "Source composition declares the next migration heads only. No deployment occurs; accepted image, source revision and assembly manifest remain byte-identical. Prospective composition changes separately and cannot assert live adoption.",
+        "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+        "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+        "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      },
+      "deploy_ordering": "A CP production deploy that runs v024 is an image-spending act that needs its own authorization; this entry authorizes none. It must not run before the CP149 fence ACL line (held_fence_acl_drift) is closed (DESIGN-rev3 6.3). v024 is expand-only and retains evidence; it refuses downgrade, so repair forward.",
+      "drift_reading": "Relative to the preceding source declaration, v024_deploy_lease replaces v023_lane3_store and cp_deploy_lease is added to the expected schemas. This is not a production observation.",
+      "authored_by": "New immutable candidate and append-only composition-change promotion; exact candidate bytes, changed sections, ledger ancestry and carried-forward application coordinates are checked by tests/architecture/test_descriptor_promotion.py."
     }
   ]
 }

@@ -70,8 +70,8 @@ VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 # C2 S4 adds `v020_withdrawal_outcomes` above `v019_relay_heartbeat`; D18
 # adds `v021_issuer_command_receipts` above that; deploy-agent evidence adds v022;
-# the Lane 3 lease store adds v023.
-VENDOR_HEAD = "v023_lane3_store"
+# the Lane 3 lease store adds v023; the deploy lease class adds v024.
+VENDOR_HEAD = "v024_deploy_lease"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:

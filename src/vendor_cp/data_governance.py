@@ -325,6 +325,23 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "lease, `released_at` set by trigger from the database clock; v023 refuses "
         "UPDATE, DELETE and TRUNCATE",
     ),
+    # ── `cp_deploy_lease`, the production lease class (v024) ─────────────
+    _retain(
+        "cp_deploy_lease",
+        "deploy_host_leases",
+        "every production lease ever granted to a persistent app host: who held it, "
+        "for which dispatch run, when it expired, and the reconcile marker that "
+        "reopened an expired-unreleased host. Written only by "
+        "`cp_deploy_lease.deploy_acquire` (SECURITY DEFINER); v024 refuses UPDATE, "
+        "DELETE and TRUNCATE; the CP runtime role holds no table privilege",
+    ),
+    _retain(
+        "cp_deploy_lease",
+        "deploy_host_lease_releases",
+        "the terminal release of a production lease, one per lease, `released_at` "
+        "set by trigger from the database clock; v024 refuses UPDATE, DELETE and "
+        "TRUNCATE",
+    ),
     # ── `public`, kernel lineage ─────────────────────────────────────────
     _retain(
         "public",

@@ -22,6 +22,7 @@ EXPECTED_FILES = {
     "tests.migration.test_lane3_e10_database": 10,
     "tests.migration.test_lane3_store_catalogue": 10,
     "tests.migration.test_lane3_cp6_export": 5,
+    "tests.migration.test_deploy_lease_cross_class": 5,
     "tests.unit.test_lane3_vendored_pins": 3,
     "tests.unit.test_lane3_host_admission_vector": 5,
 }
