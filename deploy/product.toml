@@ -21,15 +21,17 @@
 # indistinguishable from the next CORRECTION.
 #
 # Provenance of these bytes:
-#   candidate    deploy/candidates/2026-10-21-deploy-agent-evidence.toml
-#   promoted     2026-10-21, as a COMPOSITION CHANGE, not a deployment
+#   candidate    deploy/candidates/2026-11-23-deploy-lease.toml
+#   promoted     2026-11-23, as a COMPOSITION CHANGE, not a deployment
 #   record       deploy/descriptor-promotions.json (append-only)
-#   supersedes   deploy/candidates/2026-10-01-controller-key-nonreuse.toml
+#   supersedes   deploy/candidates/2026-11-19-lane3-store.toml
 #
-# Vendor v022_deploy_agent replaces v021_issuer_command_receipts with retained
-# deploy-agent evidence and the public host-key registry. The composed-heads CI
-# gate re-derives the complete set. This source composition changes no runtime
-# activation setting and performs no deployment or database operation.
+# Vendor v024_deploy_lease replaces v023_lane3_store with the production (deploy)
+# lease class in a new `cp_deploy_lease` schema: five SECURITY DEFINER functions
+# only the dedicated lease role may execute, and no table privilege. `cp_lane3` stays
+# unreachable by every runtime role. The composed-heads CI gate re-derives the
+# complete set. This source composition changes no runtime activation setting and
+# performs no deployment or database operation.
 #
 # The image half is UNCHANGED and deliberately so. `[image]` still names the
 # artifact the application is running and `[assembly].manifest_digest` still
@@ -59,7 +61,7 @@
 #   [migration] AHEAD OF THE TARGET. `expected_heads` names what the NEXT
 #               deployment will reach (`ap_0003_withdrawals`,
 #               `cg_0002_approval_withdrawals`, `dc_0016_controller_key_nonreuse`,
-#               `v022_deploy_agent`), not what the running
+#               `v024_deploy_lease`), not what the running
 #               database holds. Until that deployment lands, a drift check
 #               against production reports those four as declared-absent and
 #               `ap_0002`/`dc_0002`/`v019` as present-undeclared.
@@ -385,6 +387,20 @@ owner_material = "MIGRATION_DATABASE_URL"
 # 2026-10-21: Vendor v022_deploy_agent replaces v021_issuer_command_receipts.
 # It adds retained deploy-agent receipts and the public host-key registry;
 # no deployment, database application or deploy-agent activation is claimed.
+#
+# 2026-11-19: Vendor v023_lane3_store replaces v022_deploy_agent. It creates the
+# `cp_lane3` schema: the E10 receipt and destruction records, the lease store's
+# tables and the SECURITY DEFINER functions that are the only way to write them.
+# No runtime role holds USAGE on the schema; only the per-run lease role the E6
+# ceremony creates is granted the functions. No deployment, database application
+# or lease-store activation is claimed.
+#
+# 2026-11-23: Vendor v024_deploy_lease replaces v023_lane3_store. It creates the
+# `cp_deploy_lease` schema (production lease class, P-CP1 WP5c). Only the dedicated
+# LOGIN role `platform_target_lease` (made by the governed role op) may use it and
+# execute its five functions; `platform_api` holds nothing there, nor in `cp_lane3`. It must not reach production before the CP149 fence ACL
+# line (`held_fence_acl_drift`) is closed. No deployment, database application or
+# lease activation is claimed.
 expected_heads = [
   "0028_machine_attribution",
   "ap_0003_withdrawals",
@@ -392,7 +408,7 @@ expected_heads = [
   "dc_0016_controller_key_nonreuse",
   "ea_0003_platform_audit_log",
   "rl_0001_release_artifacts",
-  "v022_deploy_agent",
+  "v024_deploy_lease",
 ]
 compatibility = "maintenance_required"
 lock_timeout_seconds = 300
@@ -443,6 +459,8 @@ postgres_major = 16
 # from this declaration is the drift this candidate repairs.
 expected_schemas = [
   "public",
+  "cp_lane3",
+  "cp_deploy_lease",
   "mod_agreements",
   "mod_approvals",
   "mod_deploy",
@@ -530,6 +548,80 @@ code = "app-user-cannot-reach-platform-schemas"
 role = "app_user"
 scope = "schema"
 objects = ["mod_agreements", "mod_approvals", "mod_deploy", "mod_ealloc", "mod_licensing", "mod_rel"]
+privileges = ["USAGE"]
+denied = true
+
+# The Lane 3 store is the one platform schema NO runtime role reaches: its tables
+# are written only by SECURITY DEFINER functions, which only the per-run lease
+# role the ceremony creates may execute. Declared in every runtime role's
+# denial direction (both application roles and both outbox dispatchers); the lease role is per-run and never a standing role.
+[[database.isolation]]
+code = "app-user-cannot-reach-the-lane3-store"
+role = "app_user"
+scope = "schema"
+objects = ["cp_lane3"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "platform-api-cannot-reach-the-lane3-store"
+role = "platform_api"
+scope = "schema"
+objects = ["cp_lane3"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "outbox-dispatcher-cannot-reach-the-lane3-store"
+role = "outbox_dispatcher"
+scope = "schema"
+objects = ["cp_lane3"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "platform-outbox-dispatcher-cannot-reach-the-lane3-store"
+role = "platform_outbox_dispatcher"
+scope = "schema"
+objects = ["cp_lane3"]
+privileges = ["USAGE"]
+denied = true
+
+# The production lease class (v024), `cp_deploy_lease`, is reachable by NO standing
+# runtime role. Its five SECURITY DEFINER functions trust the caller's asserted
+# principal and marker (W-i), and the app, relay and ops containers all connect as
+# `platform_api`, so only the dedicated LOGIN role `platform_target_lease` (made by the
+# governed role op, never by a migration; its descriptor role entry arrives with that
+# op) holds USAGE and EXECUTE. Every standing role is denied here.
+[[database.isolation]]
+code = "app-user-cannot-reach-the-deploy-lease-schema"
+role = "app_user"
+scope = "schema"
+objects = ["cp_deploy_lease"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "outbox-dispatcher-cannot-reach-the-deploy-lease-schema"
+role = "outbox_dispatcher"
+scope = "schema"
+objects = ["cp_deploy_lease"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "platform-outbox-dispatcher-cannot-reach-the-deploy-lease-schema"
+role = "platform_outbox_dispatcher"
+scope = "schema"
+objects = ["cp_deploy_lease"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "platform-api-cannot-reach-the-deploy-lease-schema"
+role = "platform_api"
+scope = "schema"
+objects = ["cp_deploy_lease"]
 privileges = ["USAGE"]
 denied = true
 

@@ -88,6 +88,8 @@ _HEARTBEAT_OR_DESCENDANT: Final = (
     "v020_withdrawal_outcomes",
     "v021_issuer_command_receipts",
     "v022_deploy_agent",
+    "v023_lane3_store",
+    "v024_deploy_lease",
 )
 
 

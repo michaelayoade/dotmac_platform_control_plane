@@ -12,18 +12,28 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 
-from dotmac_approvals import module as approvals_module
-from dotmac_commercial_agreements import module as commercial_agreements_module
-from dotmac_deployment_control import module as deployment_control_module
-from dotmac_entitlement_allocation import module as entitlement_allocation_module
-from dotmac_kernel import FeatureManifest, ModuleManifest, ProductAssemblySpec
+from dotmac_kernel import (
+    FeatureManifest,
+    ModuleManifest,
+    ProductAssemblySpec,
+)
 from dotmac_kernel.api_documentation import environment_api_documentation_policy
-from dotmac_licensing import module as licensing_module
-from dotmac_release_catalog import module as release_catalog_module
 
 from vendor_cp.accounts.feature import feature as accounts_feature
 from vendor_cp.allocations.feature import feature as allocations_feature
 from vendor_cp.approvals.feature import feature as approvals_feature
+from vendor_cp.composition import STATEFUL_MODULES as STATEFUL_MODULES
+from vendor_cp.composition import VENDOR_DECLARATIONS
+from vendor_cp.composition import approvals_module as approvals_module
+from vendor_cp.composition import (
+    commercial_agreements_module as commercial_agreements_module,
+)
+from vendor_cp.composition import deployment_control_module as deployment_control_module
+from vendor_cp.composition import (
+    entitlement_allocation_module as entitlement_allocation_module,
+)
+from vendor_cp.composition import licensing_module as licensing_module
+from vendor_cp.composition import release_catalog_module as release_catalog_module
 from vendor_cp.config import validate_runtime_configuration, vendor_settings
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
@@ -50,45 +60,6 @@ from vendor_cp.release_evidence.feature import feature as release_evidence_featu
 
 ASSEMBLY_NAME = "dotmac-vendor-control-plane"
 
-# The persistence owners. Present under EVERY profile, because each one carries
-# a migration lineage and a schema this database already contains: an assembly
-# missing one would no longer describe its own tables, and the composed
-# live-catalogue audit would be walking schemas nobody declared.
-# `test_deployment_profile.py` derives its assertion from this tuple and proves
-# both halves per profile: the manifest is still registered, and the lineage's
-# head revision is still reachable in the composed revision graph.
-#
-# Present is not the same as unfiltered. Since ADR-0019 a profile may withhold a
-# stateful module's ROUTES — `_profiled_surface` clears route fields and nothing
-# else, so the manifest, its tables and its lineage are exactly as composed —
-# and it must be able to, or a module that ships an operator screen would
-# force-publish it into every production profile.
-STATEFUL_MODULES = (
-    release_catalog_module,
-    entitlement_allocation_module,
-    # Dual-plane and therefore SELECTABLE: composing it without an explicit
-    # `module_planes` entry fails `ProductAssemblySpec` construction. It is the
-    # approval authority under ADR-0005; vendor migration `v013` restored online
-    # DML after the bounded v012 shadow phase and retired the local writer.
-    approvals_module,
-    # Platform-only and atomic: Vendor v015 checks the empty legacy premise,
-    # retires the local owner and makes this module the sole agreement writer.
-    commercial_agreements_module,
-    # Platform-only and atomic: Vendor v016 retires the empty local issuer;
-    # delivery and product-held key custody remain Vendor responsibilities.
-    licensing_module,
-    # Platform-only and atomic. A module that decides what a fleet of
-    # deployments should run cannot live inside one of them, so there is no
-    # tenant plane to select and `ASSEMBLY_MODULE_PLANES` gains nothing.
-    #
-    # Composed as a GREENFIELD owner for plans, rollouts, credentials and
-    # observations — no revision in this lineage ever created one. The
-    # deployment-TARGET half was an authority cutover: `v017` sealed the
-    # independent registration path, and `vendor_cp.deployment.adapter` is the
-    # only seam (ADR-0011).
-    deployment_control_module,
-)
-
 # The vendor's own features, in mount order. A profile may strip a feature's
 # route/nav SURFACE; it may not remove its manifest declarations, reorder the
 # features or add one.
@@ -98,7 +69,7 @@ STATEFUL_MODULES = (
 # `COMPOSED_MANIFESTS` goes through the profile, because a composed module that
 # ships an operator surface publishes routes exactly as a vendor adapter does
 # (ADR-0019).
-VENDOR_SURFACES = (
+_VENDOR_SURFACE_BINDINGS = (
     release_evidence_feature,
     # Composed first among the route-bearing surfaces and withheld by none. A
     # deployment that cannot say whether it is ready is one an orchestrator will
@@ -115,6 +86,17 @@ VENDOR_SURFACES = (
     provisioning_feature,
     withdrawal_conflicts_feature,
     deploy_agent_feature,
+)
+
+
+# Bind routes by identity; the declaration owner alone defines installed order.
+_surface_by_name = {manifest.name: manifest for manifest in _VENDOR_SURFACE_BINDINGS}
+if len(_VENDOR_SURFACE_BINDINGS) != len(
+    VENDOR_DECLARATIONS
+) or _surface_by_name.keys() != {manifest.name for manifest in VENDOR_DECLARATIONS}:
+    raise ValueError("vendor surface bindings do not match installed declarations")
+VENDOR_SURFACES = tuple(
+    _surface_by_name[manifest.name] for manifest in VENDOR_DECLARATIONS
 )
 
 

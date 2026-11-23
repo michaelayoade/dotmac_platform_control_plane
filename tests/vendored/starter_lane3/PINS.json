@@ -1,0 +1,24 @@
+{
+  "files": {
+    "lane3_e10_receipt.py": {
+      "sha256": "72d5759bed3f8217d9dea647cbd83e6f59f252ab507c6cba5d142819261471ac",
+      "source_path": "scripts/lane3_e10_receipt.py"
+    },
+    "lane3_e10_support.py": {
+      "sha256": "c14920afee2f5f33a2dc94525acb6cd97d18fdc07f1f08338a6afbbb266ff9a2",
+      "source_path": "tests/unit/lane3_e10_support.py"
+    },
+    "lane3_lease_store.py": {
+      "sha256": "4c1e0f05f5b2080a98747e9d1388ea3d2f20222326560ed5052273a85103e93a",
+      "source_path": "scripts/lane3_lease_store.py"
+    },
+    "lane3_store_support.py": {
+      "sha256": "d999907d2e210897c011f4800463d9fd0190fec781cc6cea20619f8c408b7ae7",
+      "source_path": "tests/unit/lane3_store_support.py"
+    }
+  },
+  "note": "Vendored VERBATIM, by sha256. Do not edit: re-vendor from the pinned commit and update this file in the same change.",
+  "source_commit": "f50d497e4df178e1411d2b4fccbfa153a21fd12a",
+  "source_pr": "S1 #1094 (squash)",
+  "source_repository": "michaelayoade/dotmac_starter_mt"
+}

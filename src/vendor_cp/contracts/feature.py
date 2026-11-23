@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from dotmac_kernel.features import FeatureManifest
+from dataclasses import replace
 
+from vendor_cp.contracts.declaration import declaration
 from vendor_cp.contracts.router import router
 
-feature = FeatureManifest(
-    name="contracts",
-    routers=[router],
-    core=True,
-    enabled_by_default=True,
-)
+feature = replace(declaration, routers=[router])

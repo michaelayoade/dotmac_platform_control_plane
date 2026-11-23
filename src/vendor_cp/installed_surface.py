@@ -236,8 +236,15 @@ BASELINE: Final[dict[tuple[str, str], tuple[str, ...]]] = {
         "checkout_relative_production_command",
         "docs/operations/production-deployment.md",
     ): ("cd /opt/dotmac/vendor-control-plane",),
+    # `check_vendored_junit.py` is the H1 differential job's exact-test-set gate: the
+    # same kind of CI-only JUnit check, stdlib only, never shipped.
+    # `check_lane3_junit.py` is the Lane 3 store step's skip gate: a CI-only script run
+    # from the runner's checkout on the JUnit file the preceding step wrote, exactly as
+    # `check_d16_bundle_junit.py` is. It runs no application code and never ships.
     ("python_scripts", ".github/workflows/ci.yml"): (
         "python scripts/check_d16_bundle_junit.py",
+        "python scripts/check_lane3_junit.py",
+        "python scripts/check_vendored_junit.py",
         "python scripts/kernel_floor.py",
     ),
     ("python_scripts", ".github/workflows/kernel-lock.yml"): (
