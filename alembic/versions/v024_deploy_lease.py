@@ -237,6 +237,9 @@ FUNCTIONS_SQL = (
     f"IF p_marker IS NOT NULL AND p_marker !~ {_MARKER} THEN "
     + _refuse("reprovision-receipt-mismatch")
     + " END IF; "
+    # a record variable is typed when assigned: give v_dl its row type up front, so
+    # the field read in the INSERT's CASE plans on a host that was never leased
+    f"SELECT * INTO v_dl FROM {SCHEMA}.deploy_host_leases l WHERE false; "
     "INSERT INTO cp_lane3.host_current_lease (host_id) VALUES (p_host) "
     "ON CONFLICT DO NOTHING; "
     "SELECT hc.lease_id INTO v_prev FROM cp_lane3.host_current_lease hc "

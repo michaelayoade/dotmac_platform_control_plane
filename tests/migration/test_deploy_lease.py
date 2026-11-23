@@ -968,7 +968,13 @@ def test_consume_requires_covering_lease_on_a_real_session(env: Any) -> None:
     from sqlalchemy.orm import Session
 
     db, rt = env
-    backend = LeaseCoveringBackend(inner=None)  # type: ignore[arg-type]
+
+    @contextlib.contextmanager
+    def stores(_db: Any) -> Any:
+        with Session(rt.engine) as lease_session:
+            yield DeployLeaseStore(lease_session)
+
+    backend = LeaseCoveringBackend(inner=None, stores=stores)  # type: ignore[arg-type]
     run = dispatch_run(TARGET, "d-1")
     lease = rt.acquire(dispatch_run=run, ttl_seconds=60)
 
