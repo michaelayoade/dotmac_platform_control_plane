@@ -1,22 +1,24 @@
-"""WP5c: the lease endpoints and covers-in-consume, over the REAL target-API router.
+"""WP5c: the lease endpoints, and covers-in-consume, over the REAL target-API router.
 
-The router (authentication, replay, response signing) is lane 5b's, driven over HTTP
-exactly as `test_target_api_auth.py` drives it. The store is a fake with the same
-interface as `DeployLeaseStore` (its SQL is proven on a real PG16 in
-`tests/migration/test_deploy_lease.py`); the `LeasePort` is a fake of 5b's
-Control-backed dispatch source. What is proven here is the handler's own decisions:
-which TTL a plan admits, that the host and principal come from the authenticated
-target and never the request, that the reconcile marker cannot be supplied by a
-caller, that a refusal answers typed while the nonce still commits, and that
-`consume` is impossible without a covering lease.
+The router (authentication, replay, response signing) and the consume service are
+lane 5b's, driven over HTTP exactly as `test_target_api_consumption.py` drives them.
+The store is a fake with the same interface as `DeployLeaseStore` (its SQL is proven
+on a real PG16 in `tests/migration/test_deploy_lease.py`); the `LeasePort` is a fake
+of Control's pending-dispatch source. What is proven here is the handlers' own
+decisions: which TTL a plan admits, that the host, principal and run come from the
+authenticated target and never the request, that the reconcile marker cannot be
+supplied by a caller, that a refusal answers typed while the nonce still commits,
+and that `consume` is impossible without a covering lease.
 
-Named tests for the section 2.9 rows `test_consume_requires_covering_lease`,
-`test_agent_stops_on_lease_refusal`'s server half, and the job/serving TTL rulings.
+Named rows: `test_consume_requires_covering_lease_through_the_deploy_class` (the
+covers-in-consume wiring), the job/serving TTL rulings, and the server half of
+`test_agent_stops_on_lease_refusal`.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -25,6 +27,7 @@ from uuid import UUID
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from dotmac_kernel.testing import create_test_engine, isolated_session
 from target_api_support import (
     BASE,
     STORE_NOW,
@@ -45,6 +48,7 @@ from vendor_cp.deployment.deploy_lease import (
     DeployLeaseRefused,
     DeployStanding,
 )
+from vendor_cp.deployment.deploy_lease_consume import LeaseCoveringBackend
 from vendor_cp.deployment.deploy_lease_handlers import (
     LeaseHandlers,
     LeasePlan,
@@ -52,6 +56,13 @@ from vendor_cp.deployment.deploy_lease_handlers import (
     refusal_http_status,
 )
 from vendor_cp.deployment.lease_store import REFUSAL_CODES
+from vendor_cp.deployment.target_api.consumption import (
+    ConsumptionService,
+    MaterialsHandler,
+    ObservationHandler,
+    Resolution,
+    TargetApiHandlers,
+)
 from vendor_cp.deployment.target_api.handlers import HandlerResult
 
 _SEED_B64U = b64u(bytes(range(1, 33)))
@@ -63,6 +74,7 @@ _PUBLIC = b64u(
 _RESPONSE_SEED = b64u(bytes(range(100, 132)))
 _NOW = datetime(2026, 11, 22, 10, 0, 0, tzinfo=UTC)
 _LEASE = "11111111-1111-4111-8111-111111111111"
+_RUN = f"{TARGET}#d-1"
 _MARKER = "sha256:" + "a" * 64
 _SERVING = LeasePlan("deploy", None, 1800, 900)
 _JOB = LeasePlan("run_job", {"timeout_seconds": 600}, 900, 900)
@@ -191,7 +203,7 @@ def test_acquire_takes_the_host_and_principal_from_the_authenticated_target() ->
     assert kw == {
         "target_ref": TARGET,
         "host_id": "host-a",  # the target ref's third segment, never a request field
-        "dispatch_run": "d-1",
+        "dispatch_run": _RUN,  # qualified by the authenticated target
         "ttl_seconds": 600,
         "principal_ref": "target-credential:cred-0001",
         "reconcile_marker": None,
@@ -333,7 +345,7 @@ def test_covers_and_release_carry_the_run_and_the_principal() -> None:
     assert [n for n, _ in rig.store.calls] == ["covers", "release"]
     assert rig.store.calls[1][1] == {
         "lease_id": _LEASE,
-        "dispatch_run": "d-1",
+        "dispatch_run": _RUN,
         "principal_ref": "target-credential:cred-0001",
         "host_mutated": True,
     }
@@ -348,19 +360,6 @@ def test_release_needs_a_real_bool(mutated: Any) -> None:
         {"lease_id": _LEASE, "dispatch_id": "d-1", "host_mutated": mutated},
     )
     assert response.status_code == 400
-    assert rig.store.calls == []
-
-
-@pytest.mark.parametrize("route", ["lease/covers", "lease/release"])
-def test_covers_and_release_refuse_a_dispatch_that_is_not_this_targets(
-    route: str,
-) -> None:
-    rig = Rig({"d-1": _SERVING})
-    body: dict[str, Any] = {"lease_id": _LEASE, "dispatch_id": "d-9"}
-    if route == "lease/release":
-        body["host_mutated"] = False
-    response = rig.call("POST", route, body)
-    assert response.status_code == 404
     assert rig.store.calls == []
 
 
@@ -395,71 +394,17 @@ def test_standing_of_a_host_held_by_the_rehearsal_class_is_a_conflict() -> None:
     assert rig.call("GET", "lease/standing").status_code == 409
 
 
-# ── covers-in-consume ───────────────────────────────────────────────────────
-
-
-def test_consume_requires_covering_lease() -> None:
-    rig = Rig()
-    body = {"lease_id": _LEASE, "dispatch_id": "d-1", "resolution_id": "r"}
-    ok = rig.call("POST", "consume", body)
-    assert ok.status_code == 200 and ok.json()["consumed"] is True
-    assert rig.store.calls == [("covers", {"lease_id": _LEASE, "dispatch_run": "d-1"})]
-    assert len(rig.inner.calls) == 1  # the wrapped consume ran, after the cover
-
-    for refusal in (
-        "lease-expired",
-        "lease-foreign-run",
-        "lease-role-unbound",
-        "lease-already-released",
-    ):
-        rig = Rig()
-        rig.store.refuse = refusal
-        refused = rig.call("POST", "consume", body)
-        assert refused.status_code == 409, refusal
-        assert refused.json()["error"] == "no_covering_lease"
-        assert refused.json()["reason"] == refusal
-        assert rig.inner.calls == [], refusal  # consumption never reached
-        assert len(rig.nonces.spent) == 1  # only the nonce committed
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {},
-        {"dispatch_id": "d-1"},
-        {"lease_id": _LEASE},
-        {"lease_id": "nope", "dispatch_id": "d-1"},
-        {"lease_id": None, "dispatch_id": "d-1"},
-    ],
-)
-def test_consume_without_a_named_lease_is_refused_no_covering_lease(
-    payload: Any,
-) -> None:
-    rig = Rig()
-    response = rig.call("POST", "consume", payload)
-    assert response.status_code == 409
-    assert response.json()["error"] == "no_covering_lease"
-    assert rig.inner.calls == [] and rig.store.calls == []
-
-
-def test_a_store_fault_in_consume_is_not_a_covering_lease() -> None:
-    rig = Rig()
-    rig.store.fault = True
-    with pytest.raises(DeployLeaseRefused):
-        rig.call("POST", "consume", {"lease_id": _LEASE, "dispatch_id": "d-1"})
-    assert rig.inner.calls == []
-
-
 @pytest.mark.parametrize(
     ("method", "route"),
     [
         ("GET", "materials"),
         ("POST", "observations"),
         ("POST", "resolve"),
+        ("POST", "consume"),
         ("GET", "committed/d-1"),
     ],
 )
-def test_every_other_route_is_the_wrapped_handlers_and_needs_no_lease(
+def test_every_other_route_is_the_wrapped_handlers_and_needs_no_lease_here(
     method: str, route: str
 ) -> None:
     rig = Rig()
@@ -468,3 +413,146 @@ def test_every_other_route_is_the_wrapped_handlers_and_needs_no_lease(
     assert response.status_code == 200
     assert len(rig.inner.calls) == 1
     assert rig.store.calls == []
+
+
+# ── covers-in-consume, through 5b's real consume service ─────────────────────
+
+
+class _Backend:
+    """5b's `ConsumptionBackend` stand-in: resolve, re-verify and the finalizer."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def resolve(self, db: Any, *, request: Any, store_now: Any) -> Resolution:
+        self.calls.append("resolve")
+        return Resolution(
+            dispatch_id=str(request["dispatch_id"]),
+            target_ref=TARGET,
+            resolution_id="res-1",
+            context={"host": "host-a"},
+        )
+
+    def reverify_attestation(self, db: Any, *, resolution: Any, request: Any) -> None:
+        self.calls.append("reverify")
+
+    def covers_lease(self, db: Any, **kw: Any) -> bool:
+        raise AssertionError("the deploy class must answer this, not the inner port")
+
+    def commit_consumption(
+        self, db: Any, *, resolution: Any, request: Any, store_now: Any
+    ) -> Any:
+        self.calls.append("commit_consumption")
+        return {"consumption_ref": f"control-dispatch:{resolution.dispatch_id}"}
+
+
+@pytest.fixture
+def db() -> Iterator[Any]:
+    engine = create_test_engine()
+    try:
+        with isolated_session(engine) as session:
+            yield session
+    finally:
+        engine.dispose()
+
+
+def _consume_rig(db: Any) -> tuple[Any, FakeStore, _Backend, Any]:
+    store, inner = FakeStore(), _Backend()
+
+    @contextmanager
+    def savepoint(_db: Any) -> Any:
+        yield
+
+    backend = LeaseCoveringBackend(
+        inner, store_factory=lambda _db: store, savepoint=savepoint
+    )
+    handlers = TargetApiHandlers(
+        consumption=ConsumptionService(backend),
+        materials=MaterialsHandler(None),
+        observations=ObservationHandler(None),
+    )
+    runtime = build_runtime(
+        directory=StaticDirectory(record(public_key_b64u=_PUBLIC)),
+        response_seed=_RESPONSE_SEED,
+        handlers=handlers,
+        session=db,
+    )
+    client = client_for(runtime)
+    counter = iter(range(1, 1000))
+
+    def consume(body: dict[str, Any]) -> Any:
+        raw = json.dumps(body).encode()
+        path = f"{BASE}/targets/{TARGET}/consume"
+        return send(
+            client,
+            method="POST",
+            path=path,
+            body=raw,
+            headers=request_headers(
+                _SEED_B64U,
+                method="POST",
+                path=path,
+                body=raw,
+                nonce=f"{next(counter):032x}",
+            ),
+        )
+
+    return consume, store, inner, backend
+
+
+_CONSUME = {"dispatch_id": "d-1", "resolution_id": "res-1", "lease_id": _LEASE}
+
+
+def test_consume_requires_covering_lease_through_the_deploy_class(db: Any) -> None:
+    consume, store, inner, _ = _consume_rig(db)
+    ok = consume(_CONSUME)
+    assert ok.status_code == 200
+    assert store.calls == [("covers", {"lease_id": _LEASE, "dispatch_run": _RUN})]
+    assert inner.calls == ["resolve", "reverify", "commit_consumption"]
+
+    for refusal in ("lease-expired", "lease-foreign-run", "lease-role-unbound"):
+        consume, store, inner, _ = _consume_rig(db)
+        store.refuse = refusal
+        body = dict(_CONSUME, dispatch_id=f"d-{refusal}")
+        refused = consume(body)
+        assert refused.status_code == 409, refusal
+        assert refused.json()["error"] == "no_covering_lease"
+        assert "commit_consumption" not in inner.calls, refusal  # never consumed
+        # and nothing was recorded: a later covered attempt consumes
+        store.refuse = None
+        assert consume(body).status_code == 200
+
+
+def test_the_run_is_built_from_the_dispatchs_target_never_the_request(
+    db: Any,
+) -> None:
+    consume, store, _, _ = _consume_rig(db)
+    consume(dict(_CONSUME, target_ref="other/env/host-z", dispatch_run="x"))
+    assert store.calls[0][1]["dispatch_run"] == _RUN
+
+
+@pytest.mark.parametrize("lease_id", ["l-1", "", "nope", "11111111-1111-4111-8111"])
+def test_a_lease_id_that_is_not_a_uuid_is_not_a_covering_lease(
+    db: Any, lease_id: str
+) -> None:
+    consume, store, inner, _ = _consume_rig(db)
+    response = consume(dict(_CONSUME, lease_id=lease_id))
+    assert response.status_code in (400, 409)
+    assert store.calls == []
+    assert "commit_consumption" not in inner.calls
+
+
+def test_a_store_fault_in_covers_is_not_a_missing_lease(db: Any) -> None:
+    consume, store, inner, _ = _consume_rig(db)
+    store.fault = True
+    with pytest.raises(DeployLeaseRefused):
+        consume(_CONSUME)
+    assert "commit_consumption" not in inner.calls
+
+
+def test_the_covering_backend_delegates_everything_else(db: Any) -> None:
+    _, _, inner, backend = _consume_rig(db)
+    res = backend.resolve(db, request={"dispatch_id": "d-1"}, store_now=_NOW)
+    backend.reverify_attestation(db, resolution=res, request={})
+    backend.commit_consumption(db, resolution=res, request={}, store_now=_NOW)
+    assert inner.calls == ["resolve", "reverify", "commit_consumption"]

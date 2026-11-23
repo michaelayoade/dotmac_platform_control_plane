@@ -18,7 +18,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "alembic" / "versions" / "v024_deploy_lease.py"
 DEPLOYMENT = ROOT / "src" / "vendor_cp" / "deployment"
-CLIENT_MODULES = ("deploy_lease.py", "deploy_lease_handlers.py")
+CLIENT_MODULES = (
+    "deploy_lease.py",
+    "deploy_lease_handlers.py",
+    "deploy_lease_consume.py",
+)
 
 
 def _module() -> object:

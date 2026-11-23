@@ -42,7 +42,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
 
 from vendor_cp.deployment import lease_store
-from vendor_cp.deployment.deploy_lease import DeployLeaseRefused, DeployLeaseStore
+from vendor_cp.deployment.deploy_lease import (
+    DeployLeaseRefused,
+    DeployLeaseStore,
+    dispatch_run,
+)
+from vendor_cp.deployment.deploy_lease_consume import LeaseCoveringBackend
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = ROOT / "alembic" / "versions" / "v024_deploy_lease.py"
@@ -477,7 +482,7 @@ def test_deploy_lease_malformed_marker_refused(env: Any, marker: str) -> None:
         {"target_ref": ""},
         {"target_ref": "has space"},
         {"dispatch_run": ""},
-        {"dispatch_run": "x" * 256},
+        {"dispatch_run": "x" * 513},
         {"principal_ref": ""},
         {"principal_ref": "a b"},
         {"principal_ref": None},
@@ -815,3 +820,64 @@ def test_the_before_read_back_reports_the_runtime_roles_attributes_by_name(
     assert "info runtime_role=platform_api" in info
     assert "info role_superuser=false" in info
     assert not [line for line in info if "=" in line and not line.startswith("info ")]
+
+
+# ── the run is qualified by the target; covers-in-consume on a real session ──
+
+
+def test_the_longest_qualified_run_is_accepted(env: Any) -> None:
+    _db, rt = env
+    longest = "/".join(("p" * 64, "e" * 64, "h" * 63))
+    run = dispatch_run(longest, "d" * 128)
+    lease = rt.acquire(target_ref=longest, dispatch_run=run)
+    assert rt.covers(lease, run=run)
+
+
+def test_another_target_cannot_cover_or_release_this_targets_lease(env: Any) -> None:
+    _db, rt = env
+    mine = dispatch_run(TARGET, "d-1")
+    lease = rt.acquire(dispatch_run=mine)
+    theirs = dispatch_run("other/env/host-a", "d-1")  # same dispatch id, other target
+    _refused("lease-foreign-run", lambda: rt.covers(lease, run=theirs))
+    _refused("lease-foreign-run", lambda: rt.release(lease, dispatch_run=theirs))
+    assert rt.covers(lease, run=mine)
+
+
+def test_consume_requires_covering_lease_on_a_real_session(env: Any) -> None:
+    """The adapter 5b's consume calls (`ConsumptionBackend.covers_lease`), against the
+    real functions: a live lease held by this run covers; a released, expired,
+    foreign or unknown one does not, and the session stays usable (a savepoint)."""
+    from sqlalchemy.orm import Session
+
+    db, rt = env
+    backend = LeaseCoveringBackend(inner=None)  # type: ignore[arg-type]
+    run = dispatch_run(TARGET, "d-1")
+    lease = rt.acquire(dispatch_run=run, ttl_seconds=60)
+
+    def covers(session: Session, lease_id: Any, dispatch: str = "d-1") -> bool:
+        return backend.covers_lease(
+            session,
+            target_ref=TARGET,
+            dispatch_id=dispatch,
+            lease_id=str(lease_id),
+            store_now=db.now(),
+        )
+
+    with Session(rt.engine) as session:
+        assert covers(session, lease.lease_id) is True
+        assert covers(session, lease.lease_id, dispatch="d-2") is False  # foreign run
+        assert covers(session, "00000000-0000-4000-8000-000000000000") is False
+        assert covers(session, "not-a-uuid") is False
+        assert session.execute(text("SELECT 1")).scalar_one() == 1  # still healthy
+        assert covers(session, lease.lease_id) is True
+        session.rollback()
+    rt.release(lease, dispatch_run=run)
+    with Session(rt.engine) as session:
+        assert covers(session, lease.lease_id) is False  # released
+        session.rollback()
+    expiring = rt.acquire(dispatch_run=dispatch_run(TARGET, "d-3"), ttl_seconds=60)
+    with Session(rt.engine) as session:
+        assert covers(session, expiring.lease_id, dispatch="d-3") is True
+        db.advance(None, 60)
+        assert covers(session, expiring.lease_id, dispatch="d-3") is False  # expired
+        session.rollback()

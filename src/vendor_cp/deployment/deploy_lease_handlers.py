@@ -1,27 +1,31 @@
-"""The lease endpoints of the target API, and covers-in-consume (WP5c, DESIGN 2.6.2).
+"""The lease endpoints of the target API (WP5c, DESIGN 2.6.2).
 
 `LeaseHandlers` is a `TargetHandlers` (lane 5b's seam) that serves the four lease
-routes and delegates every other route to the handlers it wraps:
+routes and delegates every other route to the handlers it wraps (5b's
+`TargetApiHandlers`, whose lease routes answer 501 until this is composed in):
 
     POST lease/acquire   {"dispatch_id", "ttl_seconds"}
     POST lease/covers    {"lease_id", "dispatch_id"}
     POST lease/release   {"lease_id", "dispatch_id", "host_mutated"}
     GET  lease/standing
 
-and, for `consume`, refuses unless a live lease covers this dispatch run, ON STORE
-TIME and IN THE SAME TRANSACTION as the nonce and the consumption: the check runs
-before the wrapped handler and inside the request's own session, so a refusal
-commits only the spent nonce and a consumption that proceeds commits with it.
+Covers-in-consume is NOT a route here: 5b's consume calls
+`ConsumptionBackend.covers_lease` at step 4 of the atomic consume, in the same
+transaction as the nonce and the effect, and `deploy_lease_consume.LeaseCoveringBackend`
+fills that port with `cp_deploy_lease.deploy_covers`.
 
 ## What the handler decides and what it does not
 
 * The caller is the authenticated target principal; the host is the third segment
-  of ITS target ref (never a request field), and the lease's `principal_ref` is the
-  principal's own reference. Requests carry no host, no principal and no time.
+  of ITS target ref (never a request field), the lease's `principal_ref` is the
+  principal's own reference, and the lease's run is `<target_ref>#<dispatch_id>`
+  (`dispatch_run`), so another target cannot cover or release this one's lease.
+  Requests carry no host, no principal, no marker and no time.
 * The TTL window comes from the signed plan (`lease_bounds`): a job plan
   (`operation = "run_job"`) is `timeout_seconds + 120` up to Control's per-target
   `role_job_lease_ceiling_seconds` (default 900, at most 3600); a serving plan has
-  no 900 s cap. The plan is read through the `LeasePort`, for THIS target only.
+  no 900 s cap. The plan is read through the `LeasePort`, at acquire only, for THIS
+  target's pending dispatch.
 * The reconcile marker is NEVER read from the request. After an expired-unreleased
   lease the agent posts a signed read-only reconcile observation; Control issues the
   marker when the observed release matches, and the `LeasePort` hands the handler
@@ -30,8 +34,8 @@ commits only the spent nonce and a consumption that proceeds commits with it.
   commits and the caller gets a typed, signed answer. A store fault (unreachable,
   error) is raised, so the whole request rolls back and the caller retries.
 
-`LeasePort` is the one seam still to be filled by lane 5b (its Control-backed
-dispatch source); `UnconfiguredLeasePort` fails closed until then.
+`LeasePort` is the one seam left for Control (the plan of a pending dispatch and
+its issued marker); `UnconfiguredLeasePort` fails closed until it is composed.
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ from vendor_cp.deployment.deploy_lease import (
     DeployLeaseRefused,
     DeployLeaseStore,
     LeasePlanRefused,
+    dispatch_run,
     lease_bounds,
 )
 from vendor_cp.deployment.target_api.auth import AuthenticatedCall
@@ -110,8 +115,8 @@ class LeasePort(Protocol):
     def plan_for(
         self, db: Any, *, target_ref: str, dispatch_id: str, at: datetime
     ) -> LeasePlan | None:
-        """The plan of a dispatch addressed to `target_ref` (any state, consumed
-        included), or None for an unknown dispatch or another target's."""
+        """The signed plan of a dispatch that is PENDING for `target_ref`, or None
+        for an unknown, consumed or other-target dispatch. Read at acquire only."""
 
     def reconcile_marker_for(
         self, db: Any, *, target_ref: str, at: datetime
@@ -186,10 +191,6 @@ class LeaseHandlers:
                 "lease/release": self._release,
                 "lease/standing": self._standing,
             }[route](call, db, payload)
-        if route == "consume":
-            refusal = self._require_covering_lease(call, db, payload)
-            if refusal is not None:
-                return refusal
         return self._inner.handle(call, db, payload)
 
     # ── plumbing ────────────────────────────────────────────────────────────
@@ -211,17 +212,6 @@ class LeaseHandlers:
             if status is None:
                 raise
             return None, _refusal(refusal.code, status)
-
-    def _known_dispatch(
-        self, call: AuthenticatedCall, db: Any, dispatch_id: str
-    ) -> HandlerResult | None:
-        plan = self._port.plan_for(
-            db,
-            target_ref=call.principal.target_ref,
-            dispatch_id=dispatch_id,
-            at=call.store_now,
-        )
-        return None if plan is not None else _refusal("unknown_dispatch", 404)
 
     # ── lease/acquire ───────────────────────────────────────────────────────
 
@@ -263,7 +253,7 @@ class LeaseHandlers:
             lambda store: store.acquire(
                 target_ref=call.principal.target_ref,
                 host_id=self._host(call),
-                dispatch_run=dispatch_id,
+                dispatch_run=dispatch_run(call.principal.target_ref, dispatch_id),
                 ttl_seconds=ttl,
                 principal_ref=call.principal.principal_ref,
                 reconcile_marker=marker,
@@ -294,13 +284,13 @@ class LeaseHandlers:
             or not _is_lease_id(body["lease_id"])
         ):
             return _refusal("bad_body", 400)
-        unknown = self._known_dispatch(call, db, str(body["dispatch_id"]))
-        if unknown is not None:
-            return unknown
         judged, refusal = self._guarded(
             db,
             lambda store: store.covers(
-                lease_id=body["lease_id"], dispatch_run=body["dispatch_id"]
+                lease_id=body["lease_id"],
+                dispatch_run=dispatch_run(
+                    call.principal.target_ref, body["dispatch_id"]
+                ),
             ),
         )
         if refusal is not None:
@@ -327,14 +317,13 @@ class LeaseHandlers:
             or not isinstance(body["host_mutated"], bool)
         ):
             return _refusal("bad_body", 400)
-        unknown = self._known_dispatch(call, db, str(body["dispatch_id"]))
-        if unknown is not None:
-            return unknown
         released, refusal = self._guarded(
             db,
             lambda store: store.release(
                 lease_id=body["lease_id"],
-                dispatch_run=body["dispatch_id"],
+                dispatch_run=dispatch_run(
+                    call.principal.target_ref, body["dispatch_id"]
+                ),
                 principal_ref=call.principal.principal_ref,
                 host_mutated=body["host_mutated"],
             ),
@@ -366,29 +355,3 @@ class LeaseHandlers:
                 "lease_store_now": _stamp(standing.store_now),
             },
         )
-
-    # ── covers-in-consume ───────────────────────────────────────────────────
-
-    def _require_covering_lease(
-        self, call: AuthenticatedCall, db: Any, payload: object
-    ) -> HandlerResult | None:
-        """None when a live lease covers this dispatch run, else the refusal.
-
-        Runs before the wrapped consume handler, in the request's own session, so
-        consumption is impossible without a live lease held by THIS run.
-        """
-        if (
-            not isinstance(payload, dict)
-            or not _is_lease_id(payload.get("lease_id"))
-            or not _is_dispatch_id(payload.get("dispatch_id"))
-        ):
-            return _refusal("no_covering_lease", 409, reason="lease-not-named")
-        _, refusal = self._guarded(
-            db,
-            lambda store: store.covers(
-                lease_id=payload["lease_id"], dispatch_run=payload["dispatch_id"]
-            ),
-        )
-        if refusal is None:
-            return None
-        return _refusal("no_covering_lease", 409, reason=refusal.body["error"])

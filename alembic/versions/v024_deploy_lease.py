@@ -95,6 +95,8 @@ PREFLIGHT_MAJOR = 16
 PINNED_SEARCH_PATH = "pg_catalog, pg_temp"
 
 _PRINTABLE = "'^[\\x21-\\x7e]{1,255}$'"
+#: The run is `<target_ref>#<dispatch_id>` (up to 194 + 1 + 128 characters).
+_RUN = "'^[\\x21-\\x7e]{1,512}$'"
 _HOST = "'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'"
 _MARKER = "'^sha256:[0-9a-f]{64}$'"
 
@@ -119,7 +121,7 @@ TABLES_SQL = (
     " lease_id uuid PRIMARY KEY,"
     f" host_id text NOT NULL CHECK (host_id ~ {_HOST}),"
     f" target_ref text NOT NULL CHECK (target_ref ~ {_PRINTABLE}),"
-    f" dispatch_run text NOT NULL CHECK (dispatch_run ~ {_PRINTABLE}),"
+    f" dispatch_run text NOT NULL CHECK (dispatch_run ~ {_RUN}),"
     f" principal_ref text NOT NULL CHECK (principal_ref ~ {_PRINTABLE}),"
     f" reconcile_marker_ref text UNIQUE CHECK (reconcile_marker_ref ~ {_MARKER}),"
     " acquired_at timestamptz NOT NULL,"
@@ -168,7 +170,7 @@ FUNCTIONS_SQL = (
     + " END IF; "
     f"IF p_host IS NULL OR p_host !~ {_HOST} "
     f"OR p_target_ref IS NULL OR p_target_ref !~ {_PRINTABLE} "
-    f"OR p_run IS NULL OR p_run !~ {_PRINTABLE} "
+    f"OR p_run IS NULL OR p_run !~ {_RUN} "
     f"OR p_principal IS NULL OR p_principal !~ {_PRINTABLE} THEN "
     + _refuse("lease-role-unbound")
     + " END IF; "

@@ -45,6 +45,7 @@ __all__ = [
     "DeployStanding",
     "LeaseBounds",
     "LeasePlanRefused",
+    "dispatch_run",
     "lease_bounds",
 ]
 
@@ -114,6 +115,16 @@ class LeaseBounds:
         ):
             raise DeployLeaseRefused("lease-ttl-invalid")
         return requested
+
+
+def dispatch_run(target_ref: str, dispatch_id: str) -> str:
+    """The lease's run identity: `<target_ref>#<dispatch_id>`.
+
+    Qualified by the AUTHENTICATED target, so a lease can only ever be covered or
+    released by the target it was granted to: another target naming the same
+    dispatch id builds a different run and is refused `lease-foreign-run`.
+    """
+    return f"{target_ref}#{dispatch_id}"
 
 
 def _int(value: object) -> int | None:
