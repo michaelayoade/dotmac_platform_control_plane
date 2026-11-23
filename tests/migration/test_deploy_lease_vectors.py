@@ -58,9 +58,9 @@ VECTOR_FILE = (
     / "target_api"
     / "target_api_v2.json"
 )
-#: Control `contract/target_api_v2.json`, control-a18-20261122 be74634 (provisional:
-#: Control regenerates it again for inputs and apply_class).
-PINNED_V2_SHA256 = "0fe9c6be1b49af5fb4b9267bce51dfaccc016e83b1c5dd8b2332916f698d834d"
+#: Control `contract/target_api_v2.json` at control-a18-20261122 2370860. Provisional
+#: until Control CI is green; a re-vendor changes this pin in the same change.
+PINNED_V2_SHA256 = "95756ba1d9a1e4c12cafef82ba4fb7e343c29c677772087bec2dd3bbc5374988"
 V2 = json.loads(VECTOR_FILE.read_bytes())
 
 _SEED = b64u(bytes(range(1, 33)))
@@ -84,20 +84,32 @@ def test_the_vendored_v2_contract_is_byte_identical_to_the_pin() -> None:
     assert hashlib.sha256(VECTOR_FILE.read_bytes()).hexdigest() == PINNED_V2_SHA256
     assert V2["contract"] == "dotmac.target_api/2"
     assert V2["constants"]["endpoints_added"] == [["POST", "lease/renew", "agent"]]
-    assert set(V2["constants"]["lease_errors"]) == LEASE_ERRORS
+    assert set(V2["constants"]["lease_errors"]) == LEASE_ERRORS  # incl. not_renewable
     assert set(V2["constants"]["lease_errors"].values()) == {409}
-    assert len(V2["lease_scenarios"]) == 10
+    assert len(V2["lease_scenarios"]) == 11
 
 
 class _Port:
     def __init__(self) -> None:
         self.plan: LeasePlan | None = None
         self.marker: str | None = None
+        self.decided: list[tuple[str, bool]] = []
 
     def plan_for(self, db: Any, *, target_ref: str, dispatch_id: str, at: Any) -> Any:
         return self.plan
 
-    def reconcile_marker_for(self, db: Any, *, target_ref: str, at: Any) -> Any:
+    def dispatch_consumed(self, db: Any, *, target_ref: str, dispatch_id: str) -> bool:
+        return True
+
+    def reconcile_marker(
+        self,
+        db: Any,
+        *,
+        target_ref: str,
+        dispatch_id: str,
+        expired_dispatch_consumed: bool,
+    ) -> Any:
+        self.decided.append((dispatch_id, expired_dispatch_consumed))
         return self.marker
 
 
@@ -178,14 +190,14 @@ def _wire_body(
     body = {
         k: v
         for k, v in args.items()
-        if k not in {"lease_max_seconds", "marker_present"}
+        if k not in {"lease_max_seconds", "marker_present", "renewable"}
     }
     if "lease_id" in body:
         body["lease_id"] = replay.ids.get(body["lease_id"], body["lease_id"])
     return body
 
 
-@pytest.mark.parametrize("index", range(10))
+@pytest.mark.parametrize("index", range(11))
 def test_every_v2_lease_scenario_replays_through_the_real_router(
     replay_factory: Any, index: int
 ) -> None:
@@ -195,9 +207,13 @@ def test_every_v2_lease_scenario_replays_through_the_real_router(
         args, name = step["args"], step["call"]
         replay.clock_to(step["at"])
         if name == "acquire":
-            replay.port.plan = LeasePlan(
-                "deploy", None, args["ttl_seconds"], args["lease_max_seconds"]
-            )
+            ttl, total = args["ttl_seconds"], args["lease_max_seconds"]
+            if args.get("renewable") is False:  # a run_job lease: granted once
+                replay.port.plan = LeasePlan(
+                    "run_job", {"timeout_seconds": ttl - 120}, ttl, total
+                )
+            else:
+                replay.port.plan = LeasePlan("deploy", None, ttl, total)
             replay.port.marker = _MARKER if args["marker_present"] else None
         response = replay.call(name, args, _wire_body(replay, name, args))
         where = f"{scenario['name']} / {name} at {step['at']}"

@@ -29,6 +29,9 @@ deploy or one role job. This is the *production class* beside the rehearsal clas
   run, principal and target while its lease is live returns that lease; a second
   release by the same target and principal with the same `host_mutated` is a
   replay (`o_replay`). Any other repeat is refused.
+* **Lease class.** `lease_class` is stored on the row: `serving` (ttl 1..900, total up
+  to 10800, renewable) or `run_job` (ttl = total, at most 3600, never renewed:
+  `lease-not-renewable`). The tables enforce it as well as the function.
 * **Renewal (architect ruling Q-c/4).** A lease has a per-grant TTL
   (`ttl_seconds`, the plan's `lease_ttl_seconds`) and a total (`max_seconds`, the
   plan's `lease_max_seconds`, at most 10800). `deploy_renew` grants
@@ -56,7 +59,7 @@ deploy or one role job. This is the *production class* beside the rehearsal clas
 ## Refusal codes
 
 The CLOSED code set of `lease_store.REFUSAL_CODES`, plus two added for this class
-(`reconcile-marker-required`, `lease-max-reached`). Mapping
+(`reconcile-marker-required`, `lease-max-reached`, `lease-not-renewable`). Mapping
 used by the deploy class: an unknown lease or a malformed identity is
 `lease-role-unbound`; a lease held by another run, `lease-held-by-another-run`;
 an expired-unreleased host without a marker, `reconcile-marker-required`; a host
@@ -139,9 +142,14 @@ TABLES_SQL = (
     " acquired_at timestamptz NOT NULL,"
     " expires_at timestamptz NOT NULL,"
     # per-grant TTL (the plan's lease_ttl_seconds) and the total the plan sizes
-    " ttl_seconds integer NOT NULL CHECK (ttl_seconds BETWEEN 1 AND 900),"
-    " max_seconds integer NOT NULL CHECK (max_seconds BETWEEN 1 AND 10800"
-    "  AND max_seconds >= ttl_seconds),"
+    # the class is stored: a run_job lease is granted once (ttl = max, never
+    # renewed); a serving lease is granted 1..900 s at a time up to its total
+    " lease_class text NOT NULL CHECK (lease_class IN ('serving', 'run_job')),"
+    " ttl_seconds integer NOT NULL CHECK (ttl_seconds BETWEEN 1 AND 3600),"
+    " max_seconds integer NOT NULL CHECK (max_seconds BETWEEN 1 AND 10800),"
+    " CHECK ((lease_class = 'serving' AND ttl_seconds <= 900"
+    "  AND max_seconds >= ttl_seconds)"
+    "  OR (lease_class = 'run_job' AND ttl_seconds = max_seconds)),"
     " seq bigserial NOT NULL,"
     " CHECK (expires_at = acquired_at + ttl_seconds * interval '1 second'))",
     f"CREATE TABLE {SCHEMA}.deploy_host_lease_renewals ("
@@ -190,15 +198,17 @@ _EFF = f"{SCHEMA}.effective_expiry"
 FUNCTIONS_SQL = (
     # deploy_acquire: the shared host row lock, then the persistent-host rule.
     f"CREATE FUNCTION {SCHEMA}.deploy_acquire(p_target_ref text, p_host text, "
-    "p_run text, p_ttl integer, p_max integer, p_principal text, "
+    "p_run text, p_ttl integer, p_max integer, p_class text, p_principal text, "
     "p_marker text DEFAULT NULL) "
     "RETURNS TABLE (o_lease_id uuid, o_ttl integer, o_acquired_at timestamptz, "
     "o_expires_at timestamptz, o_store_now timestamptz) " + _DEFINER + " AS $$ "
     "DECLARE v_now timestamptz; v_acq timestamptz; v_prev uuid; v_exp timestamptz; "
     "v_dl record; v_rl record; v_new uuid; v_needs_marker boolean := false; "
     "BEGIN "
-    "IF p_ttl IS NULL OR p_ttl < 1 OR p_ttl > 900 OR p_max IS NULL "
-    "OR p_max < p_ttl OR p_max > 10800 THEN "
+    "IF p_class IS NULL OR p_class NOT IN ('serving', 'run_job') "
+    "OR p_ttl IS NULL OR p_ttl < 1 OR p_max IS NULL OR p_max < p_ttl "
+    "OR p_max > 10800 OR (p_class = 'serving' AND p_ttl > 900) "
+    "OR (p_class = 'run_job' AND (p_ttl <> p_max OR p_ttl > 3600)) THEN "
     + _refuse("lease-ttl-invalid")
     + " END IF; "
     f"IF p_host IS NULL OR p_host !~ {_HOST} "
@@ -252,9 +262,9 @@ FUNCTIONS_SQL = (
     "v_new := gen_random_uuid(); "
     f"INSERT INTO {SCHEMA}.deploy_host_leases (lease_id, host_id, target_ref, "
     "dispatch_run, principal_ref, reconcile_marker_ref, acquired_at, expires_at, "
-    "ttl_seconds, max_seconds) VALUES (v_new, p_host, p_target_ref, p_run, "
-    "p_principal, CASE WHEN v_needs_marker THEN p_marker END, v_acq, "
-    "v_acq + p_ttl * interval '1 second', p_ttl, p_max); "
+    "lease_class, ttl_seconds, max_seconds) VALUES (v_new, p_host, p_target_ref, "
+    "p_run, p_principal, CASE WHEN v_needs_marker THEN p_marker END, v_acq, "
+    "v_acq + p_ttl * interval '1 second', p_class, p_ttl, p_max); "
     "UPDATE cp_lane3.host_current_lease SET lease_id = v_new WHERE host_id = p_host; "
     "RETURN QUERY SELECT l.lease_id, l.ttl_seconds, l.acquired_at, l.expires_at, "
     f"v_now FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_new; END $$",
@@ -295,6 +305,9 @@ FUNCTIONS_SQL = (
     + " END IF; "
     f"v_cur := {_EFF}(p_lease); "
     "IF v_now >= v_cur THEN " + _refuse("lease-expired") + " END IF; "
+    "IF v_l.lease_class = 'run_job' THEN "
+    + _refuse("lease-not-renewable")
+    + " END IF; "
     "v_cap := v_l.acquired_at + v_l.max_seconds * interval '1 second'; "
     "IF v_t >= v_cap THEN " + _refuse("lease-max-reached") + " END IF; "
     # min(ttl, max - held), as the contract's reference ledger grants it
@@ -359,7 +372,7 @@ FUNCTIONS_SQL = (
 #: Every function the runtime role is granted. Written down because the grant,
 #: the read-back and the privilege proof must name the same set.
 RUNTIME_ROLE_FUNCTIONS = (
-    "deploy_acquire(text, text, text, integer, integer, text, text)",
+    "deploy_acquire(text, text, text, integer, integer, text, text, text)",
     "deploy_covers(uuid, text)",
     "deploy_release(uuid, text, text, boolean)",
     "deploy_renew(uuid, text)",

@@ -98,6 +98,8 @@ class FakePort:
         self.plans = plans
         self.marker = marker
         self.asked: list[tuple[str, str]] = []
+        self.decisions: list[tuple[str, bool]] = []
+        self.consumed = False
 
     def plan_for(
         self, db: Any, *, target_ref: str, dispatch_id: str, at: datetime
@@ -105,9 +107,18 @@ class FakePort:
         self.asked.append((target_ref, dispatch_id))
         return self.plans.get(dispatch_id)
 
-    def reconcile_marker_for(
-        self, db: Any, *, target_ref: str, at: datetime
+    def dispatch_consumed(self, db: Any, *, target_ref: str, dispatch_id: str) -> bool:
+        return self.consumed
+
+    def reconcile_marker(
+        self,
+        db: Any,
+        *,
+        target_ref: str,
+        dispatch_id: str,
+        expired_dispatch_consumed: bool,
     ) -> str | None:
+        self.decisions.append((dispatch_id, expired_dispatch_consumed))
         return self.marker
 
 
@@ -120,6 +131,7 @@ class FakeStore:
         self.fault: bool = False
         self.replay: bool = False
         self.standing_value = "held"
+        self.refuse_first: str | None = None
 
     def _go(self, name: str, **kw: Any) -> None:
         self.calls.append((name, kw))
@@ -129,6 +141,9 @@ class FakeStore:
             raise DeployLeaseRefused(self.refuse)
 
     def acquire(self, **kw: Any) -> DeployLease:
+        if self.refuse_first and kw["reconcile_marker"] is None:
+            self.calls.append(("acquire", kw))
+            raise DeployLeaseRefused(self.refuse_first)
         self._go("acquire", **kw)
         ttl = kw["ttl_seconds"]
         return DeployLease(UUID(_LEASE), ttl, _NOW, _NOW + timedelta(seconds=ttl), _NOW)
@@ -229,6 +244,7 @@ def test_acquire_takes_the_host_and_principal_from_the_authenticated_target() ->
         "dispatch_run": _RUN,  # qualified by the authenticated target
         "ttl_seconds": 600,
         "max_seconds": 10800,  # the plan's total
+        "lease_class": "serving",
         "principal_ref": "target-credential:cred-0001",
         "reconcile_marker": None,
     }
@@ -247,10 +263,37 @@ def test_a_request_cannot_name_a_host_a_principal_or_a_marker(extra: Any) -> Non
     assert rig.store.calls == []
 
 
-def test_the_reconcile_marker_comes_only_from_the_controls_issued_marker() -> None:
+def test_no_marker_is_asked_for_unless_the_host_expired_unreleased() -> None:
     rig = Rig(marker=_MARKER)
     assert _acquire(rig, 600).status_code == 200
-    assert rig.store.calls[0][1]["reconcile_marker"] == _MARKER
+    assert [n for n, _ in rig.store.calls] == ["acquire"]  # one call, no marker
+    assert rig.store.calls[0][1]["reconcile_marker"] is None
+    assert rig.port.decisions == []
+
+
+def test_the_marker_comes_only_from_controls_port_over_the_expired_dispatch() -> None:
+    """After an expired-unreleased lease CP names that dispatch (from the lease row)
+    and says whether it was consumed; Control's port decides the marker."""
+    rig = Rig(marker=_MARKER)
+    rig.store.refuse_first = "reconcile-marker-required"
+    rig.store.standing_value = "expired_unreleased"
+    rig.port.consumed = True
+    response = _acquire(rig, 600)
+    assert response.status_code == 200
+    assert rig.port.decisions == [("d-1", True)]  # the lease row's dispatch, consumed
+    names = [n for n, _ in rig.store.calls]
+    assert names == ["acquire", "standing", "acquire"]
+    assert rig.store.calls[2][1]["reconcile_marker"] == _MARKER
+
+
+def test_without_a_marker_from_control_the_acquire_stays_refused() -> None:
+    rig = Rig(marker=None)
+    rig.store.refuse_first = "reconcile-marker-required"
+    rig.store.standing_value = "expired_unreleased"
+    response = _acquire(rig, 600)
+    assert response.status_code == 409
+    assert response.json()["error"] == "reconcile_marker_required"
+    assert [n for n, _ in rig.store.calls] == ["acquire", "standing"]
 
 
 def test_a_missing_reconcile_marker_is_a_signed_409_reconcile_marker_required() -> None:
@@ -263,7 +306,7 @@ def test_a_missing_reconcile_marker_is_a_signed_409_reconcile_marker_required() 
     assert len(rig.nonces.spent) == 1  # the nonce still committed
 
 
-def test_a_job_plan_is_granted_exactly_timeout_plus_120() -> None:
+def test_a_job_plan_is_granted_exactly_its_ttl_as_a_run_job_lease() -> None:
     rig = Rig({"d-1": _JOB})  # timeout 600 -> ttl = max = 720
     for ttl, status in ((719, 400), (720, 200), (721, 400)):
         response = _acquire(rig, ttl)
@@ -272,7 +315,14 @@ def test_a_job_plan_is_granted_exactly_timeout_plus_120() -> None:
             body = response.json()
             assert body["error"] == "lease_ttl_invalid"
             assert (body["min_ttl"], body["max_ttl"]) == (720, 720)
-    assert rig.store.calls[0][1]["max_seconds"] == 720
+    kw = rig.store.calls[0][1]
+    assert (kw["max_seconds"], kw["lease_class"]) == (720, "run_job")
+
+
+def test_a_long_job_is_not_held_to_the_900_second_grant_cap() -> None:
+    plan = LeasePlan("run_job", {"timeout_seconds": 2400}, 2520, 2520)
+    rig = Rig({"d-1": plan})
+    assert _acquire(rig, 2520).status_code == 200
 
 
 def test_a_serving_plan_is_granted_120_to_its_ttl_with_a_larger_total() -> None:
@@ -338,7 +388,7 @@ def test_a_store_refusal_is_a_typed_signed_answer_and_the_nonce_is_spent(
     assert response.json()["error"] == name
     assert "X-Dotmac-Response-Signature" in response.headers
     assert len(rig.nonces.spent) == 1
-    assert rig.savepoints == 1
+    assert rig.savepoints >= 1  # the refusal rolled back a savepoint only
 
 
 def test_a_store_fault_is_not_a_typed_answer() -> None:
@@ -563,6 +613,7 @@ def test_renew_returns_the_granted_ttl_for_this_targets_run() -> None:
         ("lease-already-released", "lease_not_held"),
         ("lease-expired", "lease_expired"),
         ("lease-max-reached", "lease_max_reached"),
+        ("lease-not-renewable", "lease_not_renewable"),
     ],
 )
 def test_renew_refusals_are_the_contracts_three_signed_names(

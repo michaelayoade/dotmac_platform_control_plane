@@ -35,6 +35,7 @@ from vendor_cp.deployment.lease_store import REFUSAL_CODES
 __all__ = [
     "JOB_LEASE_MARGIN_SECONDS",
     "MAX_GRANT_SECONDS",
+    "MAX_JOB_LEASE_SECONDS",
     "MAX_LEASE_SECONDS",
     "MIN_GRANT_SECONDS",
     "RUN_JOB_OPERATION",
@@ -58,6 +59,10 @@ JOB_LEASE_MARGIN_SECONDS: Final = 120
 MIN_GRANT_SECONDS: Final = 120
 MAX_GRANT_SECONDS: Final = 900
 MAX_LEASE_SECONDS: Final = 10800
+#: A run_job lease is granted once, ttl = total, and never renewed.
+MAX_JOB_LEASE_SECONDS: Final = 3600
+SERVING_CLASS: Final = "serving"
+JOB_CLASS: Final = "run_job"
 
 _REFUSAL_SQLSTATE: Final = "L3001"
 STORE_UNREACHABLE: Final = "store-unreachable"
@@ -126,6 +131,7 @@ class LeaseBounds:
     min_ttl: int
     max_ttl: int
     max_seconds: int
+    lease_class: str = SERVING_CLASS
 
     def check(self, requested: object) -> int:
         """`requested` as an int inside the grant window, or `lease-ttl-invalid`."""
@@ -159,35 +165,36 @@ def lease_bounds(
     lease_ttl_seconds: object,
     lease_max_seconds: object,
 ) -> LeaseBounds:
-    """The grant window and total of one signed plan, or `LeasePlanRefused`.
+    """The class, grant window and total of one signed plan, or `LeasePlanRefused`.
 
     * `operation` and `dispatched_job` must agree: `run_job` requires an object,
       any other operation requires null.
-    * `lease_ttl_seconds` is 120..900 (per grant); `lease_max_seconds` is at
-      least the ttl and at most 10800 (the total, renewals included).
-    * Job plan: `lease_ttl_seconds = lease_max_seconds` and at least
-      `timeout_seconds + 120`; the only grant is that ttl.
-    * Serving plan: a grant of 120 up to `lease_ttl_seconds`; renewals bring the
-      total up to `lease_max_seconds`.
+    * Serving plan: `lease_ttl_seconds` 120..900 per grant, `lease_max_seconds` at
+      least the ttl and at most 10800; granted 120 up to the ttl, renewed up to the
+      total.
+    * Job plan: `lease_ttl_seconds = lease_max_seconds`, at most 3600 and at least
+      `timeout_seconds + 120`; granted exactly once and never renewed.
     """
     ttl = _int(lease_ttl_seconds)
-    if ttl is None or not MIN_GRANT_SECONDS <= ttl <= MAX_GRANT_SECONDS:
-        raise LeasePlanRefused("plan-lease-ttl-out-of-bounds")
     total = _int(lease_max_seconds)
-    if total is None or not ttl <= total <= MAX_LEASE_SECONDS:
-        raise LeasePlanRefused("plan-lease-max-out-of-bounds")
     if operation != RUN_JOB_OPERATION:
         if dispatched_job is not None:
             raise LeasePlanRefused("dispatched-job-on-a-serving-plan")
-        return LeaseBounds(MIN_GRANT_SECONDS, ttl, total)
+        if ttl is None or not MIN_GRANT_SECONDS <= ttl <= MAX_GRANT_SECONDS:
+            raise LeasePlanRefused("plan-lease-ttl-out-of-bounds")
+        if total is None or not ttl <= total <= MAX_LEASE_SECONDS:
+            raise LeasePlanRefused("plan-lease-max-out-of-bounds")
+        return LeaseBounds(MIN_GRANT_SECONDS, ttl, total, SERVING_CLASS)
     if not isinstance(dispatched_job, Mapping):
         raise LeasePlanRefused("run-job-without-dispatched-job")
     timeout = _int(dispatched_job.get("timeout_seconds"))
     if timeout is None or timeout < 1:
         raise LeasePlanRefused("job-timeout-out-of-bounds")
-    if ttl != total or ttl < timeout + JOB_LEASE_MARGIN_SECONDS:
+    if ttl is None or not 1 <= ttl <= MAX_JOB_LEASE_SECONDS:
+        raise LeasePlanRefused("plan-lease-ttl-out-of-bounds")
+    if total != ttl or ttl < timeout + JOB_LEASE_MARGIN_SECONDS:
         raise LeasePlanRefused("job-lease-does-not-fit")
-    return LeaseBounds(ttl, ttl, total)
+    return LeaseBounds(ttl, ttl, total, JOB_CLASS)
 
 
 def _state(exc: BaseException) -> str | None:
@@ -240,6 +247,7 @@ class DeployLeaseStore:
         dispatch_run: str,
         ttl_seconds: int,
         max_seconds: int,
+        lease_class: str,
         principal_ref: str,
         reconcile_marker: str | None = None,
     ) -> DeployLease:
@@ -247,13 +255,15 @@ class DeployLeaseStore:
         row = self._one(
             "SELECT o_lease_id, o_ttl, o_acquired_at, o_expires_at, o_store_now "
             "FROM cp_deploy_lease.deploy_acquire(:target_ref, :host, :run, "
-            "CAST(:ttl AS integer), CAST(:max AS integer), :principal, :marker)",
+            "CAST(:ttl AS integer), CAST(:max AS integer), :class, :principal, "
+            ":marker)",
             {
                 "target_ref": target_ref,
                 "host": host_id,
                 "run": dispatch_run,
                 "ttl": ttl_seconds,
                 "max": max_seconds,
+                "class": lease_class,
                 "principal": principal_ref,
                 "marker": reconcile_marker,
             },

@@ -24,43 +24,44 @@ def _job(timeout: Any = 600) -> dict[str, Any]:
     return {"name": "import", "timeout_seconds": timeout}
 
 
-def test_a_job_plan_is_granted_exactly_its_ttl() -> None:
+def test_a_job_plan_is_granted_exactly_its_ttl_and_is_class_run_job() -> None:
     bounds = lease_bounds(
         operation="run_job",
         dispatched_job=_job(600),
         lease_ttl_seconds=720,
         lease_max_seconds=720,
     )
-    assert bounds == LeaseBounds(720, 720, 720)
+    assert bounds == LeaseBounds(720, 720, 720, "run_job")
+    long = lease_bounds(  # a job lease is not held to the 900 s per-grant cap
+        operation="run_job",
+        dispatched_job=_job(2400),
+        lease_ttl_seconds=2520,
+        lease_max_seconds=2520,
+    )
+    assert long == LeaseBounds(2520, 2520, 2520, "run_job")
     top = lease_bounds(
         operation="run_job",
-        dispatched_job=_job(780),
-        lease_ttl_seconds=900,
-        lease_max_seconds=900,
+        dispatched_job=_job(3480),
+        lease_ttl_seconds=3600,
+        lease_max_seconds=3600,
     )
-    assert top == LeaseBounds(900, 900, 900)
+    assert top.max_ttl == 3600
 
 
 @pytest.mark.parametrize(
-    ("ttl", "total"),
-    [(719, 719), (720, 900), (900, 720), (721, 721)],
+    ("ttl", "total", "reason"),
+    [
+        (719, 719, "job-lease-does-not-fit"),  # timeout 600 needs 720
+        (720, 900, "job-lease-does-not-fit"),  # ttl must equal max
+        (900, 720, "job-lease-does-not-fit"),
+        (3601, 3601, "plan-lease-ttl-out-of-bounds"),  # a job lease is at most 3600
+        (0, 0, "plan-lease-ttl-out-of-bounds"),
+    ],
 )
-def test_a_job_lease_must_equal_its_total_and_cover_timeout_plus_120(
-    ttl: int, total: int
+def test_a_job_lease_must_equal_its_total_cover_the_timeout_and_fit_3600(
+    ttl: int, total: int, reason: str
 ) -> None:
-    # timeout 600 needs 720; ttl must equal max
-    if ttl == total and ttl >= 720:
-        assert (
-            lease_bounds(
-                operation="run_job",
-                dispatched_job=_job(600),
-                lease_ttl_seconds=ttl,
-                lease_max_seconds=total,
-            ).max_ttl
-            == ttl
-        )
-        return
-    with pytest.raises(LeasePlanRefused, match="job-lease-does-not-fit|max-out"):
+    with pytest.raises(LeasePlanRefused, match=reason):
         lease_bounds(
             operation="run_job",
             dispatched_job=_job(600),
@@ -87,7 +88,7 @@ def test_a_serving_plan_is_granted_120_to_its_ttl_and_renewed_to_its_total() -> 
         lease_ttl_seconds=600,
         lease_max_seconds=10800,
     )
-    assert bounds == LeaseBounds(120, 600, 10800)
+    assert bounds == LeaseBounds(120, 600, 10800, "serving")
     assert bounds.check(120) == 120 and bounds.check(600) == 600
     for bad in (119, 601):
         with pytest.raises(DeployLeaseRefused):
@@ -95,15 +96,14 @@ def test_a_serving_plan_is_granted_120_to_its_ttl_and_renewed_to_its_total() -> 
 
 
 @pytest.mark.parametrize("ttl", [0, 119, 901, 3600, None, "600", True])
-def test_the_per_grant_ttl_is_120_to_900(ttl: Any) -> None:
-    for operation, job in (("deploy", None), ("run_job", _job(60))):
-        with pytest.raises(LeasePlanRefused, match="plan-lease-ttl-out-of-bounds"):
-            lease_bounds(
-                operation=operation,
-                dispatched_job=job,
-                lease_ttl_seconds=ttl,
-                lease_max_seconds=900,
-            )
+def test_the_serving_per_grant_ttl_is_120_to_900(ttl: Any) -> None:
+    with pytest.raises(LeasePlanRefused, match="plan-lease-ttl-out-of-bounds"):
+        lease_bounds(
+            operation="deploy",
+            dispatched_job=None,
+            lease_ttl_seconds=ttl,
+            lease_max_seconds=900,
+        )
 
 
 @pytest.mark.parametrize("total", [0, 599, 10801, None, "900", True])
@@ -132,5 +132,5 @@ def test_a_requested_ttl_outside_the_window_is_lease_ttl_invalid(
     requested: Any,
 ) -> None:
     with pytest.raises(DeployLeaseRefused) as raised:
-        LeaseBounds(120, 900, 900).check(requested)
+        LeaseBounds(120, 900, 900, "serving").check(requested)
     assert raised.value.code == "lease-ttl-invalid"

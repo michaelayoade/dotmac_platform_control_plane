@@ -115,6 +115,7 @@ LEASE_ERRORS: Final = frozenset(
         "lease_expired",
         "lease_max_reached",
         "lease_held",
+        "lease_not_renewable",
         "reconcile_marker_required",
     }
 )
@@ -135,6 +136,7 @@ _RENEW_NAMES: Final = {
     "lease-already-released": "lease_not_held",
     "lease-expired": "lease_expired",
     "lease-max-reached": "lease_max_reached",
+    "lease-not-renewable": "lease_not_renewable",
 }
 _RELEASE_NAMES: Final = {
     "lease-role-unbound": "lease_not_held",
@@ -172,11 +174,21 @@ class LeasePort(Protocol):
         """The signed plan of a dispatch that is PENDING for `target_ref`, or None
         for an unknown, consumed or other-target dispatch. Read at acquire only."""
 
-    def reconcile_marker_for(
-        self, db: Any, *, target_ref: str, at: datetime
+    def dispatch_consumed(self, db: Any, *, target_ref: str, dispatch_id: str) -> bool:
+        """Whether `dispatch_id` has a committed consumption marker (5b's consume
+        ledger). Control cannot see this; CP supplies it."""
+
+    def reconcile_marker(
+        self,
+        db: Any,
+        *,
+        target_ref: str,
+        dispatch_id: str,
+        expired_dispatch_consumed: bool,
     ) -> str | None:
-        """Control's ISSUED, unspent reconcile marker digest for the target's host
-        (`sha256:<64 hex>`), or None when Control has not issued one."""
+        """Control's `reconcile_marker` decision over the verified v2 reconcile
+        observation of the EXPIRED dispatch: the issued, unspent marker digest
+        (`sha256:<64 hex>`), or None. CP derives nothing here."""
 
 
 class UnconfiguredLeasePort:
@@ -187,8 +199,16 @@ class UnconfiguredLeasePort:
     ) -> LeasePlan | None:
         return None
 
-    def reconcile_marker_for(
-        self, db: Any, *, target_ref: str, at: datetime
+    def dispatch_consumed(self, db: Any, *, target_ref: str, dispatch_id: str) -> bool:
+        return False
+
+    def reconcile_marker(
+        self,
+        db: Any,
+        *,
+        target_ref: str,
+        dispatch_id: str,
+        expired_dispatch_consumed: bool,
     ) -> str | None:
         return None
 
@@ -271,6 +291,15 @@ class LeaseHandlers:
                 status = 409
             return None, _refusal(name, status), refusal.code
 
+    def _expired_dispatch(self, call: AuthenticatedCall, db: Any) -> str | None:
+        """The dispatch id whose lease row is the host's expired-unreleased one."""
+        standing, refusal, _ = self._guarded(
+            db, lambda store: store.standing(self._host(call))
+        )
+        if refusal is not None or standing.standing != "expired_unreleased":
+            return None
+        return str(standing.dispatch_run).rsplit("#", 1)[-1]
+
     # ── lease/acquire ───────────────────────────────────────────────────────
 
     def _acquire(
@@ -306,22 +335,40 @@ class LeaseHandlers:
                 min_ttl=bounds.min_ttl,
                 max_ttl=bounds.max_ttl,
             )
-        marker = self._port.reconcile_marker_for(
-            db, target_ref=call.principal.target_ref, at=call.store_now
-        )
-        lease, refusal, _ = self._guarded(
-            db,
-            lambda store: store.acquire(
-                target_ref=call.principal.target_ref,
-                host_id=self._host(call),
-                dispatch_run=dispatch_run(call.principal.target_ref, dispatch_id),
-                ttl_seconds=ttl,
-                max_seconds=bounds.max_seconds,
-                principal_ref=call.principal.principal_ref,
-                reconcile_marker=marker,
-            ),
-            _ACQUIRE_NAMES,
-        )
+
+        def take(marker: str | None) -> Any:
+            return self._guarded(
+                db,
+                lambda store: store.acquire(
+                    target_ref=call.principal.target_ref,
+                    host_id=self._host(call),
+                    dispatch_run=dispatch_run(call.principal.target_ref, dispatch_id),
+                    ttl_seconds=ttl,
+                    max_seconds=bounds.max_seconds,
+                    lease_class=bounds.lease_class,
+                    principal_ref=call.principal.principal_ref,
+                    reconcile_marker=marker,
+                ),
+                _ACQUIRE_NAMES,
+            )
+
+        lease, refusal, code = take(None)
+        if code == "reconcile-marker-required":
+            # The host's last lease expired unreleased. Control decides the marker
+            # over the verified reconcile observation of THAT dispatch; CP names the
+            # dispatch (from the lease row) and says whether it was consumed.
+            expired = self._expired_dispatch(call, db)
+            if expired is not None:
+                marker = self._port.reconcile_marker(
+                    db,
+                    target_ref=call.principal.target_ref,
+                    dispatch_id=expired,
+                    expired_dispatch_consumed=self._port.dispatch_consumed(
+                        db, target_ref=call.principal.target_ref, dispatch_id=expired
+                    ),
+                )
+                if marker is not None:
+                    lease, refusal, code = take(marker)
         if refusal is not None:
             return refusal
         assert isinstance(lease, DeployLease)  # noqa: S101 - typing narrow

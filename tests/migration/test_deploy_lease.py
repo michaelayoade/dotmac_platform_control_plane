@@ -60,7 +60,7 @@ MARKER_1 = "sha256:" + "1" * 64
 MARKER_2 = "sha256:" + "2" * 64
 
 RUNTIME_FUNCTIONS = (
-    "deploy_acquire(text, text, text, integer, integer, text, text)",
+    "deploy_acquire(text, text, text, integer, integer, text, text, text)",
     "deploy_covers(uuid, text)",
     "deploy_release(uuid, text, text, boolean)",
     "deploy_renew(uuid, text)",
@@ -192,6 +192,7 @@ class Runtime:
             "dispatch_run": RUN,
             "ttl_seconds": 60,
             "max_seconds": 600,
+            "lease_class": "serving",
             "principal_ref": PRINCIPAL,
         }
         args.update(kw)
@@ -1015,3 +1016,56 @@ def test_standing_names_the_expired_dispatch_and_a_deletion_cannot_free_the_host
         conn.execute(text("DELETE FROM cp_deploy_lease.deploy_host_leases"))
     assert rt.standing().standing == "expired_unreleased"
     rt.acquire(host_id="host-b", dispatch_run="dispatch-run-2")  # no marker needed
+
+
+# ── lease class (serving or run_job) ────────────────────────────────────────
+
+
+def test_a_run_job_lease_is_granted_once_ttl_equals_total_and_is_never_renewed(
+    env: Any,
+) -> None:
+    db, rt = env
+    job = rt.acquire(lease_class="run_job", ttl_seconds=2520, max_seconds=2520)
+    assert job.ttl_seconds == 2520  # not held to the 900 s per-grant cap
+    db.advance(None, 100)
+    _refused("lease-not-renewable", lambda: rt.renew(job))
+    assert rt.covers(job) == db.now()  # and the refusal changed nothing
+    assert rt.standing().expires_at == job.expires_at
+
+
+@pytest.mark.parametrize(
+    ("lease_class", "ttl", "total"),
+    [
+        ("run_job", 600, 700),  # ttl must equal the total
+        ("run_job", 3601, 3601),  # at most 3600
+        ("serving", 901, 901),  # per grant at most 900
+        ("serving", 600, 10801),  # total at most 10800
+        ("serving", 600, 599),  # total at least the ttl
+        ("batch", 600, 600),  # an unknown class
+        (None, 600, 600),
+    ],
+)
+def test_the_class_bounds_are_enforced_by_the_function(
+    env: Any, lease_class: Any, ttl: int, total: int
+) -> None:
+    _db, rt = env
+    _refused(
+        "lease-ttl-invalid",
+        lambda: rt.acquire(lease_class=lease_class, ttl_seconds=ttl, max_seconds=total),
+    )
+
+
+def test_the_class_bounds_are_also_table_constraints(env: Any) -> None:
+    """Even the owner cannot write a lease row outside its class's bounds."""
+    db, _rt = env
+    base = (
+        "INSERT INTO cp_deploy_lease.deploy_host_leases (lease_id, host_id, "
+        "target_ref, dispatch_run, principal_ref, acquired_at, expires_at, "
+        "lease_class, ttl_seconds, max_seconds) VALUES (gen_random_uuid(), 'h', "
+        "'t', 'r', 'p', now(), now() + interval '{ttl} seconds', '{cls}', {ttl}, {mx})"
+    )
+    for cls, ttl, mx in (("run_job", 600, 700), ("serving", 901, 901), ("x", 60, 60)):
+        with pytest.raises(DBAPIError), db.admin.begin() as conn:
+            conn.execute(text(base.format(cls=cls, ttl=ttl, mx=mx)))
+    with db.admin.begin() as conn:  # the same shape inside its class is accepted
+        conn.execute(text(base.format(cls="run_job", ttl=2520, mx=2520)))
