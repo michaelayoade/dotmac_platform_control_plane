@@ -295,12 +295,11 @@ FUNCTIONS_SQL = (
     f"v_cur := {_EFF}(p_lease); "
     "IF v_now >= v_cur THEN " + _refuse("lease-expired") + " END IF; "
     "v_cap := v_l.acquired_at + v_l.max_seconds * interval '1 second'; "
-    "IF v_t >= v_cap OR v_cur >= v_cap THEN "
-    + _refuse("lease-max-reached")
-    + " END IF; "
-    "v_new := least(v_cap, v_t + v_l.ttl_seconds * interval '1 second'); "
-    "IF v_new < v_cur THEN v_new := v_cur; END IF; "
-    "v_g := extract(epoch FROM (v_new - v_t))::integer; "
+    "IF v_t >= v_cap THEN " + _refuse("lease-max-reached") + " END IF; "
+    # min(ttl, max - held), as the contract's reference ledger grants it
+    "v_g := least(v_l.ttl_seconds, extract(epoch FROM (v_cap - v_t))::integer); "
+    "v_new := v_t + v_g * interval '1 second'; "
+    "IF v_new < v_cur THEN v_new := v_cur; v_g := extract(epoch FROM (v_new - v_t))::integer; END IF; "
     f"INSERT INTO {SCHEMA}.deploy_host_lease_renewals (lease_id, renewed_at, "
     "new_expires_at, granted_seconds) VALUES (p_lease, v_t, v_new, v_g); "
     "RETURN QUERY SELECT p_lease, v_g, v_new, v_now; END $$",

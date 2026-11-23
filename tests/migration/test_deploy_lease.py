@@ -936,16 +936,27 @@ def test_deploy_lease_renew_grants_min_ttl_and_the_time_left_in_the_total(
     assert rt.standing().expires_at == second.expires_at
 
 
-def test_deploy_lease_renew_refuses_at_the_total(env: Any) -> None:
+def test_deploy_lease_renew_is_capped_at_the_total_then_the_lease_expires(
+    env: Any,
+) -> None:
+    """The contract's reference ledger: the last grant is capped to what remains of
+    the maximum, an early repeat still answers the remainder, and at the cap the
+    lease is simply expired (not renewable)."""
     db, rt = env
     lease = rt.acquire(ttl_seconds=120, max_seconds=240)
     db.advance(None, 100)
-    rt.renew(lease)  # to 220
-    db.advance(None, 100)
-    rt.renew(lease)  # to 240, the cap
-    db.advance(None, 10)
-    _refused("lease-max-reached", lambda: rt.renew(lease))
-    assert rt.covers(lease) == db.now()  # still held until 240
+    assert rt.renew(lease).granted_seconds == 120  # to 220
+    db.advance(None, 100)  # held 200
+    last = rt.renew(lease)
+    assert last.granted_seconds == 40 and last.expires_at == (
+        lease.acquired_at + timedelta(seconds=240)
+    )
+    db.advance(None, 10)  # held 210, still inside the capped lease
+    assert rt.renew(lease).granted_seconds == 30
+    assert rt.covers(lease) == db.now()
+    db.advance(None, 30)  # held 240: the cap
+    _refused("lease-expired", lambda: rt.renew(lease))
+    assert rt.standing().standing == "expired_unreleased"
 
 
 def test_deploy_lease_renew_never_resurrects_an_expired_or_released_lease(

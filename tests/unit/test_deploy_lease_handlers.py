@@ -314,10 +314,10 @@ def test_a_ttl_that_is_not_an_int_in_the_window_is_refused(ttl: Any) -> None:
 @pytest.mark.parametrize(
     ("code", "status", "name"),
     [
-        ("lease-held-by-another-run", 409, "lease_held_by_another_run"),
-        ("lease-host-mutated", 409, "lease_host_mutated"),
-        ("lease-expired", 409, "lease_expired"),
-        ("release-not-this-lease", 403, "release_not_this_lease"),
+        ("lease-held-by-another-run", 409, "lease_held"),
+        ("lease-host-mutated", 409, "lease_held"),
+        ("reconcile-marker-required", 409, "reconcile_marker_required"),
+        ("reprovision-receipt-spent", 409, "reconcile_marker_required"),
         ("lease-role-unbound", 404, "lease_role_unbound"),
     ],
 )
@@ -347,7 +347,9 @@ def test_every_mapped_refusal_code_is_in_the_closed_set() -> None:
     from vendor_cp.deployment import deploy_lease_handlers as h
 
     assert set(h._STATUS) <= REFUSAL_CODES
-    assert set(h._RENEW_NAMES) <= REFUSAL_CODES
+    for names in (h._RENEW_NAMES, h._RELEASE_NAMES, h._ACQUIRE_NAMES):
+        assert set(names) <= REFUSAL_CODES
+        assert {v for v in names.values() if v in h.LEASE_ERRORS} == set(names.values())
     assert refusal_http_status("store-error") is None
     assert refusal_http_status("store-unreachable") is None
 
@@ -410,22 +412,50 @@ def test_release_needs_a_real_bool(mutated: Any) -> None:
     assert rig.store.calls == []
 
 
-def test_release_by_another_holder_is_403() -> None:
+@pytest.mark.parametrize(
+    ("code", "name"),
+    [
+        ("release-not-this-lease", "lease_not_held"),
+        ("lease-role-unbound", "lease_not_held"),
+        ("lease-expired", "lease_expired"),
+    ],
+)
+def test_release_refusals_are_the_contracts_signed_409s(code: str, name: str) -> None:
     rig = Rig()
-    rig.store.refuse = "release-not-this-lease"
+    rig.store.refuse = code
     response = rig.call(
         "POST", "lease/release", {"lease_id": _LEASE, "host_mutated": True}
     )
-    assert response.status_code == 403
+    assert response.status_code == 409
+    assert response.json()["error"] == name
 
 
-def test_a_malformed_lease_id_is_refused_before_the_store() -> None:
+def test_a_lease_id_that_is_not_a_uuid_is_a_lease_nobody_holds() -> None:
+    """Never sent to the database; answered as the contract answers an unknown id."""
     rig = Rig()
-    for route, body in (
-        ("lease/covers", {"lease_id": "not-a-uuid", "dispatch_run": "d-1"}),
-        ("lease/release", {"lease_id": "not-a-uuid", "host_mutated": True}),
-    ):
-        assert rig.call("POST", route, body).status_code == 400
+    covers = rig.call(
+        "POST", "lease/covers", {"lease_id": "lease-9999", "dispatch_run": "d-1"}
+    )
+    assert covers.status_code == 200 and covers.json()["covers"] is False
+    release = rig.call(
+        "POST", "lease/release", {"lease_id": "lease-9999", "host_mutated": True}
+    )
+    assert release.status_code == 409
+    assert release.json()["error"] == "lease_not_held"
+    assert rig.store.calls == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"lease_id": 7, "dispatch_run": "d-1"},
+        {"lease_id": "x"},
+        {"lease_id": "x", "dispatch_run": "d-1", "ttl_seconds": 1},
+    ],
+)
+def test_a_body_of_the_wrong_shape_is_a_400(body: Any) -> None:
+    rig = Rig()
+    assert rig.call("POST", "lease/covers", body).status_code == 400
     assert rig.store.calls == []
 
 
@@ -437,12 +467,12 @@ def test_standing_reads_the_targets_own_host() -> None:
     assert rig.store.calls == [("standing", {"host_id": "host-a"})]
 
 
-def test_standing_of_a_never_leased_host_is_none_not_an_error() -> None:
+def test_standing_of_a_never_leased_host_is_free_not_an_error() -> None:
     rig = Rig()
     rig.store.refuse = "lease-host-unknown"
     response = rig.call("GET", "lease/standing")
     assert response.status_code == 200
-    assert response.json()["standing"] == "none"
+    assert response.json()["standing"] == "free"
 
 
 def test_standing_of_a_host_held_by_the_rehearsal_class_is_a_conflict() -> None:
@@ -526,7 +556,7 @@ def test_renew_refusals_are_the_contracts_three_signed_names(
     result = handlers.handle(
         _renew_call(), None, {"lease_id": _LEASE, "dispatch_run": "d-1"}
     )
-    assert result.status == 409 or result.status == 404
+    assert result.status == 409
     assert result.body["error"] == name
 
 
@@ -535,10 +565,13 @@ def test_renew_needs_a_lease_and_a_run_and_nothing_else() -> None:
     for body in (
         {"lease_id": _LEASE},
         {"lease_id": _LEASE, "dispatch_run": "d-1", "ttl_seconds": 999},
-        {"lease_id": "nope", "dispatch_run": "d-1"},
         None,
     ):
         assert handlers.handle(_renew_call(), None, body).status == 400
+    unknown = handlers.handle(
+        _renew_call(), None, {"lease_id": "lease-9999", "dispatch_run": "d-1"}
+    )
+    assert (unknown.status, unknown.body["error"]) == (409, "lease_not_held")
     assert store.calls == []
 
 

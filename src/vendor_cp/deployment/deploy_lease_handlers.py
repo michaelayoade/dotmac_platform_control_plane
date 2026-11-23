@@ -70,6 +70,7 @@ __all__ = [
     "LeasePlan",
     "LeasePort",
     "UnconfiguredLeasePort",
+    "LEASE_ERRORS",
     "refusal_http_status",
 ]
 
@@ -107,15 +108,39 @@ _STATUS: Final = {
     "lease-host-unknown": 404,
     "release-not-this-lease": 403,
 }
-#: The signed error name of a refusal, per route. Renew speaks the contract's three
-#: (`lease_not_held`, `lease_expired`, `lease_max_reached`); acquire's missing marker
-#: is `reconcile_marker_required`; every other code is its own name with `_`.
+#: Control's signed lease errors (`target_api_v2` `lease_errors`), all HTTP 409.
+LEASE_ERRORS: Final = frozenset(
+    {
+        "lease_not_held",
+        "lease_expired",
+        "lease_max_reached",
+        "lease_held",
+        "reconcile_marker_required",
+    }
+)
+#: Store refusal -> contract error name, per route. Anything not named here is its
+#: own name with `_` (a request-level refusal, not a lease state).
+_ACQUIRE_NAMES: Final = {
+    "lease-held-by-another-run": "lease_held",
+    # held by the rehearsal class, or a host a rehearsal released: not leasable
+    "lease-host-mutated": "lease_held",
+    "reconcile-marker-required": "reconcile_marker_required",
+    # a marker Control issued but that cannot be used is still "no usable marker"
+    "reprovision-receipt-spent": "reconcile_marker_required",
+    "reprovision-receipt-mismatch": "reconcile_marker_required",
+}
 _RENEW_NAMES: Final = {
     "lease-role-unbound": "lease_not_held",
     "lease-foreign-run": "lease_not_held",
     "lease-already-released": "lease_not_held",
     "lease-expired": "lease_expired",
     "lease-max-reached": "lease_max_reached",
+}
+_RELEASE_NAMES: Final = {
+    "lease-role-unbound": "lease_not_held",
+    "release-not-this-lease": "lease_not_held",
+    "lease-already-released": "lease_not_held",
+    "lease-expired": "lease_expired",
 }
 #: Refusals that mean "this lease does not cover this run" (a `covers` answer).
 _NOT_COVERED: Final = frozenset(
@@ -242,6 +267,8 @@ class LeaseHandlers:
             if status is None:
                 raise
             name = (names or {}).get(refusal.code) or refusal.code.replace("-", "_")
+            if name in LEASE_ERRORS:
+                status = 409
             return None, _refusal(name, status), refusal.code
 
     # ── lease/acquire ───────────────────────────────────────────────────────
@@ -293,6 +320,7 @@ class LeaseHandlers:
                 principal_ref=call.principal.principal_ref,
                 reconcile_marker=marker,
             ),
+            _ACQUIRE_NAMES,
         )
         if refusal is not None:
             return refusal
@@ -306,11 +334,14 @@ class LeaseHandlers:
     def _lease_and_run(
         self, call: AuthenticatedCall, payload: object
     ) -> tuple[str, str] | None:
+        """`(lease_id, run)`, or None for a body of the wrong shape or types. A
+        lease id that is a string but not a UUID is a lease nobody holds: it is
+        answered by the caller as `lease_not_held`, never sent to the database."""
         body = _body(payload, frozenset({"lease_id", "dispatch_run"}))
         if (
             body is None
             or not _is_dispatch_id(body["dispatch_run"])
-            or not _is_lease_id(body["lease_id"])
+            or not isinstance(body["lease_id"], str)
         ):
             return None
         return body["lease_id"], dispatch_run(
@@ -324,6 +355,8 @@ class LeaseHandlers:
         if named is None:
             return _refusal("bad_body", 400)
         lease_id, run = named
+        if not _is_lease_id(lease_id):
+            return HandlerResult(200, {"covers": False})
         _, refusal, code = self._guarded(
             db, lambda store: store.covers(lease_id=lease_id, dispatch_run=run)
         )
@@ -342,6 +375,8 @@ class LeaseHandlers:
         if named is None:
             return _refusal("bad_body", 400)
         lease_id, run = named
+        if not _is_lease_id(lease_id):
+            return _refusal("lease_not_held", 409)
         renewal, refusal, _ = self._guarded(
             db,
             lambda store: store.renew(lease_id=lease_id, dispatch_run=run),
@@ -361,10 +396,12 @@ class LeaseHandlers:
         body = _body(payload, frozenset({"lease_id", "host_mutated"}))
         if (
             body is None
-            or not _is_lease_id(body["lease_id"])
+            or not isinstance(body["lease_id"], str)
             or not isinstance(body["host_mutated"], bool)
         ):
             return _refusal("bad_body", 400)
+        if not _is_lease_id(body["lease_id"]):
+            return _refusal("lease_not_held", 409)
         released, refusal, _ = self._guarded(
             db,
             lambda store: store.release(
@@ -373,6 +410,7 @@ class LeaseHandlers:
                 principal_ref=call.principal.principal_ref,
                 host_mutated=body["host_mutated"],
             ),
+            _RELEASE_NAMES,
         )
         if refusal is not None:
             return refusal
@@ -388,6 +426,8 @@ class LeaseHandlers:
         )
         if refusal is not None:
             if code == "lease-host-unknown":
-                return HandlerResult(200, {"standing": "none"})
+                return HandlerResult(200, {"standing": "free"})
             return refusal
-        return HandlerResult(200, {"standing": standing.standing})
+        # the contract's three: a released lease leaves the host `free`
+        value = "free" if standing.standing == "released" else standing.standing
+        return HandlerResult(200, {"standing": value})
