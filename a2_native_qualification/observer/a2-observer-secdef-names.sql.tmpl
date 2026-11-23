@@ -3,7 +3,7 @@
 -- function), outside pg_catalog and information_schema, with NO allowlist. Run with psql -A -t.
 -- Output rows: `secdef_reachable|schema.function(argument types)` or the single row `secdef_reachable|none`.
 WITH r AS (
-  SELECT (n.nspname || '.' || p.oid::regprocedure::text) AS name
+  SELECT (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') AS name
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE p.prosecdef
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')

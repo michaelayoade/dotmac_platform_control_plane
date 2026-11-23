@@ -148,11 +148,31 @@ def run_psql(argv, sql: bytes):
 
 
 # ── template handling ─────────────────────────────────────────────────────────────────────────────────────────
+ALLOW_EMPTY = "SELECT NULL::text AS name WHERE false"
+ALLOW_ENTRY = re.compile(r"\('[A-Za-z0-9_]+\.[A-Za-z0-9_]+\([A-Za-z0-9_ ,.\[\]\"]*\)'\)")
+
+
+def check_allowlist(text):
+    """L-r6a: the pinned SECURITY DEFINER allowlist block is either the empty literal or a VALUES list of non-empty
+    'schema.name(identity arguments)' entries. A NULL or empty entry (which would make the row pass silently) is refused."""
+    if "-- ALLOWLIST-BEGIN" not in text:
+        return
+    need(text.count("-- ALLOWLIST-BEGIN") == 1 and text.count("-- ALLOWLIST-END") == 1, "allowlist_markers")
+    block = text.split("-- ALLOWLIST-BEGIN", 1)[1].split("-- ALLOWLIST-END", 1)[0].strip()
+    if block == ALLOW_EMPTY:
+        return
+    m = re.fullmatch(r"VALUES\s+(.+)", block, re.S)
+    need(m is not None, "allowlist_shape")
+    entries = [e.strip() for e in re.split(r",\s*(?=\()", m.group(1))]
+    need(entries and all(ALLOW_ENTRY.fullmatch(e) for e in entries), "allowlist_entry_null_or_empty_or_malformed")
+
+
 def materialize(template_path, template_sha, n, valid_until):
     raw = read_regular(template_path, SQL_LIMIT)
     need(HEX.match(template_sha or "") and sha256_bytes(raw) == template_sha, "template_sha256_differs")
     need(isinstance(n, str) and re.fullmatch(r"[1-9][0-9]{0,5}", n), "run_number")
     text = raw.decode("ascii")
+    check_allowlist(text)
     has_valid = "<VALID_UNTIL>" in text
     if has_valid:
         need(isinstance(valid_until, str) and VALID_UNTIL.match(valid_until), "valid_until_form")

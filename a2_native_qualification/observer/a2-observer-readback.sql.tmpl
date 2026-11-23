@@ -41,15 +41,20 @@ SELECT 'no_select_on_other_public_relations|' || (count(*) = 0)::text
   WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
     AND c.relname != 'platform_idempotency_records'
     AND has_table_privilege('a2_recovery_observer_r<N>', c.oid, 'SELECT');
--- SECURITY DEFINER reachability (architect r5): count prosecdef functions outside pg_catalog and information_schema that
+-- SECURITY DEFINER reachability (architect r5/r6): count prosecdef functions outside pg_catalog and information_schema that
 -- the role can actually REACH (USAGE on the schema AND EXECUTE on the function), excluding a PINNED allowlist. The allowlist
--- is the literal subquery below: empty by default, covered by this template's sha, substituted by nobody at run time. To admit
--- a reviewed function, replace the subquery by a VALUES list of 'schema.regprocedure' names: that is a NEW template sha
--- and a re-typed A-text. Never widen this row to pass by deleting it.
+-- is the literal block between the ALLOWLIST markers: empty by default, covered by this template's sha, substituted by nobody
+-- at run time. It is matched with NOT EXISTS (a NULL entry cannot silently pass the row; materialize refuses a NULL or empty
+-- entry). To admit a reviewed function, replace the block by VALUES rows of the form 'schema.name(identity arguments)': that
+-- is a NEW template sha and a re-typed A-text. Never widen this row to pass by deleting it.
 SELECT 'no_reachable_security_definer_functions_outside_allowlist|' || (count(*) = 0)::text
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE p.prosecdef
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
     AND has_schema_privilege('a2_recovery_observer_r<N>', n.oid, 'USAGE')
     AND has_function_privilege('a2_recovery_observer_r<N>', p.oid, 'EXECUTE')
-    AND (n.nspname || '.' || p.oid::regprocedure::text) NOT IN (SELECT NULL::text WHERE false);
+    AND NOT EXISTS (SELECT 1 FROM (
+      -- ALLOWLIST-BEGIN
+      SELECT NULL::text AS name WHERE false
+      -- ALLOWLIST-END
+    ) a WHERE a.name = (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'));

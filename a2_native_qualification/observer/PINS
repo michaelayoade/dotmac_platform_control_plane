@@ -1,8 +1,8 @@
-# Vendored from .cutover-private/cp-generic-deploy-20261122/a2-gates/observer/ (updated pins, 2026-11-23).
+# Vendored from .cutover-private/cp-generic-deploy-20261122/a2-gates/observer/ (final pins, L-r6a/L-r6b).
 # The workflow refuses to run unless these digests match the bytes here.
 0380398a21b18aba21d3f10c9a67f8b450e176a297e1e0049217d33ea172c7ce  a2-observer-absence.sql.tmpl
 b87822722a8e4dcfa200c947e1ad62254790d67b662f1383b61847d4a4047139  a2-observer-create.sql.tmpl
 1e8e2ee6368b1bbe6a66bce54a8c3a534e77a136c6d3e3d031e7f419919f23a0  a2-observer-drop.sql.tmpl
-804e87483b38b1431bbd26a93d217d758564d7edadbb401263d4516eb0b22382  a2-observer-readback.sql.tmpl
-1837597e21d86dc0e96713690e0433eb1fc58bec3639b0373183dfd77b282d19  a2-observer-secdef-names.sql.tmpl
-34a330e02d28ec64698f739379fb56361631109621916f42a899572f70c689e4  a2-observer-secret.py
+70804d18d6af1e472ceefbd3a8b114004e0d284a741612707391d10b2c571ce8  a2-observer-readback.sql.tmpl
+b42c1e516ae631b98c8e47b0212de7833d2bca1b511a10efbde6cecb3468fd44  a2-observer-secdef-names.sql.tmpl
+3f8681183e04544d6e505aede5d671550fca35f653b51ce67b64fc63fdb75526  a2-observer-secret.py
