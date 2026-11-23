@@ -51,13 +51,14 @@ def test_the_pin_check_can_still_fail(tmp_path: Path) -> None:
     )
 
 
-def test_the_cp6_pin_records_that_the_starter_schema_is_provisional() -> None:
+def test_the_cp6_pin_records_the_merged_starter_pr() -> None:
     pins = json.loads(
         (VENDORED / "starter_lane3_cp6" / "PINS.json").read_text(encoding="utf-8")
     )
-    assert "PROVISIONAL" in pins["source_pr"]
-    assert "#1128" in pins["source_pr"]
-    assert pins["source_commit"] == "3a39f3fc628b9a6ceacb7c36bc21b96a7c1a5833"
+    # #1128 is merged, so the pin is no longer provisional.
+    assert "PROVISIONAL" not in pins["source_pr"]
+    assert "#1128 MERGED (squash daa576f2)" in pins["source_pr"]
+    assert pins["source_commit"] == "daa576f2bccd5283153c21a0571d0077624bdb6f"
     assert pins["files"]["lane3_cp6_export.py"]["sha256"] == (
         "1dab4df7f986d5e68f7da2cc1dc12abb743e6c8c1f5b4874d7928e99442c7ccc"
     )
