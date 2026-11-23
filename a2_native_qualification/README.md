@@ -8,8 +8,8 @@ only; read-only permissions; publishes nothing).
 - `pg`: disposable PostgreSQL 16, the BUILT CP wheel (installed, not source-linked),
   the CP image built locally and bound by id, the Control wheel built and bound by
   digest. Scenario map: `scenarios.json` (existing CP tests invoked by name).
-  Scenarios (a) and (d) are BLOCKED until packet P0 puts the dispatch-only recovery
-  source on branches; a BLOCKED scenario makes the receipt INCOMPLETE, which fails a
+  Scenarios (a) and (d) run Control #76's native-PG tests from the Control checkout
+  (Control's own platform-isolation fixtures). A scenario with no tests is BLOCKED; it makes the receipt INCOMPLETE, which fails a
   dispatch run (`require_complete`, default true) and is tolerated on PR runs only.
 - `bao`: a real OpenBao 2.5.3 server (file storage, initialised in the job).
 - Receipts: `a2-native-pg-qualification-<date>.json` and

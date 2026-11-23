@@ -42,7 +42,7 @@ permissions:
 
 env:
   CP_REF_DEFAULT: 8e469b2fea9a007988c3815d138875c6df82aa11
-  CONTROL_REF_DEFAULT: 314039111cec4eb99cd4511a01c3ac769cebab70
+  CONTROL_REF_DEFAULT: d5a9f39b898e50240d5151899bf24c4c9fa51f91
   # CP draft #272 (recovery source): carries conformance/recovery_source/test_contract.py.
   RECOVERY_CP_REF: 73f88f1c82e0001d456ce787ba2176c27c1111fe
   # The Starter commit CP #269's own Lane 3 step pins for the Foundation import.
@@ -240,6 +240,50 @@ jobs:
               conformance/recovery_source/test_contract.py 2>&1 | tee "$RUNNER_TEMP/out/recovery.log"
           fi
           exit 0
+      - name: Control native-PG scenarios (a) and (d), on real PostgreSQL 16
+        working-directory: control-src
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+          PGPASSWORD: postgres
+          TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5442/postgres
+          REQUIRE_NO_SKIPS: "1"
+          DOTMAC_MIGRATION_BINDINGS: tests.migration_bindings:CANARY_PREREQUISITE_BINDINGS
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -uo pipefail
+          # Set up exactly as Control's own canary job does: a disposable PG16
+          # (same pinned image as the CP compose), cluster roles, real passwords
+          # via .pgpass (never trust auth).
+          set +e
+          (
+            set -e
+            docker run -d --name a2-control-pg -e POSTGRES_PASSWORD=postgres \
+              -p 127.0.0.1:5442:5432 "$PG_IMAGE"
+            for _ in $(seq 1 40); do
+              docker exec a2-control-pg pg_isready -U postgres && break
+              sleep 2
+            done
+            psql_() { docker exec -e PGPASSWORD=postgres a2-control-pg psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "$1"; }
+            psql_ "CREATE ROLE app_admin LOGIN BYPASSRLS CREATEROLE PASSWORD 'app_admin'"
+            for role in app_user platform_api; do psql_ "CREATE ROLE ${role} LOGIN PASSWORD '${role}'"; done
+            umask 077
+            {
+              echo "localhost:5442:*:app_admin:app_admin"
+              echo "localhost:5442:*:app_user:app_user"
+              echo "localhost:5442:*:platform_api:platform_api"
+            } > "$HOME/.pgpass"
+            chmod 600 "$HOME/.pgpass"
+            poetry install --no-interaction
+          )
+          src=$?
+          if [ "$src" = 0 ]; then
+            mapfile -t ctargets < <(python3 -I "$GITHUB_WORKSPACE/a2_native_qualification/qual.py" pg-select --control --scenarios "$GITHUB_WORKSPACE/a2_native_qualification/scenarios.json")
+            poetry run pytest -rs -p no:cacheprovider -o junit_family=xunit1 \
+              --junitxml="$RUNNER_TEMP/out/control-junit.xml" "${ctargets[@]}" 2>&1 | tee "$RUNNER_TEMP/out/control-pg.log"
+          fi
+          docker rm -f a2-control-pg >/dev/null 2>&1
+          exit 0
       - name: Build the CP image locally (bound by id, never pushed)
         env:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
@@ -267,6 +311,7 @@ jobs:
             --server-version "${PG_SERVER_VERSION:-unknown}" --postgres-image "${PG_IMAGE:-unknown}" \
             --pytest-rc "${PYTEST_RC:-255}" \
             --wheelhouse-manifest "$RUNNER_TEMP/out/wheelhouse-manifest.json" \
+            --control-junit "$RUNNER_TEMP/out/control-junit.xml" \
             --recovery-junit "$RUNNER_TEMP/out/recovery-junit.xml" \
             --recovery-cp-commit "$RECOVERY_CP_COMMIT" \
             --recovery-parity "${RECOVERY_PARITY:-false}"

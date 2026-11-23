@@ -33,26 +33,22 @@ class SelectorTests(unittest.TestCase):
 
     def all_pass_cases(self) -> list[dict[str, str]]:
         out = []
-        for t in qual.select_targets(self.scenarios):
+        every = qual.select_targets(self.scenarios) + qual.select_control_targets(
+            self.scenarios
+        )
+        for t in every:
             module, name = qual._module_of(t)
             out.append({"classname": module, "name": name, "outcome": "passed"})
         return out
 
-    def test_blocked_scenarios_never_read_as_pass(self) -> None:
+    def test_all_mapped_scenarios_pass_when_every_test_passes(self) -> None:
         judged = qual.judge_scenarios(self.scenarios, self.all_pass_cases())
-        states = {s["id"][0]: s["status"] for s in judged}
-        self.assertEqual(states["a"], "BLOCKED")
-        self.assertEqual(states["d"], "BLOCKED")
-        self.assertEqual(qual.overall(judged), "INCOMPLETE")
+        self.assertEqual(qual.overall(judged), "PASS")
 
-    def test_all_scenarios_mapped_pass_only_when_nothing_is_blocked(self) -> None:
-        scenarios = [
-            dict(s, tests=s["tests"] or ["tests/x.py::test_x"]) for s in self.scenarios
-        ]
-        cases = self.all_pass_cases() + [
-            {"classname": "tests.x", "name": "test_x", "outcome": "passed"}
-        ]
-        self.assertEqual(qual.overall(qual.judge_scenarios(scenarios, cases)), "PASS")
+    def test_a_scenario_with_no_tests_is_blocked_never_pass(self) -> None:
+        scenarios = [dict(s, tests=[], control_tests=[]) for s in self.scenarios]
+        judged = qual.judge_scenarios(scenarios, self.all_pass_cases())
+        self.assertEqual(qual.overall(judged), "INCOMPLETE")
 
     def test_skip_is_not_a_pass_and_failure_dominates(self) -> None:
         cases = self.all_pass_cases()
@@ -114,7 +110,7 @@ class SelectorTests(unittest.TestCase):
 
 
 class ReceiptTests(unittest.TestCase):
-    def test_pg_receipt_is_values_free_and_incomplete_while_p0_is_absent(self) -> None:
+    def test_pg_receipt_is_values_free_and_fails_without_results(self) -> None:
         env = {
             "QUAL_WORKFLOW_SHA256": "a" * 64,
             "GITHUB_REPOSITORY": "o/r",
@@ -172,6 +168,8 @@ class ReceiptTests(unittest.TestCase):
                         "1",
                         "--wheelhouse-manifest",
                         str(tmp / "absent3.json"),
+                        "--control-junit",
+                        str(tmp / "absent4.json"),
                         "--recovery-junit",
                         str(tmp / "absent2.xml"),
                         "--recovery-cp-commit",
@@ -202,7 +200,7 @@ class ReceiptTests(unittest.TestCase):
             {s["id"]: s["status"] for s in doc["scenarios"]}[
                 "a_standing_withdrawal_locking"
             ],
-            "BLOCKED",
+            "FAIL",
         )
 
     def test_gate_refuses_anything_but_pass(self) -> None:

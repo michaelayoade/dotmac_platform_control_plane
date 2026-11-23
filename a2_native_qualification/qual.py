@@ -41,7 +41,7 @@ def load_scenarios(path: Path) -> list[dict[str, Any]]:
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate scenario id")
     for s in scenarios:
-        for test in s["tests"]:
+        for test in [*s["tests"], *s.get("control_tests", [])]:
             if test.count("::") != 1 or not test.startswith("tests/"):
                 raise ValueError(f"malformed test id: {test}")
     return list(scenarios)
@@ -51,6 +51,14 @@ def select_targets(scenarios: list[dict[str, Any]]) -> list[str]:
     seen: dict[str, None] = {}
     for s in scenarios:
         for test in s["tests"]:
+            seen[test] = None
+    return list(seen)
+
+
+def select_control_targets(scenarios: list[dict[str, Any]]) -> list[str]:
+    seen: dict[str, None] = {}
+    for s in scenarios:
+        for test in s.get("control_tests", []):
             seen[test] = None
     return list(seen)
 
@@ -105,7 +113,8 @@ def judge_scenarios(
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for s in scenarios:
-        if not s["tests"]:
+        all_tests = [*s["tests"], *s.get("control_tests", [])]
+        if not all_tests:
             out.append(
                 {
                     "id": s["id"],
@@ -116,7 +125,7 @@ def judge_scenarios(
                 }
             )
             continue
-        tests = [judge_test(t, cases) for t in s["tests"]]
+        tests = [judge_test(t, cases) for t in all_tests]
         status = "PASS" if all(t["status"] == "PASS" for t in tests) else "FAIL"
         out.append(
             {"id": s["id"], "title": s["title"], "status": status, "tests": tests}
@@ -223,6 +232,9 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
     scenarios = load_scenarios(Path(args.scenarios))
     junit = Path(args.junit)
     cases = parse_junit(junit) if junit.is_file() else []
+    control_junit = Path(args.control_junit)
+    if control_junit.is_file():
+        cases += parse_junit(control_junit)
     judged = judge_scenarios(scenarios, cases)
     recovery = judge_recovery_suite(Path(args.recovery_junit))
     judged.append(recovery)
@@ -273,6 +285,14 @@ def build_pg_receipt(args: argparse.Namespace) -> dict[str, Any]:
             else None,
         },
         "runtime_wheelhouse": wheelhouse_block(Path(args.wheelhouse_manifest)),
+        "control_native_pg": {
+            "note": "Control tests ran from the Control source checkout at the named "
+            "commit, on real PostgreSQL 16 with Control's own platform-isolation "
+            "fixtures (not the installed wheel).",
+            "junit_sha256": sha256_file(control_junit)
+            if control_junit.is_file()
+            else None,
+        },
         "installed_artifact_parity": {
             "tests_import_installed_wheel": args.parity == "true",
             "note": "CP tests ran against the installed CP wheel, not the source tree. "
@@ -339,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         wl.add_argument(f"--{flag}", required=True)
     sel = sub.add_parser("pg-select")
     sel.add_argument("--scenarios", required=True)
+    sel.add_argument("--control", action="store_true")
     pg = sub.add_parser("pg-receipt")
     for flag in (
         "scenarios", "junit", "log", "out-dir", "stem", "cp-repo", "cp-commit",
@@ -346,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
         "control-wheel-name", "control-wheel-sha256", "cp-image-id", "parity",
         "server-version", "postgres-image", "pytest-rc", "foundation-repo",
         "foundation-commit",
-        "recovery-junit", "wheelhouse-manifest",
+        "recovery-junit", "wheelhouse-manifest", "control-junit",
         "recovery-cp-commit", "recovery-parity",
     ):  # fmt: skip
         pg.add_argument(f"--{flag}", required=True)
@@ -359,7 +380,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     if args.cmd == "pg-select":
-        print("\n".join(select_targets(load_scenarios(Path(args.scenarios)))))
+        pick = select_control_targets if args.control else select_targets
+        print("\n".join(pick(load_scenarios(Path(args.scenarios)))))
         return 0
     if args.cmd == "wheelhouse-lock":
         m = wheelhouse_lock(
