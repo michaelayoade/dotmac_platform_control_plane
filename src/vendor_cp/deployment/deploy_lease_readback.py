@@ -6,7 +6,8 @@ pinned to `pg_catalog, pg_temp`. The SQL is READ FROM the migration (one source)
     DEPLOY_LEASE_READBACK_DATABASE_URL=... \\
         python -m vendor_cp.deployment.deploy_lease_readback --phase before|after
 
-`before` (U16: is the CP runtime role stable for the grant?):
+`before` (U16: is the CP runtime role stable for the grant?; run it as the
+migrating role, as the migration does):
   * the migration role and `platform_api` exist; `platform_api` is NOSUPERUSER;
   * `cp_lane3` and `mod_deploy` exist (v023 is applied) and `cp_deploy_lease` does
     not; no default-privilege rule would apply; no event trigger;
@@ -132,8 +133,12 @@ def run_before(
     return checks, info
 
 
-def run_after(execute: Callable[..., Any], *, source: Any) -> list[tuple[str, bool]]:
-    """The grant as built: every query is the migration's own text."""
+def run_after(
+    execute: Callable[..., Any], *, source: Any, owner: str = "app_admin"
+) -> list[tuple[str, bool]]:
+    """The grant as built: every query is the migration's own text. `owner` is the
+    migrating role (`app_admin` on production), which the read-back session need
+    not be."""
     return [
         (
             "schema-acl-only-owner-and-runtime-usage",
@@ -160,7 +165,12 @@ def run_after(execute: Callable[..., Any], *, source: Any) -> list[tuple[str, bo
         ),
         (
             "one-owner-the-migrating-role",
-            _count(execute, source.OWNER_NOT_MIGRATOR_SQL) == 0,
+            _count(
+                execute,
+                source.OWNER_NOT_MIGRATOR_SQL.replace("current_user", ":owner"),
+                {"owner": owner},
+            )
+            == 0,
         ),
         (
             "runtime-role-has-no-cp_lane3-usage",
@@ -177,6 +187,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--phase", choices=("before", "after"), required=True)
+    parser.add_argument("--owner", default="app_admin", help="the migrating role")
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     dsn = env.get(READBACK_DSN_ENV, "").strip()
@@ -197,7 +208,7 @@ def main(
             if args.phase == "before":
                 results, info = run_before(execute, source=source)
             else:
-                results = run_after(execute, source=source)
+                results = run_after(execute, source=source, owner=args.owner)
         finally:
             session.rollback()
             session.close()

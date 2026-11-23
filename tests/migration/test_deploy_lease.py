@@ -685,7 +685,8 @@ def test_the_migrations_privilege_read_back_passes_and_sees_a_leak(env: Any) -> 
         migration.FUNCTION_ACL_SQL,
         migration.SCHEMA_ACL_SQL,
         migration.DEFAULT_ACL_SQL,
-        migration.OWNER_NOT_MIGRATOR_SQL,
+        # the case database was migrated by `app_admin`; this session is the admin
+        migration.OWNER_NOT_MIGRATOR_SQL.replace("current_user", "'app_admin'"),
     )
     with db.admin.begin() as conn:
         assert [conn.execute(text(q)).scalar_one() for q in clean] == [0] * len(clean)

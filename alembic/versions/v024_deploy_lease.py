@@ -526,5 +526,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     raise RuntimeError(
-        "the deploy lease class is retained evidence; forward repair required"
+        "the deploy lease class cannot be downgraded; it is retained evidence, "
+        "forward repair required"
     )
