@@ -12,13 +12,26 @@ STAGES = (
     "tls_setup",
     "create",
     "readback",
+    "secdef_names",
+    "probe_create",
+    "probe_drop",
     "login",
     "drop",
     "absence",
 )
+SECDEF_ROW = "no_reachable_security_definer_functions_outside_allowlist"
+PROBE = "public.a2_ci_sensitivity_probe()"
 
 
-def judge(stages: dict[str, str], readback: list[str], login: dict, absence: list[str]):
+def judge(
+    stages: dict[str, str],
+    readback: list[str],
+    login: dict,
+    absence: list[str],
+    names: list[str] | None = None,
+    sens_readback: list[str] | None = None,
+    sens_names: list[str] | None = None,
+):
     rows = {}
     for line in readback:
         name, _, value = line.partition("|")
@@ -37,6 +50,10 @@ def judge(stages: dict[str, str], readback: list[str], login: dict, absence: lis
         **{f"readback_{k}": v for k, v in rows.items()},
         **{f"login_{k}": login.get(k) is True for k in login_keys},
         "absence_role_absent": absence == ["role_absent|true"],
+        "sensitivity_row_false_with_probe": f"{SECDEF_ROW}|false"
+        in (sens_readback or []),
+        "sensitivity_probe_listed": any(PROBE in n for n in (sens_names or [])),
+        "secdef_names_recorded": bool(names),
     }
     failed = sorted(k for k, v in checks.items() if not v)
     return {
@@ -44,6 +61,9 @@ def judge(stages: dict[str, str], readback: list[str], login: dict, absence: lis
         "n": 999,
         "failed_checks": failed,
         "readback_rows": rows,
+        "secdef_reachable_names": sorted(
+            n.partition("|")[2] for n in (names or []) if "|" in n
+        ),
         "login": {k: v for k, v in login.items() if k != "login_error"}
         | ({"login_error": login["login_error"]} if "login_error" in login else {}),
         "stages": stages,
@@ -68,7 +88,15 @@ def main(argv: list[str]) -> int:
     login = json.loads(login_p.read_text()) if login_p.is_file() else {}
     readback = [x for x in lines("readback.txt") if "|" in x]
     absence = [x for x in lines("absence.txt") if "|" in x]
-    result = judge(stages, readback, login, absence)
+    result = judge(
+        stages,
+        readback,
+        login,
+        absence,
+        [x for x in lines("secdef-names.txt") if "|" in x],
+        [x for x in lines("sens-readback.txt") if "|" in x],
+        [x for x in lines("sens-names.txt") if "|" in x],
+    )
     Path(argv[2]).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(f"observer_sql_native: {result['status']} failed={result['failed_checks']}")
     return 0

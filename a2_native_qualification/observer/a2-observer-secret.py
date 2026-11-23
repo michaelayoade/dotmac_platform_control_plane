@@ -17,6 +17,8 @@
   drop --n N --materialized FILE --materialized-sha256 H --env-file F --tmpfs-dir D --container C --superuser U --dbname DB
         Runs the drop SQL, removes the A2_OBSERVER_DSN line atomically, re-checks the mode and asserts the per-run tmpfs
         password directory is absent.
+  secdef-names --n N --materialized FILE --materialized-sha256 H --container C --superuser U --dbname DB
+        P1 helper only (not in the sitting or the A-text): prints the NAMES of reachable SECURITY DEFINER functions.
   absence --n N --materialized FILE --materialized-sha256 H --env-file F --tmpfs-dir D --container C --superuser U --dbname DB
         Runs the absence SQL (`role_absent|true` required) and asserts the env line and the tmpfs directory are absent.
 
@@ -333,6 +335,17 @@ def cmd_absence(a):
     say("env_line=absent tmpfs_password_dir=absent")
 
 
+def cmd_secdef_names(a):
+    sql = load_materialized(a.materialized, a.materialized_sha256, a.n, "secdef")
+    code, out = run_psql(psql_argv(a, ["-A", "-t"]), sql)
+    need(code == 0, "psql_secdef_names_failed")
+    rows = [l for l in out.decode("utf-8", "replace").splitlines() if l.strip()]
+    need(rows and all(re.fullmatch(r"secdef_reachable\|[ -~]{1,300}", r) for r in rows), "secdef_names_output_shape")
+    need("secdef_reachable|none" not in rows or rows == ["secdef_reachable|none"], "secdef_names_output_shape")
+    for r in rows:
+        say(r)
+
+
 def build_parser():
     p = argparse.ArgumentParser(allow_abbrev=False)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -345,11 +358,13 @@ def build_parser():
               "service-host", "port"):
         c.add_argument("--" + k, required=True)
     c.add_argument("--sslmode-key", default="DATABASE_URL")
-    for name in ("readback", "drop", "absence"):
+    for name in ("readback", "drop", "absence", "secdef-names"):
         r = sub.add_parser(name)
-        for k in ("n", "materialized", "materialized-sha256", "env-file", "container", "superuser", "dbname"):
+        for k in ("n", "materialized", "materialized-sha256", "container", "superuser", "dbname"):
             r.add_argument("--" + k, required=True)
-        if name != "readback":
+        if name != "secdef-names":
+            r.add_argument("--env-file", required=True)
+        if name in ("drop", "absence"):
             r.add_argument("--tmpfs-dir", required=True)
     return p
 
@@ -363,7 +378,7 @@ def main(argv=None):
         signal.signal(sig, on_signal)
     a = build_parser().parse_args(argv)
     try:
-        {"materialize": cmd_materialize, "create": cmd_create, "readback": cmd_readback, "drop": cmd_drop, "absence": cmd_absence}[a.cmd](a)
+        {"materialize": cmd_materialize, "create": cmd_create, "readback": cmd_readback, "drop": cmd_drop, "absence": cmd_absence, "secdef-names": cmd_secdef_names}[a.cmd](a)
     except Stop as stop:
         print(f"a2-observer-secret: STOP {stop}", file=sys.stderr)
         return 2

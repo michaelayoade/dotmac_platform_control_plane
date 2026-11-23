@@ -36,7 +36,7 @@ stage tls_setup $tls
 mat=0
 valid_until="$(date -u -d '+10 minutes' '+%Y-%m-%d %H:%M:%S+00')"
 declare -A MSHA
-for kind in create readback drop absence; do
+for kind in create readback secdef-names drop absence; do
   tsha="$(grep "a2-observer-${kind}.sql.tmpl" "$here/PINS" | cut -d' ' -f1)"
   extra=()
   [ "$kind" = create ] && extra=(--valid-until "$valid_until")
@@ -49,6 +49,18 @@ common() { echo --n "$N" --materialized "/dev/shm/a2obs/$1.sql" --materialized-s
 # 5. create, readback
 snip create $(common create) --tmpfs-dir "$TMPD" --service-host localhost --port 5439 >"$work/create.out" 2>"$work/create.err"; stage create $?
 snip readback $(common readback) >"$work/readback.txt" 2>"$work/readback.err"; stage readback $?
+
+# 5b. NAMES of the SECURITY DEFINER functions the role can reach, with NO
+#     allowlist (nothing is added to any allowlist here).
+snip secdef-names $(common secdef-names | sed 's/--env-file [^ ]* //') >"$work/secdef-names.txt" 2>"$work/secdef.err"; stage secdef_names $?
+
+# 5c. Sensitivity: a throwaway PUBLIC-executable SECURITY DEFINER function in
+#     public must make the allowlist row read false; then it is dropped.
+pg() { docker exec -u postgres "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 "$@"; }
+pg -c "CREATE FUNCTION public.a2_ci_sensitivity_probe() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'" >/dev/null 2>&1; stage probe_create $?
+snip readback $(common readback) >"$work/sens-readback.txt" 2>"$work/sens-readback.err"
+snip secdef-names $(common secdef-names | sed 's/--env-file [^ ]* //') >"$work/sens-names.txt" 2>/dev/null
+pg -c "DROP FUNCTION public.a2_ci_sensitivity_probe()" >/dev/null 2>&1; stage probe_drop $?
 
 # 6. log in with the snippet-written DSN
 dsn="$(sudo grep '^A2_OBSERVER_DSN=' "$ENVF" | cut -d= -f2-)"

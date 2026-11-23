@@ -351,6 +351,29 @@ class ObserverResultTests(unittest.TestCase):
             "readback_no_execute_on_security_definer_functions", r["failed_checks"]
         )
 
+    def test_sensitivity_requires_a_false_row_and_the_probe_listed(self) -> None:
+        row = "no_reachable_security_definer_functions_outside_allowlist"
+        ok = self.m.judge(
+            self.stages,
+            ["a|true"],
+            self.login,
+            ["role_absent|true"],
+            ["secdef_reachable|none"],
+            [f"{row}|false"],
+            ["secdef_reachable|public.a2_ci_sensitivity_probe()"],
+        )
+        self.assertEqual(ok["status"], "PASS")
+        no_probe = self.m.judge(
+            self.stages,
+            ["a|true"],
+            self.login,
+            ["role_absent|true"],
+            ["secdef_reachable|none"],
+            [f"{row}|true"],
+            ["secdef_reachable|none"],
+        )
+        self.assertEqual(no_probe["status"], "FAIL")
+
     def test_missing_pieces_fail(self) -> None:
         self.assertEqual(
             self.m.judge(self.stages, [], self.login, ["role_absent|true"])["status"],
