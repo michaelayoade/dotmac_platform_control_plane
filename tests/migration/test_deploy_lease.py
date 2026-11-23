@@ -308,10 +308,45 @@ def test_deploy_lease_unknown_lease_refused(env: Any) -> None:
 
 
 def test_deploy_lease_double_release_refused(env: Any) -> None:
-    _db, rt = env
+    """ONE release row per lease. The same holder repeating the same statement is a
+    replay (the wire contract) and gets the stored instant back; any other second
+    release is refused."""
+    db, rt = env
     lease = rt.acquire()
-    rt.release(lease, host_mutated=False)
-    _refused("lease-already-released", lambda: rt.release(lease, host_mutated=False))
+    first = rt.release(lease, host_mutated=False)
+    db.advance(None, 5)
+    assert rt.release(lease, host_mutated=False) == first  # replay, not a new release
+    _refused("lease-already-released", lambda: rt.release(lease, host_mutated=True))
+    _refused(
+        "lease-already-released",
+        lambda: rt.release(lease, dispatch_run="other-run", host_mutated=False),
+    )
+    _refused(
+        "lease-already-released",
+        lambda: rt.release(lease, principal_ref="x", host_mutated=False),
+    )
+    assert (
+        _scalar(
+            db,
+            "SELECT count(*) FROM cp_deploy_lease.deploy_host_lease_releases "
+            "WHERE lease_id = :l",
+            l=str(lease.lease_id),
+        )
+        == 1
+    )
+
+
+def test_deploy_lease_reacquire_by_the_same_run_returns_its_lease(env: Any) -> None:
+    """A lost response must not strand the agent: the retry gets the SAME lease, and
+    a different run, principal or target still does not."""
+    _db, rt = env
+    first = rt.acquire()
+    again = rt.acquire(ttl_seconds=600)  # the retry's ttl does not extend or replace
+    assert again.lease_id == first.lease_id
+    assert again.expires_at == first.expires_at
+    _refused("lease-held-by-another-run", lambda: rt.acquire(principal_ref="other"))
+    _refused("lease-held-by-another-run", lambda: rt.acquire(target_ref="p/e/other"))
+    _refused("lease-held-by-another-run", lambda: rt.acquire(dispatch_run="other"))
 
 
 def test_deploy_lease_release_must_name_the_holder(env: Any) -> None:

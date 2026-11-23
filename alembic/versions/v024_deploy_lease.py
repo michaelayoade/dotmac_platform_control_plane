@@ -25,6 +25,10 @@ deploy or one role job. This is the *production class* beside the rehearsal clas
   (`lease-host-mutated`) and which only a newer, destroyed E10 receipt for a
   reprovisioned machine can reopen. No `cp_lane3` object is created, altered or
   granted by this migration.
+* **Retries are idempotent (the wire contract).** A second acquire by the SAME
+  run, principal and target while its lease is live returns that lease; a second
+  release by the same run and principal with the same `host_mutated` returns the
+  stored release instant. Any other repeat is refused.
 * **Persistent-host rule.** A RELEASED lease is the clean state, whatever
   `host_mutated` says (a clean deploy necessarily releases a mutated host). A
   lease that EXPIRED UNRELEASED is standing `expired_unreleased`; the next
@@ -192,8 +196,14 @@ FUNCTIONS_SQL = (
     f"IF NOT EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
     "WHERE x.lease_id = v_prev) THEN "
     "IF v_now < v_dl.expires_at THEN "
-    + _refuse("lease-held-by-another-run")
-    + " END IF; "
+    # a retry by the SAME run, principal and target is the same request: it gets
+    # its own live lease back (the wire contract: re-acquiring by the same run
+    # returns its lease), never a second one
+    "IF v_dl.dispatch_run = p_run AND v_dl.principal_ref = p_principal "
+    "AND v_dl.target_ref = p_target_ref THEN "
+    "RETURN QUERY SELECT l.lease_id, l.acquired_at, l.expires_at, v_now "
+    f"FROM {SCHEMA}.deploy_host_leases l WHERE l.lease_id = v_prev; "
+    "RETURN; END IF; " + _refuse("lease-held-by-another-run") + " END IF; "
     # expired unreleased: only a reconcile marker reopens the host
     "IF p_marker IS NULL THEN " + _refuse("lease-host-mutated") + " END IF; "
     "v_needs_marker := true; "
@@ -233,7 +243,7 @@ FUNCTIONS_SQL = (
     "p_principal text, p_host_mutated boolean) RETURNS timestamptz "
     + _DEFINER
     + " AS $$ "
-    "DECLARE v_l record; v_now timestamptz; v_at timestamptz; "
+    "DECLARE v_l record; v_rel record; v_now timestamptz; v_at timestamptz; "
     "BEGIN "
     f"SELECT * INTO v_l FROM {SCHEMA}.deploy_host_leases WHERE lease_id = p_lease; "
     "IF NOT FOUND THEN " + _refuse("lease-role-unbound") + " END IF; "
@@ -243,6 +253,14 @@ FUNCTIONS_SQL = (
     "v_now := cp_lane3.store_now(); "
     f"IF EXISTS (SELECT 1 FROM {SCHEMA}.deploy_host_lease_releases x "
     "WHERE x.lease_id = p_lease) THEN "
+    # a second release by the same run and principal, saying the same thing, is a
+    # replay and returns the stored instant (the wire contract); anything else
+    # is refused
+    f"SELECT * INTO v_rel FROM {SCHEMA}.deploy_host_lease_releases x "
+    "WHERE x.lease_id = p_lease; "
+    "IF v_l.dispatch_run = p_run AND v_l.principal_ref = p_principal "
+    "AND v_rel.host_mutated = p_host_mutated THEN "
+    "RETURN v_rel.released_at; END IF; "
     + _refuse("lease-already-released")
     + " END IF; "
     "IF v_now >= v_l.expires_at THEN " + _refuse("lease-expired") + " END IF; "
