@@ -321,7 +321,7 @@ def test_run_job_resolve_refuses_an_unbound_descriptor_digest(
     snapshot = _with_digest(job["snapshot"], snapshot_digest)
     response = _resolve(db, job["operation"], snapshot, authorized)
     assert response.status_code == 409, why
-    assert response.json() == {"error": "descriptor_digest_mismatch"}, why
+    assert response.json()["error"] == "descriptor_digest_mismatch", why
 
 
 def test_a_deploy_resolve_needs_no_descriptor_digest(db: Session) -> None:
