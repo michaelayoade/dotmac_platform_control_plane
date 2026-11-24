@@ -213,3 +213,68 @@ def test_unsupported_proposal_is_refused_before_owner_mutation(monkeypatch):
         owner.propose_foundation_plan(
             object(), replace(request, operation="deploy", execution_plan_digest="bad")
         )
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_rollout_and_dispatch_forward_recovery_only_when_requested(
+    monkeypatch, recovery
+):
+    plan, _, events, control = _composition(monkeypatch)
+    expectation = object() if recovery else None
+    db = object()
+    owner.request_foundation_rollout(
+        db,
+        command_id="original",
+        plan_id=plan.id,
+        rollout_ref="original",
+        authorization_expires_at=datetime.now(UTC),
+        signer=object(),
+        resume_expectation=expectation,
+    )
+    owner.dispatch_foundation_attempt(
+        db,
+        command_id="unused",
+        rollout_id=uuid4(),
+        verifier=object(),
+        dispatch_signer=object(),
+        resume_expectation=expectation,
+    )
+    assert [event[0] for event in events] == ["hold", "control", "hold", "control"]
+    assert events[0][1] is events[1][1] is events[2][1] is events[3][1] is db
+    for event in (events[1], events[3]):
+        if recovery:
+            assert event[3]["resume_expectation"] is expectation
+        else:
+            assert "resume_expectation" not in event[3]
+
+
+def test_normal_seams_accept_legacy_control_without_new_keyword(monkeypatch):
+    plan, _, events, control = _composition(monkeypatch)
+
+    def legacy_request(db, command, *, signer):
+        return SimpleNamespace(plan_id=plan.id, rollout_ref=command.rollout_ref)
+
+    def legacy_dispatch(db, *, command_id, rollout_id, verifier, dispatch_signer):
+        return "legacy-intent"
+
+    control.request_rollout = legacy_request
+    control.dispatch_attempt = legacy_dispatch
+    owner.request_foundation_rollout(
+        object(),
+        command_id="cmd",
+        plan_id=plan.id,
+        rollout_ref="ref",
+        authorization_expires_at=datetime.now(UTC),
+        signer=object(),
+    )
+    assert (
+        owner.dispatch_foundation_attempt(
+            object(),
+            command_id="dispatch",
+            rollout_id=uuid4(),
+            verifier=object(),
+            dispatch_signer=object(),
+        )
+        == "legacy-intent"
+    )
+    assert [event[0] for event in events] == ["hold", "hold"]

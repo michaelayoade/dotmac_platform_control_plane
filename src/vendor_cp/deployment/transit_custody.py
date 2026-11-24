@@ -44,7 +44,7 @@ import re
 import socket
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, BinaryIO, Final
 
 from vendor_cp.deployment.materials_producer import Custody
@@ -63,6 +63,12 @@ __all__ = [
     "TransitClient",
     "TransitCustodyConfig",
     "build_custody",
+    "build_recovery_custody",
+    "RECOVERY_POLICY_NAME",
+    "RECOVERY_ROLE_NAME",
+    "render_recovery_policy",
+    "render_recovery_token_role",
+    "readback_recovery_token_role",
     "load_config",
     "main",
     "parse_signature",
@@ -332,6 +338,104 @@ def build_custody(
     )
 
 
+class RecoveryTransitClient(TransitClient):
+    """Purpose-separated single dispatch use; no configurable count or key list."""
+
+    def sign(self, key_name: str, message: bytes) -> bytes:
+        if key_name != self._config.dispatch_key or self._signs:
+            raise _refuse("recovery permits one dispatch signature only")
+        return super().sign(key_name, message)
+
+
+def build_recovery_custody(
+    config: TransitCustodyConfig, token: bytes, *, owner_uid: int = 0
+) -> Custody:
+    """Source-only recovery adapter; installs nothing and contacts nothing."""
+    normal = build_custody(config, token, owner_uid=owner_uid)
+    client = RecoveryTransitClient(config, token)
+
+    def refuse_authorization(message: bytes) -> bytes:
+        raise _refuse("recovery custody cannot sign an authorization")
+
+    return replace(
+        normal,
+        authorization_sign=refuse_authorization,
+        dispatch_sign=lambda message: client.sign(config.dispatch_key, message),
+    )
+
+
+RECOVERY_POLICY_NAME: Final = "cp-a2-recovery-dispatch"
+RECOVERY_ROLE_NAME: Final = "cp-a2-recovery-dispatch"
+
+
+def render_recovery_policy(config: TransitCustodyConfig) -> str:
+    """Only the pinned dispatch path/input, with version 1 required by policy."""
+    return (
+        f'path "{config.mount}/sign/{config.dispatch_key}" {{\n'
+        '  capabilities       = ["update"]\n'
+        '  required_parameters = ["input", "key_version"]\n'
+        '  allowed_parameters = { "input" = [], "key_version" = [1] }\n'
+        "}\n"
+    )
+
+
+def render_recovery_token_role(bound_cidr: str) -> dict[str, Any]:
+    """Separate exact role; the normal two-use renderer is unchanged."""
+    role = render_token_role(RECOVERY_POLICY_NAME, bound_cidr)
+    role["token_num_uses"] = 1
+    return role
+
+
+def readback_recovery_token_role(response: bytes, bound_cidr: str) -> list[str]:
+    """Strict recovery types over the shared drift engine; normal stays unchanged.
+
+    OpenBao TTL readback is an integer count of seconds; the existing renderer
+    also accepts its canonical decimal-seconds string (e.g. "600s"). Boolean,
+    float and other numeric coercions are never accepted for recovery.
+    """
+    different = readback_token_role(response, render_recovery_token_role(bound_cidr))
+    data = strict_json(response)["data"]
+
+    def seconds(value: object) -> bool:
+        return type(value) is int or (
+            isinstance(value, str)
+            and re.fullmatch(r"(?:0|[1-9][0-9]*)s", value) is not None
+        )
+
+    for field in ("orphan", "renewable", "token_no_default_policy"):
+        if type(data.get(field)) is not bool:
+            different.append(field)
+    if type(data.get("token_num_uses")) is not int:
+        different.append("token_num_uses")
+    if not seconds(data.get("token_explicit_max_ttl")):
+        different.append("token_explicit_max_ttl")
+    for field in (
+        "allowed_policies",
+        "token_bound_cidrs",
+        "allowed_entity_aliases",
+        "allowed_policies_glob",
+        "bound_cidrs",
+        "disallowed_policies",
+        "disallowed_policies_glob",
+    ):
+        value = data.get(field)
+        required = field in {"allowed_policies", "token_bound_cidrs"}
+        if (required or value is not None) and (
+            type(value) is not list or any(type(item) is not str for item in value)
+        ):
+            different.append(field)
+    for field in ("explicit_max_ttl", "period", "token_period"):
+        if data.get(field) is not None and not seconds(data[field]):
+            different.append(field)
+    if data.get("path_suffix") is not None and type(data["path_suffix"]) is not str:
+        different.append("path_suffix")
+    if "name" in data and (
+        type(data["name"]) is not str or data["name"] != RECOVERY_ROLE_NAME
+    ):
+        different.append("name")
+    return sorted(set(different))
+
+
 # ── policy text ─────────────────────────────────────────────────────────────
 
 
@@ -568,6 +672,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_vf.add_argument("--owner-uid", type=int, default=0)
     p_po = sub.add_parser("policy")
     p_po.add_argument("--config", required=True)
+    recovery_policy = sub.add_parser("recovery-policy")
+    recovery_policy.add_argument("--config", required=True)
+    for name in ("recovery-role", "recovery-role-readback"):
+        recovery_role = sub.add_parser(name)
+        recovery_role.add_argument("--bound-cidr", required=True)
     for name in ("role", "role-readback"):
         p_role = sub.add_parser(name)
         p_role.add_argument("--policy", required=True)
@@ -611,6 +720,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise _refuse("the proof of possession does not verify")
             print("proof of possession verified")
+        elif args.action == "recovery-policy":
+            sys.stdout.write(render_recovery_policy(load_config(args.config)))
+        elif args.action == "recovery-role":
+            _print(render_recovery_token_role(args.bound_cidr))
+        elif args.action == "recovery-role-readback":
+            different = readback_recovery_token_role(
+                sys.stdin.buffer.read(MAX_RESPONSE_BYTES + 1), args.bound_cidr
+            )
+            if different:
+                raise _refuse(
+                    "the recovery token role differs in: " + ", ".join(different)
+                )
+            print("recovery token role read-back verified")
         elif args.action == "role":
             _print(render_token_role(args.policy, args.bound_cidr))
         elif args.action == "role-readback":

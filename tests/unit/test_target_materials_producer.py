@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import stat
@@ -636,3 +637,463 @@ def test_the_issue_parser_accepts_a_receipt_ref_and_no_typed_host_flags(
     parsed = producer._build_parser().parse_args(argv)
     assert parsed.e10_receipt_ref == "e10-6f1c2f4e-52a8-4d0e-9a1b-2f0c7e6d9b11"
     assert parsed.host_id is None
+
+
+def _recovery_fixture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Offline orchestration doubles, not Control/native lock qualification."""
+    seen = _fixture(monkeypatch)
+    control = sys.modules["dotmac_deployment_control"]
+    approval = sys.modules["vendor_cp.deployment.foundation_execution_approval"]
+    original = _request(seen["plan_id"])
+    now = datetime.now(UTC)
+    envelope = SimpleNamespace(
+        statement=SimpleNamespace(
+            plan_id=str(original.plan_id),
+            rollout_ref=original.rollout_ref,
+            expires_at=original.authorization_expires_at,
+            approval_decision_ref=str(uuid4()),
+        ),
+        canonical_bytes=b'{"original":"authorization"}',
+    )
+
+    @dataclasses.dataclass(frozen=True)
+    class Expectation:
+        plan_id: Any = original.plan_id
+        rollout_id: Any = dataclasses.field(default_factory=uuid4)
+        rollout_ref: str = original.rollout_ref
+        rollout_command_id: str = original.rollout_command_id
+        dispatch_command_id: str = original.dispatch_command_id
+        original_authorization: Any = dataclasses.field(
+            default_factory=lambda: envelope
+        )
+
+    expectation = Expectation()
+    control.DispatchResumeExpectation = Expectation
+    control.verify_authorization_envelope = lambda value, **kw: seen.update(
+        verified=value
+    )
+
+    def validate(value: Any, **kw: Any) -> Any:
+        seen["validated"] = kw
+        if not kw["not_before"] <= kw["at"] < kw["deadline"]:
+            raise ValueError("expired before forwarding")
+        return SimpleNamespace(canonical_bytes=b"{}")
+
+    control.validate_recovery_dispatch_statement = validate
+    old_dispatch = approval.dispatch_foundation_attempt
+
+    def replay(db: Any, **kw: Any) -> Any:
+        seen["rollout"] = kw
+        db.order.append("rollout")
+        return SimpleNamespace(id=expectation.rollout_id)
+
+    def dispatch(db: Any, **kw: Any) -> Any:
+        original_signer = kw["dispatch_signer"]
+        kw["dispatch_signer"] = SimpleNamespace(
+            sign_dispatch=lambda unused: original_signer.sign_dispatch(b"{}")
+        )
+        result = old_dispatch(db, **kw)
+        seen["dispatch"]["dispatch_signer"] = original_signer
+        result.authorization_envelope = envelope
+        return result
+
+    approval.request_foundation_rollout = replay
+    approval.dispatch_foundation_attempt = dispatch
+    monkeypatch.setattr(producer, "version", lambda name: "test-installed-version")
+    seen["request"] = producer.RecoverDispatchRequest(
+        original,
+        expectation,
+        "recovery-session",
+        now - timedelta(seconds=1),
+        now + timedelta(minutes=4),
+    )
+    return seen
+
+
+def test_recovery_replays_without_authorization_signing_and_shares_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _recovery_fixture(monkeypatch)
+    keys, db = _Keys(), _Db()
+    result = producer.recover_dispatch_materials(
+        db, seen["request"], custody=keys.custody()
+    )
+    assert db.order == ["rollout", "commit", "dispatch", "commit"]
+    assert keys.signed == ["dispatch"]
+    assert seen["verified"] is seen["request"].expectation.original_authorization
+    assert seen["rollout"]["resume_expectation"] is seen["request"].expectation
+    assert seen["dispatch"]["resume_expectation"] is seen["request"].expectation
+    assert seen["validated"]["at"].tzinfo is UTC
+    assert result.dispatch_document["authorization_envelope"] == {
+        "original": "authorization"
+    }
+    assert result.context_document["host_id"] == "host-1"
+    with pytest.raises(FoundationBindingsUnavailable):
+        seen["rollout"]["signer"].sign(b"replacement")
+    with pytest.raises(FoundationBindingsUnavailable):
+        seen["dispatch"]["dispatch_signer"].sign_dispatch(b"duplicate")
+    assert keys.signed == ["dispatch"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("rollout_command_id", "changed"),
+        ("dispatch_command_id", "changed"),
+        ("rollout_ref", "changed"),
+        ("plan_id", uuid4()),
+        ("authorization_expires_at", datetime.now(UTC) + timedelta(hours=2)),
+        ("rollout_command_id", " "),
+        ("dispatch_command_id", 1),
+        ("host_id", ""),
+        ("host_enrolment_ref", "not-a-uuid"),
+    ],
+)
+def test_recovery_changed_original_inputs_refuse_before_any_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: Any,
+) -> None:
+    seen = _recovery_fixture(monkeypatch)
+    req = seen["request"]
+    req = dataclasses.replace(
+        req,
+        original_request=dataclasses.replace(req.original_request, **{field: value}),
+    )
+    keys, db = _Keys(), _Db()
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer.recover_dispatch_materials(db, req, custody=keys.custody())
+    assert db.order == [] and keys.signed == []
+
+
+@pytest.mark.parametrize("change", ["expired", "future", "naive", "late", "session"])
+def test_recovery_window_and_session_refuse_before_any_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    seen = _recovery_fixture(monkeypatch)
+    req, now = seen["request"], datetime.now(UTC)
+    values = {
+        "expired": {"deadline": now - timedelta(seconds=1)},
+        "future": {"not_before": now + timedelta(minutes=1)},
+        "naive": {"deadline": now.replace(tzinfo=None)},
+        "late": {"deadline": req.original_request.authorization_expires_at},
+        "session": {"session_id": ""},
+    }
+    keys, db = _Keys(), _Db()
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer.recover_dispatch_materials(
+            db, dataclasses.replace(req, **values[change]), custody=keys.custody()
+        )
+    assert db.order == [] and keys.signed == []
+
+
+def test_recovery_fresh_sign_time_expiry_refuses_after_replay_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _recovery_fixture(monkeypatch)
+    real_datetime = datetime
+    late = seen["request"].deadline
+
+    class Clock:
+        calls = 0
+
+        @classmethod
+        def now(cls, tz: Any) -> datetime:
+            cls.calls += 1
+            return real_datetime.now(tz) if cls.calls == 1 else late
+
+    # Preserve datetime type checks while changing only the clock callable.
+    class DateTime(real_datetime):
+        now = Clock.now
+
+    monkeypatch.setattr(producer, "datetime", DateTime)
+    # The normal datetime bounds remain valid instances of the actual base type.
+    # Expire from the validator, modelling a wait after entering dispatch.
+    control = sys.modules["dotmac_deployment_control"]
+
+    def expired(value: Any, **kw: Any) -> None:
+        assert kw["at"] >= late
+        raise ValueError("expired")
+
+    control.validate_recovery_dispatch_statement = expired
+    # Use DateTime bounds for the runtime guard.
+    req = dataclasses.replace(
+        seen["request"],
+        not_before=DateTime.fromisoformat(seen["request"].not_before.isoformat()),
+        deadline=DateTime.fromisoformat(late.isoformat()),
+        original_request=dataclasses.replace(
+            seen["request"].original_request,
+            authorization_expires_at=DateTime.fromisoformat(
+                seen["request"].original_request.authorization_expires_at.isoformat()
+            ),
+        ),
+    )
+    keys, db = _Keys(), _Db()
+    with pytest.raises(ValueError, match="expired"):
+        producer.recover_dispatch_materials(db, req, custody=keys.custody())
+    assert db.order == ["rollout", "commit"] and keys.signed == []
+
+
+def test_recovery_missing_replay_refuses_new_authorization(monkeypatch):
+    seen = _recovery_fixture(monkeypatch)
+    approval = sys.modules["vendor_cp.deployment.foundation_execution_approval"]
+
+    def new_rollout(db, **kwargs):
+        kwargs["signer"].sign(b"new authorization forbidden")
+
+    approval.request_foundation_rollout = new_rollout
+    keys, db = _Keys(), _Db()
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer.recover_dispatch_materials(db, seen["request"], custody=keys.custody())
+    assert keys.signed == [] and db.order == []
+
+
+@pytest.mark.parametrize("failed_commit", [1, 2])
+def test_recovery_commit_failure_propagates_without_extra_sign_or_output(
+    monkeypatch, failed_commit
+):
+    seen = _recovery_fixture(monkeypatch)
+
+    class Database(_Db):
+        def commit(self):
+            super().commit()
+            if self.order.count("commit") == failed_commit:
+                raise RuntimeError("modeled commit failure")
+
+    keys, db = _Keys(), Database()
+    with pytest.raises(RuntimeError, match="commit failure"):
+        producer.recover_dispatch_materials(db, seen["request"], custody=keys.custody())
+    assert keys.signed == ([] if failed_commit == 1 else ["dispatch"])
+    assert db.order.count("commit") == failed_commit
+
+
+def test_recovery_cli_uses_recovery_custody_and_existing_writer(monkeypatch, tmp_path):
+    from vendor_cp import audit_bootstrap
+    from vendor_cp.deployment import transit_custody
+
+    seen = _recovery_fixture(monkeypatch)
+    calls = []
+    db = SimpleNamespace(close=lambda: calls.append("close"))
+    custody = object()
+    monkeypatch.setattr(audit_bootstrap, "ensure_process_audit_actions", lambda: None)
+    monkeypatch.setattr(
+        producer, "load_recovery_request", lambda path, **kw: seen["request"]
+    )
+    monkeypatch.setattr(transit_custody, "load_config", lambda path: "config")
+    monkeypatch.setattr(transit_custody, "read_token", lambda stream: b"test-token")
+    monkeypatch.setattr(
+        transit_custody, "build_recovery_custody", lambda *a, **kw: custody
+    )
+    monkeypatch.setattr(
+        transit_custody, "build_custody", lambda *a, **kw: pytest.fail("normal custody")
+    )
+    monkeypatch.setattr(producer, "_controller_session", lambda env: db)
+
+    def recover(session, request, *, custody):
+        assert session is db and request is seen["request"]
+        calls.append("recover")
+        return "materials"
+
+    monkeypatch.setattr(producer, "recover_dispatch_materials", recover)
+    monkeypatch.setattr(
+        producer, "write_materials", lambda path, value: calls.append((path, value))
+    )
+    args = [
+        "recover-dispatch",
+        "--recovery-request-sha256",
+        "ab" * 32,
+        "--recovery-request",
+        "public.json",
+        "--custody",
+        "transit",
+        "--custody-config",
+        "config.json",
+        "--out-dir",
+        str(tmp_path),
+    ]
+    assert producer.main(args, {}, stdin=object()) == 0
+    assert calls == ["recover", "close", (str(tmp_path), "materials")]
+
+
+def test_recovery_invalid_projection_stops_before_token_or_database(
+    monkeypatch, tmp_path
+):
+    from vendor_cp import audit_bootstrap
+    from vendor_cp.deployment import transit_custody
+
+    monkeypatch.setattr(audit_bootstrap, "ensure_process_audit_actions", lambda: None)
+    monkeypatch.setattr(
+        transit_custody, "read_token", lambda *a: pytest.fail("token read")
+    )
+    monkeypatch.setattr(
+        producer, "_controller_session", lambda *a: pytest.fail("DB opened")
+    )
+    path = tmp_path / "invalid.json"
+    path.write_text('{"unknown":true}')
+    args = [
+        "recover-dispatch",
+        "--recovery-request-sha256",
+        "ab" * 32,
+        "--recovery-request",
+        str(path),
+        "--custody",
+        "transit",
+        "--custody-config",
+        "missing",
+        "--out-dir",
+        str(tmp_path),
+    ]
+    assert producer.main(args, {}) == 2
+
+
+def test_recovery_refuses_legacy_control_api_before_token(monkeypatch, tmp_path):
+    from vendor_cp.deployment import transit_custody
+
+    seen = _fixture(monkeypatch)
+    keys, db = _Keys(), _Db()
+    request = producer.RecoverDispatchRequest(
+        _request(seen["plan_id"]),
+        object(),
+        "session",
+        datetime.now(UTC),
+        datetime.now(UTC) + timedelta(minutes=1),
+    )
+    monkeypatch.setattr(
+        transit_custody, "read_token", lambda *a: pytest.fail("token read")
+    )
+    with pytest.raises(FoundationBindingsUnavailable, match="API is unavailable"):
+        producer.recover_dispatch_materials(db, request, custody=keys.custody())
+    assert keys.signed == [] and db.order == []
+
+
+@pytest.mark.parametrize("defect", ["duplicate", "oversized", "symlink", "fifo"])
+def test_recovery_projection_file_ingress_is_bounded_and_strict(tmp_path, defect):
+    path = tmp_path / "projection.json"
+    if defect == "duplicate":
+        path.write_text('{"session_id":"one","session_id":"two"}')
+    elif defect == "oversized":
+        path.write_bytes(b" " * (128 * 1024 + 1))
+    elif defect == "symlink":
+        target = tmp_path / "actual.json"
+        target.write_text("{}")
+        path.symlink_to(target)
+    else:
+        os.mkfifo(path)
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer.load_recovery_request(str(path), expected_sha256="ab" * 32)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [None, 1, "", "ab" * 31, "AB" * 32, "sha256:" + "ab" * 32, "ab" * 32 + "\n"],
+)
+def test_recovery_projection_digest_is_required_strict_before_file_open(
+    monkeypatch, digest
+):
+    monkeypatch.setattr(
+        producer.os, "open", lambda *a, **kw: pytest.fail("file opened")
+    )
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer.load_recovery_request("/fixture.json", expected_sha256=digest)
+
+
+def test_recovery_projection_missing_digest_cannot_fall_back(tmp_path):
+    with pytest.raises(TypeError):
+        producer.load_recovery_request(str(tmp_path / "projection.json"))
+
+
+@pytest.mark.parametrize("when", ["first-read", "eof"])
+def test_recovery_projection_same_inode_mutation_refuses_before_parse(
+    monkeypatch, tmp_path, when
+):
+    from vendor_cp.deployment import transit_custody
+
+    path = tmp_path / "projection.json"
+    raw = b"{}"
+    path.write_bytes(raw)
+    before = path.stat()
+    real_read = producer.os.read
+    mutated = False
+
+    def read(fd, count):
+        nonlocal mutated
+        result = real_read(fd, count)
+        if not mutated and (
+            (when == "first-read" and result) or (when == "eof" and not result)
+        ):
+            path.write_bytes(b"[]")
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+            mutated = True
+        return result
+
+    monkeypatch.setattr(producer.os, "read", read)
+    monkeypatch.setattr(
+        transit_custody, "strict_json", lambda *a: pytest.fail("parsed mutable bytes")
+    )
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer.load_recovery_request(
+            str(path), expected_sha256=hashlib.sha256(raw).hexdigest()
+        )
+    assert mutated and path.stat().st_ino == before.st_ino
+
+
+@pytest.mark.parametrize(
+    "defect", ["hardlink", "group-write", "parent-write", "parent-symlink"]
+)
+def test_recovery_projection_path_and_ownership_guards(tmp_path, monkeypatch, defect):
+    from vendor_cp.deployment import transit_custody
+
+    parent = tmp_path / "protected"
+    parent.mkdir(mode=0o700)
+    path = parent / "projection.json"
+    path.write_bytes(b"{}")
+    if defect == "hardlink":
+        os.link(path, tmp_path / "other.json")
+    elif defect == "group-write":
+        path.chmod(0o620)
+    elif defect == "parent-write":
+        parent.chmod(0o720)
+    else:
+        alias = tmp_path / "alias"
+        alias.symlink_to(parent, target_is_directory=True)
+        path = alias / path.name
+    monkeypatch.setattr(
+        transit_custody, "strict_json", lambda *a: pytest.fail("unsafe path parsed")
+    )
+    with pytest.raises(FoundationBindingsUnavailable):
+        producer.load_recovery_request(
+            str(path), expected_sha256=hashlib.sha256(b"{}").hexdigest()
+        )
+
+
+@pytest.mark.parametrize("digest", ["AB" * 32, "ab" * 32])
+def test_recovery_cli_wrong_digest_stops_before_token_or_database(
+    monkeypatch, tmp_path, digest
+):
+    from vendor_cp import audit_bootstrap
+    from vendor_cp.deployment import transit_custody
+
+    monkeypatch.setattr(audit_bootstrap, "ensure_process_audit_actions", lambda: None)
+    monkeypatch.setattr(
+        transit_custody, "read_token", lambda *a: pytest.fail("token read")
+    )
+    monkeypatch.setattr(
+        producer, "_controller_session", lambda *a: pytest.fail("DB opened")
+    )
+    path = tmp_path / "projection.json"
+    path.write_text("{}")
+    args = [
+        "recover-dispatch",
+        "--recovery-request",
+        str(path),
+        "--recovery-request-sha256",
+        digest,
+        "--custody",
+        "transit",
+        "--custody-config",
+        "missing",
+        "--out-dir",
+        str(tmp_path),
+    ]
+    assert producer.main(args, {}) == 2

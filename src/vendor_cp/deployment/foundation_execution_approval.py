@@ -24,6 +24,8 @@ from vendor_cp.approvals_authority import bare_content_hash
 from vendor_cp.deployment.approval_barrier import held_transition
 
 if TYPE_CHECKING:
+    from dotmac_deployment_control import DispatchResumeExpectation
+
     from vendor_cp.approvals.adapter import HeldPlatformApproval
     from vendor_cp.deployment.host_admission_adapter import (
         FoundationHostV3Bindings,
@@ -218,6 +220,7 @@ def request_foundation_rollout(
     rollout_ref: str,
     authorization_expires_at: datetime,
     signer: object,
+    resume_expectation: DispatchResumeExpectation | None = None,
 ) -> object:
     control = import_module("dotmac_deployment_control")
     plan = _plan(db, plan_id)
@@ -234,6 +237,11 @@ def request_foundation_rollout(
                 authorization_expires_at=authorization_expires_at,
             ),
             signer=signer,
+            **(
+                {"resume_expectation": resume_expectation}
+                if resume_expectation is not None
+                else {}
+            ),
         )
         if result.plan_id != plan_id or result.rollout_ref != rollout_ref:
             raise ValueError("rollout command replay differs from the held plan")
@@ -256,6 +264,7 @@ def dispatch_foundation_attempt(
     rollout_id: UUID,
     verifier: object,
     dispatch_signer: object,
+    resume_expectation: DispatchResumeExpectation | None = None,
 ) -> object:
     """Stage Control's dispatch under the approval bound to its rollout plan."""
     control = import_module("dotmac_deployment_control")
@@ -272,6 +281,11 @@ def dispatch_foundation_attempt(
             rollout_id=rollout_id,
             verifier=verifier,
             dispatch_signer=dispatch_signer,
+            **(
+                {"resume_expectation": resume_expectation}
+                if resume_expectation is not None
+                else {}
+            ),
         )
 
     return held_transition(
