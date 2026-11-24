@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, Protocol
 
+from dotmac_deployment_control import DescriptorDigestV1
 from dotmac_kernel.idempotency import execute_once_platform
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -95,6 +96,10 @@ class Resolution:
     #: snapshot, as Control holds them. Absent for a backend that does not say.
     operation: str | None = None
     plan_snapshot: Mapping[str, Any] | None = None
+    #: `descriptor_digest` from the Control `authorization_v3` statement the
+    #: backend VERIFIED for this dispatch (run_job only). Never the agent's and
+    #: never the snapshot's: it is what the snapshot is cross-checked against.
+    authorization_descriptor_digest: str | None = None
 
 
 class ConsumptionBackend(Protocol):
@@ -222,6 +227,27 @@ def _committed(db: Session, dispatch_id: str) -> Mapping[str, Any] | None:
     return dict(result) if isinstance(result, dict) else None
 
 
+def _descriptor_digest(resolution: Resolution) -> str:
+    """The verified authorization's descriptor digest, bound to the snapshot's.
+
+    Both sides must parse as Control's `DescriptorDigestV1` (strict canonical
+    `sha256:<64 lowercase hex>`) and be equal. An absent or malformed side, or a
+    difference, is `descriptor_digest_mismatch`. The snapshot value is never
+    served alone: a missing authorization digest refuses.
+    """
+    snapshot = resolution.plan_snapshot or {}
+    try:
+        authorized = DescriptorDigestV1.parse(
+            resolution.authorization_descriptor_digest
+        )
+        frozen = DescriptorDigestV1.parse(snapshot.get("descriptor_digest"))
+    except Exception:  # noqa: BLE001 - any parse refusal is one closed refusal
+        raise ConsumptionRefused("descriptor_digest_mismatch") from None
+    if authorized != frozen:
+        raise ConsumptionRefused("descriptor_digest_mismatch")
+    return authorized.canonical
+
+
 def _plan_fields(resolution: Resolution) -> dict[str, object]:
     """What the target needs from the plan, under Control's own key names.
 
@@ -233,6 +259,8 @@ def _plan_fields(resolution: Resolution) -> dict[str, object]:
     uid is an enrolment fact (RULING-agent-contract R2), never a CP-supplied field.
     A `run_job` plan must carry a job and any other operation must not
     (`dispatched_job_mismatch`); a run_job plan without a primary image is refused.
+    A run_job resolve also carries `descriptor_digest`, from the verified
+    authorization and cross-checked against the snapshot (`_descriptor_digest`).
     """
     if resolution.operation is None or resolution.plan_snapshot is None:
         return {}
@@ -261,6 +289,7 @@ def _plan_fields(resolution: Resolution) -> dict[str, object]:
     }
     fields["job_binding_names"] = list(names)
     fields["secrets_namespace"] = namespace
+    fields["descriptor_digest"] = _descriptor_digest(resolution)
     return fields
 
 

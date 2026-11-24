@@ -48,7 +48,7 @@ V2_FILE = (
     / "target_api"
     / ("target_api_v2.json")
 )
-PINNED_V2_SHA256 = "95756ba1d9a1e4c12cafef82ba4fb7e343c29c677772087bec2dd3bbc5374988"
+PINNED_V2_SHA256 = "4d847889d516d0613e0214c7b24c718ec9828c661be8bd0170b24a8e3da9be33"
 V2: dict[str, Any] = json.loads(V2_FILE.read_bytes())
 KEY = V2["agent_observation"]["key"]
 _RESPONSE_SEED = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8"
@@ -197,9 +197,12 @@ def test_an_ok_wire_claiming_another_credential_or_target_is_not_forwarded() -> 
 
 
 class _PlanBackend(UnwiredBackend):
-    def __init__(self, operation: str, snapshot: Any) -> None:
+    def __init__(
+        self, operation: str, snapshot: Any, authorized: str | None = None
+    ) -> None:
         self._operation = operation
         self._snapshot = snapshot
+        self._authorized = authorized
 
     def resolve(self, db: Any, *, request: Any, store_now: Any) -> Resolution:
         return Resolution(
@@ -209,17 +212,31 @@ class _PlanBackend(UnwiredBackend):
             context={},
             operation=self._operation,
             plan_snapshot=self._snapshot,
+            authorization_descriptor_digest=self._authorized,
         )
 
 
-def _resolve(db: Session, operation: str, snapshot: Any) -> Any:
+DIGEST_A = "sha256:" + "a1" * 32
+DIGEST_B = "sha256:" + "b2" * 32
+
+
+def _with_digest(snapshot: Any, digest: Any) -> dict[str, Any]:
+    out = dict(snapshot)
+    if digest is not None:
+        out["descriptor_digest"] = digest
+    return out
+
+
+def _resolve(
+    db: Session, operation: str, snapshot: Any, authorized: str | None = None
+) -> Any:
     runtime = build_runtime(
         directory=StaticDirectory(
             record(public_key_b64u=KEY["public_b64u"], credential_id=KEY["key_id"])
         ),
         response_seed=_RESPONSE_SEED,
         handlers=TargetApiHandlers(
-            consumption=ConsumptionService(_PlanBackend(operation, snapshot)),
+            consumption=ConsumptionService(_PlanBackend(operation, snapshot, authorized)),
             materials=MaterialsHandler(None),
             observations=ObservationHandler(None),
         ),
@@ -249,8 +266,10 @@ def test_resolve_replays_the_binding_vectors_with_control_plan_key_names(
     job = V2["binding"]["job"]
     snapshot = job["snapshot"]
     binding = snapshot["deploy_binding"]
-    body = _resolve(db, job["operation"], snapshot).json()
+    snapshot = _with_digest(snapshot, DIGEST_A)
+    body = _resolve(db, job["operation"], snapshot, DIGEST_A).json()
     assert body["operation"] == "run_job"
+    assert body["descriptor_digest"] == DIGEST_A
     # verbatim: the signed plan's own values under the plan's own key names
     assert body["dispatched_job"] == binding["dispatched_job"]
     image = binding["images"][0]
@@ -280,3 +299,30 @@ def test_resolve_refuses_the_dispatched_job_mismatch_vectors(db: Session) -> Non
         response = _resolve(db, row["operation"], row["snapshot"])
         assert response.status_code == 409, row["name"]
         assert response.json()["error"] == "dispatched_job_mismatch", row["name"]
+
+
+@pytest.mark.parametrize(
+    ("snapshot_digest", "authorized", "why"),
+    [
+        (DIGEST_B, DIGEST_A, "tampered snapshot"),
+        (DIGEST_A, None, "absent from the authorization"),
+        (None, DIGEST_A, "absent from the snapshot"),
+        (None, None, "absent from both"),
+        (DIGEST_A, "sha256:" + "A1" * 32, "malformed authorization digest"),
+        ("sha256:" + "A1" * 32, DIGEST_A, "malformed snapshot digest"),
+    ],
+)
+def test_run_job_resolve_refuses_an_unbound_descriptor_digest(
+    db: Session, snapshot_digest: Any, authorized: Any, why: str
+) -> None:
+    job = V2["binding"]["job"]
+    snapshot = _with_digest(job["snapshot"], snapshot_digest)
+    response = _resolve(db, job["operation"], snapshot, authorized)
+    assert response.status_code == 409, why
+    assert response.json() == {"error": "descriptor_digest_mismatch"}, why
+
+
+def test_a_deploy_resolve_needs_no_descriptor_digest(db: Session) -> None:
+    serving = V2["binding"]["serving"]
+    deploy = _resolve(db, serving["operation"], serving["snapshot"]).json()
+    assert "descriptor_digest" not in deploy
