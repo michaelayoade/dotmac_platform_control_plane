@@ -236,7 +236,9 @@ def _resolve(
         ),
         response_seed=_RESPONSE_SEED,
         handlers=TargetApiHandlers(
-            consumption=ConsumptionService(_PlanBackend(operation, snapshot, authorized)),
+            consumption=ConsumptionService(
+                _PlanBackend(operation, snapshot, authorized)
+            ),
             materials=MaterialsHandler(None),
             observations=ObservationHandler(None),
         ),
