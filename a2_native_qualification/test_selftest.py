@@ -27,6 +27,47 @@ def junit_file(tmp: Path, body: str) -> Path:
     return path
 
 
+class SeedFixtureTests(unittest.TestCase):
+    @staticmethod
+    def fixture_module():
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "a2_seed_fixture_test", HERE / "c4" / "seed_fixture.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_verified_captured_fixture_loads_without_import_path_changes(self):
+        from hashlib import sha256
+        from unittest.mock import patch
+
+        seed_fixture = self.fixture_module()
+
+        source = b"SIGNER = 'synthetic-ci-signer'\n"
+        before = list(sys.path)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.py"
+            path.write_bytes(source)
+            with patch.object(
+                seed_fixture, "FIXTURE_SHA256", sha256(source).hexdigest()
+            ):
+                self.assertEqual(
+                    seed_fixture.load_signer(str(path)), "synthetic-ci-signer"
+                )
+        self.assertEqual(sys.path, before)
+
+    def test_changed_fixture_refused_before_execution(self):
+        seed_fixture = self.fixture_module()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.py"
+            path.write_text("raise RuntimeError('must not execute')")
+            with self.assertRaisesRegex(ValueError, "^seed_fixture_digest$"):
+                seed_fixture.load_signer(str(path))
+
+
 class SelectorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.scenarios = qual.load_scenarios(HERE / "scenarios.json")

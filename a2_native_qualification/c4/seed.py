@@ -1,6 +1,6 @@
 """Seed ONE requested+committed rollout (original authorization, no dispatch).
 
-Runs in the Control checkout's environment (Control's own test doubles sign the
+Runs against the installed Control package (its pinned test double signs the
 authorization) against the CI-ephemeral migrated CP database, as the migration
 owner. Prints the coordinates (ids and refs, no secrets) as JSON.
 """
@@ -31,15 +31,16 @@ from dotmac_kernel.audit_actions import (
     AuditActionRegistry,
     install_audit_actions,
 )
+from seed_fixture import load_signer
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
-from tests.authorization_support import SIGNER
 
 DESCRIPTOR = "sha256:" + "3c" * 32
 EXECUTION_PLAN = "sha256:" + "1a" * 32
 
 
-def main(url: str) -> None:
+def main(url: str, fixture_path: str) -> None:
+    signer = load_signer(fixture_path)
     install_audit_actions(AuditActionRegistry.from_manifests([module]))
     suffix = uuid.uuid4().hex[:10]
     engine = create_engine(url, future=True)
@@ -101,7 +102,7 @@ def main(url: str) -> None:
             plan_id=plan.id,
             authorization_expires_at=datetime(2099, 1, 1, tzinfo=UTC),
         )
-        request_rollout(db, command, signer=SIGNER)
+        request_rollout(db, command, signer=signer)
         db.commit()
         print(
             json.dumps(
@@ -116,4 +117,4 @@ def main(url: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2])

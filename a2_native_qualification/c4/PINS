@@ -1,4 +1,4 @@
-# Vendored from the reviewed kit-v5 (.cutover-private/a2-dispatch-recovery-implementation-20261123/kit-v5).
-# The workflow refuses to run unless these digests match the bytes in this directory.
-kit_v5_sha256sums_sha256 26fa30e37d0d26f0d28065c5575c9d5a337f576706d7adc0de6a988c6ba1c99e
-a31bbcbfe69f49f235b0079ee185897ab9c4798129b758b6e5b659287815ce64  a2_recovery_observe_container.py
+# Vendored from kit-v9 source candidate; no native qualification implied.
+# Workflow verifies the observer bytes before execution.
+kit_v9_sha256sums_sha256 3ba245cf86e6bdb806d7bdf3454aabb22a853cb3309c416e7234a4b43123f9f0
+1463be1adc07c009b2bfb408e864f732c3ca9c9af256e128d4bd3e38ead934dc  a2_recovery_observe_container.py

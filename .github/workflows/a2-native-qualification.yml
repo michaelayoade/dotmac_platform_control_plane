@@ -47,7 +47,7 @@ env:
   # C4 seed pairing (architect r8 D3): the seed uses the Control version the BUILT
   # IMAGE carries (a17 today); this checkout supplies only the test signer.
   C4_SEED_CONTROL_REF: 574418944d35ddf3559d17e59e9184b5f545ebe4
-  RECOVERY_CP_REF: 73f88f1c82e0001d456ce787ba2176c27c1111fe
+  RECOVERY_CP_REF: 13d08e93f07039e605e124cd49c54be99898acfe
   # The Starter commit CP #269's own Lane 3 step pins for the Foundation import.
   FOUNDATION_REF: f50d497e4df178e1411d2b4fccbfa153a21fd12a
   OPENBAO_IMAGE: openbao/openbao@sha256:fdc6da21ca6963560c32336fd7feb9cf2d5e52668f1a1647205a4b41171f0806
@@ -333,7 +333,7 @@ jobs:
             --build-arg "SOURCE_REVISION=${CP_COMMIT}" \
             --tag a2-native-qual-cp:local cp-src
           echo "CP_IMAGE_ID=$(docker image inspect --format '{{.Id}}' a2-native-qual-cp:local)" >> "$GITHUB_ENV"
-      - name: C4 recovery-observe native proof (kit-v5 container code in the built CP image)
+      - name: C4 recovery-observe native proof (kit-v9 candidate container code in the built CP image)
         env:
           POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
           POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
@@ -352,7 +352,8 @@ jobs:
             echo "recovery_observe_native: FAIL at $1 ${2:-}"
             exit 0
           }
-          # 1. The vendored script must equal the pinned kit-v5 bytes.
+          (cd cp-src && poetry run python "$GITHUB_WORKSPACE/a2_native_qualification/test_observer_driver.py")
+          # 1. The vendored script must equal the pinned kit-v9 candidate bytes.
           grep -qxF "$(sha256sum "$c4/a2_recovery_observe_container.py" | cut -d' ' -f1)  a2_recovery_observe_container.py" "$c4/PINS" || fail pin_mismatch
           script_sha="$(sha256sum "$c4/a2_recovery_observe_container.py" | cut -d' ' -f1)"
           # 2. Seed one requested rollout (original authorization committed, no dispatch)
@@ -365,8 +366,9 @@ jobs:
           src_v="$(sed -n 's/^version = "\(.*\)"/\1/p' control-seed-src/pyproject.toml | head -1)"
           export C4_SEED_REF="$C4_SEED_CONTROL_REF" C4_IMAGE_CONTROL_VERSION="$img_v"
           [ -n "$img_v" ] && [ "$img_v" = "$env_v" ] && [ "$img_v" = "$src_v" ] || fail version_pairing "image=$img_v seed_env=$env_v signer_checkout=$src_v"
-          (cd cp-src && PYTHONPATH="$GITHUB_WORKSPACE/control-seed-src" poetry run python "$c4/seed.py" \
-              "postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test" > "$work/coords.json" 2> "$work/seed.err") || fail seed "$(grep -E '^[A-Za-z_.]*(Error|Exception)' "$work/seed.err" | head -1 | cut -c1-240)"
+          (cd cp-src && poetry run python "$c4/seed.py" \
+              "postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test" \
+            "$GITHUB_WORKSPACE/control-seed-src/tests/authorization_support.py" > "$work/coords.json" 2> "$work/seed.err") || fail seed "$(grep -E '^[A-Za-z_.]*(Error|Exception)' "$work/seed.err" | head -1 | cut -c1-240)"
           read -r ROLLOUT_REF PLAN_ID C1 C2 < <(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["rollout_ref"], d["plan_id"], d["rollout_command_id"], d["dispatch_command_id"])' "$work/coords.json") || fail coords
           # 3. Create the observer role exactly as REVIEW-P2-L1 r3 C5 specifies.
           umask 077

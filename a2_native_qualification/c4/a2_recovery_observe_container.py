@@ -23,6 +23,20 @@ def stop(name):
     raise SystemExit(2)
 
 
+def observer_url(dsn):
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    try:
+        url = make_url(dsn)
+    except (ArgumentError, ValueError):
+        stop("dsn_invalid")
+    if url.drivername not in {"postgresql", "postgresql+psycopg"}:
+        stop("dsn_driver")
+    # Keep parsed credentials and query values intact; never render the URL.
+    return url.set(drivername="postgresql+psycopg")
+
+
 def main():
     if len(sys.argv) != 5:
         stop("arguments")
@@ -32,7 +46,7 @@ def main():
         stop("dsn_missing")
     from sqlalchemy import create_engine, text
     from dotmac_deployment_control.authorization import AuthorizationEnvelopeV2
-    engine = create_engine(dsn)
+    engine = create_engine(observer_url(dsn))
     with engine.connect() as connection:
         connection.execute(text("SET TRANSACTION READ ONLY"))
 
@@ -67,4 +81,5 @@ def main():
     print(json.dumps({"observation": observation, "original_authorization": envelope}, sort_keys=True, default=str))
 
 
-main()
+if __name__ == "__main__":
+    main()

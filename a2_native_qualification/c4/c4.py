@@ -140,7 +140,7 @@ def main(argv: list[str]) -> int:
             "status": "PASS" if all(checks.values()) and observation else "FAIL",
             "script": "a2_recovery_observe_container.py",
             "script_sha256": script_sha,
-            "kit": "kit-v5",
+            "kit": "kit-v9-source-candidate",
             "image_id": image_id,
             "dsn_scheme": "postgresql",
             "seed_pairing": {
