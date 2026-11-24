@@ -657,3 +657,126 @@ def test_absent_widening_fields_are_fine_and_values_are_never_echoed() -> None:
         _readback(path_suffix="SECRET-MARKER"), rendered
     )
     assert leaked == ["path_suffix"] and "SECRET-MARKER" not in str(leaked)
+
+
+def test_recovery_policy_and_role_are_closed_and_distinct(
+    tmp_path: Path, stub: _Stub, control: None
+) -> None:
+    config = _config(tmp_path, stub, control)
+    policy = transit.render_recovery_policy(config)
+    assert config.authorization_key not in policy
+    assert f"{config.mount}/sign/{config.dispatch_key}" in policy
+    assert '"key_version" = [1]' in policy
+    assert 'required_parameters = ["input", "key_version"]' in policy
+    role = transit.render_recovery_token_role("192.0.2.8/32")
+    assert role["allowed_policies"] == ["cp-a2-recovery-dispatch"]
+    assert role["token_num_uses"] == 1
+    assert role["token_explicit_max_ttl"] == "600s"
+    assert role["orphan"] is False and role["renewable"] is False
+    assert role["token_no_default_policy"] is True
+    assert (
+        transit.readback_recovery_token_role(
+            json.dumps({"data": role}).encode(), "192.0.2.8/32"
+        )
+        == []
+    )
+    assert transit.readback_recovery_token_role(
+        json.dumps({"data": {**role, "token_num_uses": 2}}).encode(), "192.0.2.8/32"
+    ) == ["token_num_uses"]
+    assert transit.readback_recovery_token_role(
+        json.dumps({"data": {**role, "name": "normal"}}).encode(), "192.0.2.8/32"
+    ) == ["name"]
+
+
+def test_recovery_custody_refuses_authorization_and_duplicate_dispatch(
+    tmp_path: Path, stub: _Stub, control: None
+) -> None:
+    config = _config(tmp_path, stub, control)
+    custody = transit.build_recovery_custody(
+        config, b"test-token", owner_uid=os.getuid()
+    )
+    with pytest.raises(FoundationBindingsUnavailable):
+        custody.authorization_sign(b"authorization")
+    assert stub.requests == []
+    custody.dispatch_sign(b"dispatch")
+    with pytest.raises(FoundationBindingsUnavailable):
+        custody.dispatch_sign(b"duplicate")
+    assert len(stub.requests) == 1
+    assert stub.requests[0]["path"].endswith("/" + config.dispatch_key)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("allowed_policies", ["normal"]),
+        ("token_num_uses", 0),
+        ("token_num_uses", 2),
+        ("token_explicit_max_ttl", 601),
+        ("renewable", True),
+        ("orphan", True),
+        ("token_no_default_policy", False),
+        ("token_type", "batch"),
+        ("token_bound_cidrs", ["192.0.2.9/32"]),
+        ("allowed_policies_glob", ["*"]),
+        ("token_period", 600),
+    ],
+)
+def test_recovery_role_readback_refuses_every_widened_limit(field, value):
+    role = transit.render_recovery_token_role("192.0.2.8/32")
+    role[field] = value
+    assert field in transit.readback_recovery_token_role(
+        json.dumps({"data": role}).encode(), "192.0.2.8/32"
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("token_num_uses", True),
+        ("token_num_uses", 1.0),
+        ("token_no_default_policy", 1),
+        ("token_no_default_policy", 1.0),
+        ("orphan", 0),
+        ("orphan", 0.0),
+        ("renewable", 0),
+        ("renewable", 0.0),
+        ("token_explicit_max_ttl", True),
+        ("token_explicit_max_ttl", 600.0),
+        ("token_explicit_max_ttl", "0600s"),
+        ("allowed_policies", "cp-a2-recovery-dispatch"),
+        ("allowed_policies", [1]),
+        ("token_bound_cidrs", [3221225992]),
+        ("token_bound_cidrs", "192.0.2.8/32"),
+        ("period", False),
+        ("period", 0.0),
+        ("token_period", False),
+        ("token_period", 0.0),
+        ("explicit_max_ttl", False),
+        ("explicit_max_ttl", 0.0),
+        ("allowed_entity_aliases", ""),
+        ("allowed_policies_glob", ""),
+        ("bound_cidrs", ""),
+        ("disallowed_policies", ""),
+        ("disallowed_policies_glob", ""),
+        ("path_suffix", 0),
+    ],
+)
+def test_recovery_role_readback_refuses_type_coercion(field, value):
+    role = transit.render_recovery_token_role("192.0.2.8/32")
+    role[field] = value
+    assert field in transit.readback_recovery_token_role(
+        json.dumps({"data": role}).encode(), "192.0.2.8/32"
+    )
+
+
+@pytest.mark.parametrize("ttl", [600, "600s"])
+def test_recovery_role_readback_accepts_only_documented_seconds_shapes(ttl):
+    role = transit.render_recovery_token_role("192.0.2.8/32")
+    role["token_explicit_max_ttl"] = ttl
+    role.update(period=0, token_period=0, explicit_max_ttl=0)
+    assert (
+        transit.readback_recovery_token_role(
+            json.dumps({"data": role}).encode(), "192.0.2.8/32"
+        )
+        == []
+    )

@@ -31,16 +31,19 @@ attestation envelopes) is produced by the target and Foundation, not by CP.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import re
 import stat
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
+from importlib.metadata import version
 from pathlib import Path
 from threading import Lock
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
 from vendor_cp.deployment.target_refusals import (
@@ -52,6 +55,9 @@ from vendor_cp.deployment.verification_identities import (
     PinnedVerificationIdentity,
 )
 
+if TYPE_CHECKING:
+    from dotmac_deployment_control import DispatchResumeExpectation
+
 __all__ = [
     "CONTEXT_FILE",
     "CONTEXT_KEYS",
@@ -59,6 +65,9 @@ __all__ = [
     "Custody",
     "IssueDispatchRequest",
     "IssuedMaterials",
+    "RecoverDispatchRequest",
+    "recover_dispatch_materials",
+    "load_recovery_request",
     "install_custody",
     "MAX_AUTHORIZATION_WINDOW",
     "main",
@@ -233,6 +242,23 @@ class IssueDispatchRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoverDispatchRequest:
+    """One source-qualified, purpose-bound dispatch recovery invocation.
+
+    The caller MUST bind original_request (including host/controller facts) and
+    session_id to its approved external recovery manifest. Control's signed
+    authorization does not attest those CP inputs. This object is not approval,
+    fault provenance, installed parity or permission to deliver the output.
+    """
+
+    original_request: IssueDispatchRequest
+    expectation: DispatchResumeExpectation
+    session_id: str
+    not_before: datetime
+    deadline: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class IssuedMaterials:
     attempt_id: str
     dispatch_document: dict[str, Any]
@@ -266,6 +292,19 @@ def _check_expiry(expires_at: datetime, *, now: datetime | None = None) -> None:
         )
 
 
+def _check_host_enrolment(request: IssueDispatchRequest) -> None:
+    # Foundation's execution context demands the enrolment ref as a canonical UUID
+    # (Control's enrolment id); refuse here, before anything is signed.
+    try:
+        if str(UUID(request.host_enrolment_ref)) != request.host_enrolment_ref:
+            raise ValueError("not canonical")
+    except ValueError:
+        raise _refuse(
+            "the host enrolment ref must be a canonical UUID",
+            TargetRefusal.MATERIALS_REFUSED,
+        ) from None
+
+
 def issue_dispatch_materials(
     db: Any, request: IssueDispatchRequest, *, custody: Custody | None = None
 ) -> IssuedMaterials:
@@ -284,16 +323,7 @@ def issue_dispatch_materials(
         request.rollout_ref,
     ):
         _text(name, what="request field")
-    # Foundation's execution context demands the enrolment ref as a canonical UUID
-    # (Control's enrolment id); refuse here, before anything is signed.
-    try:
-        if str(UUID(request.host_enrolment_ref)) != request.host_enrolment_ref:
-            raise ValueError("not canonical")
-    except ValueError:
-        raise _refuse(
-            "the host enrolment ref must be a canonical UUID",
-            TargetRefusal.MATERIALS_REFUSED,
-        ) from None
+    _check_host_enrolment(request)
     approval = import_module("vendor_cp.deployment.foundation_execution_approval")
     rollout = approval.request_foundation_rollout(
         db,
@@ -313,6 +343,10 @@ def issue_dispatch_materials(
     )
     db.commit()
 
+    return _assemble_materials(request, intent)
+
+
+def _assemble_materials(request: IssueDispatchRequest, intent: Any) -> IssuedMaterials:
     dispatch = intent.dispatch_envelope
     authorization = intent.authorization_envelope
     statement = dispatch.statement
@@ -356,6 +390,276 @@ def issue_dispatch_materials(
         },
         context_document=context,
     )
+
+
+class _RefusingAuthorizationSigner(_AuthorizationSigner):
+    def sign(self, canonical_bytes: bytes) -> Any:
+        raise _refuse(
+            "recovery cannot issue a replacement authorization",
+            TargetRefusal.MATERIALS_REFUSED,
+        )
+
+
+def _recovery_control() -> Any:
+    control = import_module("dotmac_deployment_control")
+    if not all(
+        callable(getattr(control, name, None))
+        for name in (
+            "DispatchResumeExpectation",
+            "validate_recovery_dispatch_statement",
+        )
+    ):
+        raise _refuse(
+            "Control recovery API is unavailable; source qualification is required",
+            TargetRefusal.MATERIALS_REFUSED,
+        )
+    return control
+
+
+class _RecoveryDispatchSigner(_DispatchSigner):
+    def __init__(self, custody: Custody, request: RecoverDispatchRequest) -> None:
+        super().__init__(custody)
+        self._request = request
+        self._used = False
+
+    def sign_dispatch(self, canonical_bytes: bytes) -> Any:
+        if self._used:
+            raise _refuse("recovery signing is spent", TargetRefusal.MATERIALS_REFUSED)
+        # Burn before parsing/forwarding: a failure is never an extra signing use.
+        self._used = True
+        control = _recovery_control()
+        from vendor_cp.deployment.transit_custody import strict_json
+
+        statement = control.validate_recovery_dispatch_statement(
+            strict_json(canonical_bytes),
+            expectation=self._request.expectation,
+            dispatch_identity=self.dispatch_identity,
+            control_version=version("dotmac-deployment-control"),
+            not_before=self._request.not_before,
+            deadline=self._request.deadline,
+            at=datetime.now(UTC),
+        )
+        if statement.canonical_bytes != canonical_bytes:
+            raise _refuse(
+                "noncanonical recovery signing input", TargetRefusal.MATERIALS_REFUSED
+            )
+        return super().sign_dispatch(canonical_bytes)
+
+
+def _validate_recovery_request(request: RecoverDispatchRequest) -> datetime:
+    control = _recovery_control()
+    original, expected = request.original_request, request.expectation
+    if not isinstance(expected, control.DispatchResumeExpectation):
+        raise _refuse(
+            "typed recovery expectation required", TargetRefusal.MATERIALS_REFUSED
+        )
+    for value in (
+        request.session_id,
+        original.rollout_command_id,
+        original.dispatch_command_id,
+        original.rollout_ref,
+        original.controller_ssh_fingerprint,
+        original.host_id,
+        original.host_incarnation,
+        original.host_enrolment_ref,
+    ):
+        _text(value, what="original recovery input")
+    _check_host_enrolment(original)
+    envelope = expected.original_authorization
+    if (
+        original.plan_id != expected.plan_id
+        or original.rollout_ref != expected.rollout_ref
+        or original.rollout_command_id != expected.rollout_command_id
+        or original.dispatch_command_id != expected.dispatch_command_id
+        or original.rollout_command_id == original.dispatch_command_id
+        or original.authorization_expires_at != envelope.statement.expires_at
+        or str(original.plan_id) != envelope.statement.plan_id
+        or original.rollout_ref != envelope.statement.rollout_ref
+    ):
+        raise _refuse(
+            "original recovery request differs", TargetRefusal.MATERIALS_REFUSED
+        )
+    now = datetime.now(UTC)
+    bounds = (request.not_before, request.deadline, original.authorization_expires_at)
+    if any(not isinstance(value, datetime) or value.tzinfo is None for value in bounds):
+        raise _refuse("aware recovery bounds required", TargetRefusal.MATERIALS_REFUSED)
+    if (
+        not request.not_before
+        <= now
+        < request.deadline
+        < original.authorization_expires_at
+    ):
+        raise _refuse("recovery window is closed", TargetRefusal.MATERIALS_REFUSED)
+    return now
+
+
+def _read_recovery_projection(path: str, expected_sha256: str) -> bytes:
+    """Read one protected public projection FD bound to its approved raw digest."""
+    if (
+        not isinstance(expected_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+    ):
+        raise ValueError("invalid projection digest")
+    target = Path(path)
+    if not target.is_absolute() or ".." in target.parts:
+        raise ValueError("unsafe projection path")
+    owner_uids = {0, os.geteuid()}
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptors: list[int] = []
+    try:
+        descriptors.append(os.open("/", directory_flags))
+        for component in target.parts[1:-1]:
+            directory = os.fstat(descriptors[-1])
+            if directory.st_uid not in owner_uids or directory.st_mode & 0o022:
+                raise ValueError("unprotected projection directory")
+            descriptors.append(
+                os.open(component, directory_flags, dir_fd=descriptors[-1])
+            )
+        directory = os.fstat(descriptors[-1])
+        if directory.st_uid not in owner_uids or directory.st_mode & 0o022:
+            raise ValueError("unprotected projection directory")
+        fd = os.open(
+            target.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=descriptors[-1],
+        )
+        descriptors.append(fd)
+        before = os.fstat(fd)
+        maximum = 128 * 1024
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid not in owner_uids
+            or before.st_mode & 0o022
+            or before.st_nlink != 1
+            or not 0 < before.st_size <= maximum
+        ):
+            raise ValueError("unsafe projection file")
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(fd, min(64 * 1024, maximum + 1 - total)):
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError("oversized projection")
+            chunks.append(chunk)
+        after = os.fstat(fd)
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_uid",
+            "st_mode",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if total != before.st_size or any(
+            getattr(before, field) != getattr(after, field) for field in stable_fields
+        ):
+            raise ValueError("projection changed during read")
+        raw = b"".join(chunks)
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise ValueError("projection digest differs")
+        return raw
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def load_recovery_request(path: str, *, expected_sha256: str) -> RecoverDispatchRequest:
+    """Bounded closed projection bound to the approved external manifest digest.
+
+    The protected caller derives expected_sha256 from its preapproved projection,
+    never the current mutable file. Digest agreement does not itself qualify the
+    manifest's provenance, host binding or approval.
+    """
+    from vendor_cp.deployment.transit_custody import strict_json
+
+    try:
+        raw = _read_recovery_projection(path, expected_sha256)
+        value = strict_json(raw)
+        if not isinstance(value, dict) or set(value) != {
+            "original_request",
+            "resume_expectation",
+            "session_id",
+            "not_before",
+            "deadline",
+        }:
+            raise ValueError("closed recovery projection required")
+        original = value["original_request"]
+        if (
+            not isinstance(original, dict)
+            or set(original) != {field.name for field in fields(IssueDispatchRequest)}
+            or any(not isinstance(item, str) for item in original.values())
+        ):
+            raise ValueError("closed original request required")
+        original = dict(original)
+        original["plan_id"] = UUID(original["plan_id"])
+        original["authorization_expires_at"] = datetime.fromisoformat(
+            original["authorization_expires_at"]
+        )
+        control = _recovery_control()
+        request = RecoverDispatchRequest(
+            original_request=IssueDispatchRequest(**original),
+            expectation=control.DispatchResumeExpectation.parse(
+                value["resume_expectation"]
+            ),
+            session_id=value["session_id"],
+            not_before=datetime.fromisoformat(value["not_before"]),
+            deadline=datetime.fromisoformat(value["deadline"]),
+        )
+        _validate_recovery_request(request)
+        return request
+    except FoundationBindingsUnavailable:
+        raise
+    except (OSError, ValueError, TypeError, KeyError):
+        raise _refuse(
+            "invalid recovery request projection", TargetRefusal.MATERIALS_REFUSED
+        ) from None
+
+
+def recover_dispatch_materials(
+    db: Any, request: RecoverDispatchRequest, *, custody: Custody | None = None
+) -> IssuedMaterials:
+    """Replay original rollout, then dispatch once under a fresh approval hold.
+
+    Each existing lifecycle seam holds its own transaction through our commit.
+    No SQL, new engine, expiry extension or deployment executor lives here.
+    Callers use write_materials with a fresh exclusive output directory.
+    """
+    held_custody = custody or _require_custody()
+    now = _validate_recovery_request(request)
+    control = _recovery_control()
+    original, expected = request.original_request, request.expectation
+    envelope = expected.original_authorization
+    verifier = AuthorizationEd25519Verifier(held_custody.authorization_identity)
+    control.verify_authorization_envelope(envelope, verifier=verifier, at=now)
+    approval = import_module("vendor_cp.deployment.foundation_execution_approval")
+    rollout = approval.request_foundation_rollout(
+        db,
+        command_id=original.rollout_command_id,
+        plan_id=original.plan_id,
+        rollout_ref=original.rollout_ref,
+        authorization_expires_at=original.authorization_expires_at,
+        signer=_RefusingAuthorizationSigner(held_custody),
+        resume_expectation=expected,
+    )
+    if rollout.id != expected.rollout_id:
+        raise _refuse(
+            "original rollout replay differs", TargetRefusal.MATERIALS_REFUSED
+        )
+    db.commit()
+    intent = approval.dispatch_foundation_attempt(
+        db,
+        command_id=original.dispatch_command_id,
+        rollout_id=rollout.id,
+        verifier=verifier,
+        dispatch_signer=_RecoveryDispatchSigner(held_custody, request),
+        resume_expectation=expected,
+    )
+    if intent.authorization_envelope.canonical_bytes != envelope.canonical_bytes:
+        raise _refuse("original authorization changed", TargetRefusal.MATERIALS_REFUSED)
+    db.commit()
+    return _assemble_materials(original, intent)
 
 
 def write_materials(
@@ -459,6 +763,12 @@ def _build_parser() -> Any:
     # Required and single-valued: there is no default mode and no other custody.
     issue.add_argument("--custody", required=True, choices=("transit",))
     issue.add_argument("--custody-config", required=True)
+    recovery = sub.add_parser("recover-dispatch")
+    recovery.add_argument("--recovery-request", required=True)
+    recovery.add_argument("--recovery-request-sha256", required=True)
+    recovery.add_argument("--out-dir", required=True)
+    recovery.add_argument("--custody", required=True, choices=("transit",))
+    recovery.add_argument("--custody-config", required=True)
     return parser
 
 
@@ -531,6 +841,27 @@ def main(
                 "the process audit vocabulary could not be installed",
                 TargetRefusal.MATERIALS_REFUSED,
             ) from None
+        if args.action == "recover-dispatch":
+            from vendor_cp.deployment import transit_custody
+
+            recovery_request = load_recovery_request(
+                args.recovery_request, expected_sha256=args.recovery_request_sha256
+            )
+            config = transit_custody.load_config(args.custody_config)
+            token = transit_custody.read_token(stdin)
+            recovery_custody = transit_custody.build_recovery_custody(
+                config, token, owner_uid=owner_uid
+            )
+            session = _controller_session(env)
+            try:
+                issued = recover_dispatch_materials(
+                    session, recovery_request, custody=recovery_custody
+                )
+            finally:
+                session.close()
+            write_materials(args.out_dir, issued)
+            print("recovery materials issued")
+            return 0
         if args.action == "issue":
             from vendor_cp.deployment import transit_custody
 
