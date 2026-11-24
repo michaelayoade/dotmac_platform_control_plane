@@ -5,6 +5,8 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from importlib.metadata import version
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
 
 import dotmac_deployment_control as control
@@ -121,10 +123,24 @@ def projection(request):
     )
 
 
-def test_closed_projection_round_trip_and_original_signature(invocation, tmp_path):
+@pytest.fixture
+def protected_projection_directory():
+    # The positive case must satisfy the reader's full ancestor protection:
+    # pytest's default root can be beneath world-writable /tmp; the checkout
+    # can also have unsafe ancestors or OS directory-access restrictions.
+    with TemporaryDirectory(
+        prefix=".recovery-projection-", dir=Path.home().resolve()
+    ) as directory:
+        yield Path(directory)
+
+
+def test_closed_projection_round_trip_and_original_signature(
+    invocation, protected_projection_directory
+):
     request, custody, _ = invocation
-    path = tmp_path / "public-projection.json"
+    path = protected_projection_directory / "public-projection.json"
     path.write_text(json.dumps(projection(request)))
+    path.chmod(0o600)
     parsed = cp.load_recovery_request(
         str(path), expected_sha256=sha256(path.read_bytes()).hexdigest()
     )
