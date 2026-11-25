@@ -1,0 +1,23 @@
+{
+  "app": "erp",
+  "github_repo": "michaelayoade/dotmac_erp",
+  "github_environment": "forgejo-registry-read-main",
+  "secret_name": "FORGEJO_BUNDLE_READ_TOKEN",
+  "forgejo_user": "erp-bundle-reader",
+  "forgejo_org": "dotmac",
+  "forgejo_team": "erp-bundle-readers",
+  "token_name": "erp-bundle-read",
+  "rotate_by_days": 90,
+  "registry_ssh_alias": "REPLACE-WITH-REGISTRY-SSH-ALIAS",
+  "registry_ssh_expected_hostname": "REPLACE-WITH-PINNED-REGISTRY-ADDRESS",
+  "forgejo_container": "REPLACE-WITH-FORGEJO-CONTAINER-NAME",
+  "forgejo_container_user": "git",
+  "forgejo_cli": "forgejo",
+  "deploy_branch": "main",
+  "require_restricted": true,
+  "revoke_verified": false,
+  "revoke_command_template": "curl -X DELETE -u REPLACE-WITH-ADMIN-USER https://REPLACE-WITH-REGISTRY-HOST/api/v1/users/{user}/tokens/{token_name}   (verify route; curl prompts for the password)",
+  "ssh_user": "root",
+  "consumer_workflow": ".github/workflows/erp-lock.yml",
+  "ssh_identity_file": "/REPLACE-WITH-REVIEWED-IDENTITY-PATH"
+}
