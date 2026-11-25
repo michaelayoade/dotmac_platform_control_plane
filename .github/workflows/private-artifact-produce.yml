@@ -1,0 +1,99 @@
+# SOURCE DRAFT ONLY. No credentialed dispatch is authorized by this file.
+# Activation requires the qualified bootstrap and administrative containment hold
+# to be resolved separately; existing credentialed consumers remain unchanged.
+name: Produce reviewed private artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_pr:
+        description: Reviewed same-repository pull request number
+        required: true
+        type: string
+      reviewed_head:
+        description: Exact reviewed 40-character pull request head SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  produce:
+    if: github.ref == 'refs/heads/main'
+    environment: dependency-bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      REVIEWED_PR: ${{ inputs.reviewed_pr }}
+      REVIEWED_HEAD: ${{ inputs.reviewed_head }}
+    steps:
+      - name: Refuse any dispatch outside main before checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+
+      - name: Checkout the actual trusted main workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          clean: true
+
+      - name: Verify trusted checkout identity and cleanliness
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Checkout immutable public Workspace binder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_workspace
+          ref: baa69b8291d77897553694c359bd8bb9906915ea
+          path: trusted-tooling
+          persist-credentials: false
+          clean: true
+
+      - name: Verify binder checkout provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C trusted-tooling rev-parse HEAD)" = baa69b8291d77897553694c359bd8bb9906915ea
+          git -C trusted-tooling diff --exit-code
+          git -C trusted-tooling diff --cached --exit-code
+          test -z "$(git -C trusted-tooling ls-files --others --exclude-standard)"
+          python3 -c 'import sys; assert sys.version_info >= (3, 12)'
+
+      - name: Bind only the reviewed manifest and lock as API data
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/warm_reviewed_private_artifacts.py bind \
+            --tooling trusted-tooling --snapshot "$RUNNER_TEMP/cp-reviewed-pair"
+
+      - name: Acquire exact private bytes and scan every bundle file before upload
+        env:
+          FORGEJO_BUNDLE_READ_TOKEN: ${{ secrets.FORGEJO_BUNDLE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/warm_reviewed_private_artifacts.py acquire \
+            --snapshot "$RUNNER_TEMP/cp-reviewed-pair" \
+            --out "$RUNNER_TEMP/cp-private-artifacts"
+
+      - name: Upload the verified data bundle and nonsecret binding receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cp-private-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cp-private-artifacts
+          if-no-files-found: error
+          retention-days: 14

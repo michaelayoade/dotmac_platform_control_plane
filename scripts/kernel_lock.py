@@ -1571,12 +1571,34 @@ def lock_wheel_problems(lock: dict[str, Any]) -> list[str]:
     )
 
 
-def acquire(plan: dict[str, str], out: Path) -> dict[str, str]:
+def acquire(
+    plan: dict[str, str],
+    out: Path,
+    *,
+    expected_artifacts: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Download the closed bundle and lay it out as a local PEP 503 index.
 
     Runs in the ONLY job that holds the credential, and runs no Poetry and no
     package code: `curl`, `sha256`, and writing HTML. Returns filename → digest.
     """
+
+    if expected_artifacts is not None:
+        if out.exists() or out.is_symlink():
+            raise Refusal("exact acquisition requires a fresh destination")
+        if not expected_artifacts or any(
+            not isinstance(name, str)
+            or Path(name).name != name
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or sum(
+                artifact_belongs_to(name, package, version)
+                for package, version in plan.items()
+            )
+            != 1
+            for name, digest in expected_artifacts.items()
+        ):
+            raise Refusal("unusable exact artifact expectations")
 
     files_dir = out / "files"
     simple_dir = out / "simple"
@@ -1591,7 +1613,17 @@ def acquire(plan: dict[str, str], out: Path) -> dict[str, str]:
             url = approved_artifact_url(href, f"{INDEX_URL}/{package}/")
             filename = url.rsplit("/", 1)[-1]
             if artifact_belongs_to(filename, package, version):
+                if expected_artifacts is not None and filename in wanted:
+                    raise Refusal("duplicate artifact entry on the private index")
                 wanted[filename] = url
+        if expected_artifacts is not None:
+            expected_names = {
+                name
+                for name in expected_artifacts
+                if artifact_belongs_to(name, package, version)
+            }
+            if set(wanted) != expected_names:
+                raise Refusal("private index artifact set disagrees with the lock")
         if not wanted:
             raise Refusal(
                 f"{package} {version} is not published on the index. This is a "
@@ -1622,7 +1654,14 @@ def acquire(plan: dict[str, str], out: Path) -> dict[str, str]:
             # renamed the file into place. Re-reading the file here would record
             # a second measurement of bytes that could, in principle, differ
             # from the ones that passed the size and digest checks.
-            digests[filename] = fetch(url, target)
+            if expected_artifacts is None:
+                digests[filename] = fetch(url, target)
+            else:
+                digests[filename] = fetch(
+                    url, target, expected_sha256=expected_artifacts[filename]
+                )
+                if digests[filename] != expected_artifacts[filename]:
+                    raise Refusal("acquired digest disagrees with the lock")
 
         page_dir = simple_dir / package
         page_dir.mkdir(parents=True, exist_ok=True)
@@ -1634,6 +1673,19 @@ def acquire(plan: dict[str, str], out: Path) -> dict[str, str]:
             f"<!DOCTYPE html>\n<html><body>\n{rows}\n</body></html>\n",
             encoding="utf-8",
         )
+
+    if expected_artifacts is not None:
+        actual = list(files_dir.iterdir())
+        if (
+            digests != expected_artifacts
+            or {path.name for path in actual} != set(expected_artifacts)
+            or any(path.is_symlink() or not path.is_file() for path in actual)
+            or any(
+                sha256_hex(path.read_bytes()) != expected_artifacts[path.name]
+                for path in actual
+            )
+        ):
+            raise Refusal("acquired files do not close over the exact lock set")
 
     (out / "digests.json").write_text(
         json.dumps(digests, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -2628,9 +2680,9 @@ def credential_sightings(paths: Iterable[Path], credential: str) -> list[str]:
     forms = credential_encodings(credential)
     found: list[str] = []
     for path in sorted(paths):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        payload = path.read_bytes()
         for label, form in forms.items():
-            if form in text:
+            if form.encode("utf-8") in payload:
                 found.append(f"{path.name}: {label}")
     return found
 
