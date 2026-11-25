@@ -1,5 +1,5 @@
 # VALIDATION BRANCH ONLY: never merge this replacement of ci.yml.
-name: Registry reader transport validation
+name: Host-gated registry source qualification
 on:
   workflow_dispatch:
 permissions:
@@ -15,38 +15,37 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
-      - name: Verify reviewed source and absence of registry credentials
+      - name: Verify source and absent registry credentials
         run: |
           set -euo pipefail
           python -I -S -B -c 'import os; assert not any(v for k,v in os.environ.items() if k.startswith(("FORGEJO_", "POETRY_HTTP_BASIC_"))), "unexpected registry credential"'
-          cd validation/registry-reader
+          cd validation/host-gated
           sha256sum -c SOURCE-SHA256SUMS
-          rm SOURCE-SHA256SUMS
-          chmod 700 . issue.sh
-          chmod 600 README.md SHA256SUMS audit.py example-erp.config.json test_issuance.py
-          bash -n issue.sh
-      - name: Run mocked transport and refusal tests
+          chmod 700 .
+          chmod 600 *.py *.json README.md
+      - name: Run fully mocked owner, SQL and API tests
         run: |
           set -euo pipefail
-          python -I -S -B - "$GITHUB_WORKSPACE/validation/registry-reader" "$RUNNER_TEMP/reader-tests.json" <<'PYTEST'
+          python -I -S -B - "$GITHUB_WORKSPACE/validation/host-gated" "$RUNNER_TEMP/host-mocked-tests.json" <<'PYTEST'
           import importlib, json, pathlib, sys, unittest
           sys.path.insert(0, sys.argv[1])
-          module = importlib.import_module("test_issuance")
-          suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+          suite = unittest.TestSuite()
+          for name in ("test_revocation_sql", "test_bootstrap_api", "test_orchestrator", "test_host_gate"):
+              suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(name)))
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           receipt = {"tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True}
           pathlib.Path(sys.argv[2]).write_text(json.dumps(receipt, indent=2) + "\n")
           raise SystemExit(0 if result.wasSuccessful() and result.testsRun > 0 and not result.skipped else 1)
           PYTEST
-      - name: Retain synthetic test receipt
+      - name: Retain mocked test receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: registry-reader-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/reader-tests.json
+          name: host-gated-mocked-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/host-mocked-tests.json
           if-no-files-found: error
           retention-days: 14
-  revocation-helper-tests:
+  postgres-transactions:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -56,30 +55,39 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
-      - name: Verify reviewed helper source and absent registry credentials
+      - name: Verify source and absent registry credentials
         run: |
           set -euo pipefail
           python -I -S -B -c 'import os; assert not any(v for k,v in os.environ.items() if k.startswith(("FORGEJO_", "POETRY_HTTP_BASIC_"))), "unexpected registry credential"'
-          cd validation/revocation-proof
+          cd validation/host-gated
           sha256sum -c SOURCE-SHA256SUMS
-      - name: Run fully mocked revocation proof tests
+      - name: Qualify exact transactions in isolated Unix-only PostgreSQL16
         run: |
           set -euo pipefail
-          python -I -S -B - "$GITHUB_WORKSPACE/validation/revocation-proof" "$RUNNER_TEMP/revocation-tests.json" <<'PYTEST'
+          umask 077
+          CP_PG_BIN=/usr/lib/postgresql/16/bin
+          CP_PG_DATA="$RUNNER_TEMP/cp-host-pgdata"
+          CP_TEST_PG_SOCKET="$RUNNER_TEMP/cp-host-pg-socket"
+          mkdir -m 700 "$CP_TEST_PG_SOCKET"
+          "$CP_PG_BIN/initdb" -D "$CP_PG_DATA" --auth-local=trust --auth-host=reject --no-locale -E UTF8 -U "$(id -un)" > "$RUNNER_TEMP/cp-pg-init.log"
+          trap '"$CP_PG_BIN/pg_ctl" -D "$CP_PG_DATA" -m immediate -w stop > "$RUNNER_TEMP/cp-pg-stop.log" 2>&1 || true' EXIT
+          "$CP_PG_BIN/pg_ctl" -D "$CP_PG_DATA" -l "$RUNNER_TEMP/cp-pg-server.log" -o "-k $CP_TEST_PG_SOCKET -p 55439 -c listen_addresses=''" -w start
+          export CP_TEST_PG_SOCKET
+          python -I -S -B - "$GITHUB_WORKSPACE/validation/host-gated" "$RUNNER_TEMP/host-pg-tests.json" <<'PYTEST'
           import importlib, json, pathlib, sys, unittest
           sys.path.insert(0, sys.argv[1])
-          module = importlib.import_module("test_proof")
+          module = importlib.import_module("test_sql_native")
           suite = unittest.defaultTestLoader.loadTestsFromModule(module)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
-          receipt = {"tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True}
+          receipt = {"tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True, "postgres_major": 16, "unix_socket_only": True, "docker_used": False}
           pathlib.Path(sys.argv[2]).write_text(json.dumps(receipt, indent=2) + "\n")
           raise SystemExit(0 if result.wasSuccessful() and result.testsRun > 0 and not result.skipped else 1)
           PYTEST
-      - name: Retain synthetic revocation test receipt
+      - name: Retain PostgreSQL transaction receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: revocation-proof-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/revocation-tests.json
+          name: host-gated-postgres-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/host-pg-tests.json
           if-no-files-found: error
           retention-days: 14

@@ -1,0 +1,26 @@
+{
+  "schema": "cp_host_gated.v1",
+  "run": "cp-host-20261125-r1",
+  "host": "dotmac-s3",
+  "canary_username": "cp-revoke-proof-20261125-r1",
+  "canary_token_name": "cp-canary-read-20261125-r1",
+  "bootstrap_token_name": "cp-org-bootstrap-20261125-r1",
+  "forgejo_container_id": "4482c4d5bb7413d5efafdfa2e9cef7253eb1a1293efa8109a7e2d478eae64ad1",
+  "forgejo_image_id": "sha256:946243edbab116d5bb78b73ea68af6f3d69229ba1b1ed958dd82c3481167f3e0",
+  "database_container_id": "40d899c6fbbf30e7c522990af1c6a22bba8e908c461e32023f1687e96eac2bcb",
+  "database_image_id": "sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
+  "source_pins": {
+    "host_gate.py": "6a7f5175f7e3ec5c2f4dbcf4acde036a3f308c75772d82242cafad4305f98a5a",
+    "orchestrator.py": "a8f67bd4a32ba65abc7bb68e7c6129b18b7135c71bd8b73fb5a28a8446a4309e",
+    "revocation_sql.py": "0e6733f2032173338b611b087530790d144a3403bcdff2418c21836e637b969a",
+    "bootstrap_api.py": "377f7379c2aa838197bce511736e6af5a2854a25b5b3d0d53dfd9e7de710e172",
+    "audit.py": "86e9858f0e1a1ee5d19456a2dba730721e8da982c09aa248446fb81d1bbc28c9",
+    "runtime.py": "ca43326f10176e640a0031367db2ec28a3dbdd62326875789c35e4cd3cd8d45a"
+  },
+  "operator_reference": null,
+  "authorization_reference": null,
+  "exclusive_window_reference": null,
+  "cp_require_restricted": true,
+  "restricted_account_decision_reference": null,
+  "accepted_canary_receipt_sha256": null
+}
