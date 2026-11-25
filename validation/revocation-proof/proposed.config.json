@@ -1,0 +1,16 @@
+{
+  "schema": "cp_reader_revocation_proof.v1",
+  "run": "cp-revoke-proof-20261125-r1",
+  "host": "dotmac-s3",
+  "forgejo_container_id": null,
+  "database_container_id": null,
+  "forgejo_image_id": null,
+  "database_image_id": null,
+  "username": "cp-revoke-proof-20261125-r1",
+  "user_id": null,
+  "admin_username": null,
+  "operator_profile_reference": null,
+  "authorization_reference": null,
+  "helper_source_sha256": null,
+  "exclusive_user_mutation_window_reference": null
+}

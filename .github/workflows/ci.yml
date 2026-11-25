@@ -46,3 +46,40 @@ jobs:
           path: ${{ runner.temp }}/reader-tests.json
           if-no-files-found: error
           retention-days: 14
+  revocation-helper-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Verify reviewed helper source and absent registry credentials
+        run: |
+          set -euo pipefail
+          python -I -S -B -c 'import os; assert not any(v for k,v in os.environ.items() if k.startswith(("FORGEJO_", "POETRY_HTTP_BASIC_"))), "unexpected registry credential"'
+          cd validation/revocation-proof
+          sha256sum -c SOURCE-SHA256SUMS
+      - name: Run fully mocked revocation proof tests
+        run: |
+          set -euo pipefail
+          python -I -S -B - "$GITHUB_WORKSPACE/validation/revocation-proof" "$RUNNER_TEMP/revocation-tests.json" <<'PYTEST'
+          import importlib, json, pathlib, sys, unittest
+          sys.path.insert(0, sys.argv[1])
+          module = importlib.import_module("test_proof")
+          suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          receipt = {"tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True}
+          pathlib.Path(sys.argv[2]).write_text(json.dumps(receipt, indent=2) + "\n")
+          raise SystemExit(0 if result.wasSuccessful() and result.testsRun > 0 and not result.skipped else 1)
+          PYTEST
+      - name: Retain synthetic revocation test receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: revocation-proof-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/revocation-tests.json
+          if-no-files-found: error
+          retention-days: 14
