@@ -46,8 +46,8 @@ PIN = {
         "94fb64b6b9825b7ba628d43ac4e0fbc49d911f5a20ebbe95a07b59d4dfa79e68"
     ),
     "replaces": "70804d18d6af1e472ceefbd3a8b114004e0d284a741612707391d10b2c571ce8",
-    "status": "PENDING_MICHAEL_APPROVAL",
-    "note": "architect r8 D1 proposal; the private pin copies are not yet re-pinned",
+    "status": "APPROVED",
+    "note": "architect r8 D1; approved (register v2155+; Michael, 2026-11-24)",
 }
 LOGIN_KEYS = (
     "select_four_tables_ok",

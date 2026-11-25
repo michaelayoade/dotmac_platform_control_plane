@@ -401,10 +401,10 @@ class ObserverResultTests(unittest.TestCase):
         args.update(over)
         return self.m.judge(**args)
 
-    def test_all_expected_passes_and_marks_the_pin_pending(self) -> None:
+    def test_all_expected_passes_and_marks_the_pin_approved(self) -> None:
         r = self.judge()
         self.assertEqual(r["status"], "PASS", r["failed_checks"])
-        self.assertEqual(r["pin"]["status"], "PENDING_MICHAEL_APPROVAL")
+        self.assertEqual(r["pin"]["status"], "APPROVED")
 
     def test_one_false_readback_row_fails_and_is_named(self) -> None:
         rows = [*self.good_rows, "some_row|false"]
