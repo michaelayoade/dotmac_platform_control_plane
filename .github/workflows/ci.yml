@@ -30,7 +30,7 @@ jobs:
           import importlib, json, pathlib, sys, unittest
           sys.path.insert(0, sys.argv[1])
           suite = unittest.TestSuite()
-          for name in ("test_revocation_sql", "test_bootstrap_api", "test_orchestrator", "test_host_gate", "test_execute_canary"):
+          for name in ("test_revocation_sql", "test_bootstrap_api", "test_orchestrator", "test_host_gate", "test_execute_canary", "test_execute_bootstrap"):
               suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(name)))
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           receipt = {"tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True}
