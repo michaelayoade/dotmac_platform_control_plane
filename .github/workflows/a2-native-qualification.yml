@@ -41,13 +41,14 @@ permissions:
   contents: read
 
 env:
-  CP_REF_DEFAULT: 3845a497748db81e6425dd98cdacfc9a373bfbc7
+  # The COMBINED draft ref: CP #269 + #272 + the Control a18 lock (kernel-lock run
+  # 45759607636). The image and the recovery source both come from it.
+  CP_REF_DEFAULT: 03f580eba34dffeb65c3b0a11ef77d8dfde1b254
   CONTROL_REF_DEFAULT: 3bd99c2ce19b287f22f9ff8ad92907b4e45324c8
   # CP draft #272 (recovery source): carries conformance/recovery_source/test_contract.py.
   # C4 seed pairing (architect r8 D3): the seed uses the Control version the BUILT
   # IMAGE carries (a17 today); this checkout supplies only the test signer.
-  C4_SEED_CONTROL_REF: 574418944d35ddf3559d17e59e9184b5f545ebe4
-  RECOVERY_CP_REF: 13d08e93f07039e605e124cd49c54be99898acfe
+  C4_SEED_CONTROL_REF: b48ebb9f824fa2a63adca33491308431bebd13ab
   # The Starter commit CP #269's own Lane 3 step pins for the Foundation import.
   FOUNDATION_REF: f50d497e4df178e1411d2b4fccbfa153a21fd12a
   OPENBAO_IMAGE: openbao/openbao@sha256:fdc6da21ca6963560c32336fd7feb9cf2d5e52668f1a1647205a4b41171f0806
@@ -100,7 +101,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: michaelayoade/dotmac_platform_control_plane
-          ref: ${{ env.RECOVERY_CP_REF }}
+          ref: ${{ inputs.cp_ref || env.CP_REF_DEFAULT }}
           path: cp-recovery-src
           persist-credentials: false
       - name: Fetch the Control source that supplies the C4 test signer
@@ -136,7 +137,7 @@ jobs:
           done
           echo "CP_COMMIT=$(git -C cp-src rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "RECOVERY_CP_COMMIT=$(git -C cp-recovery-src rev-parse HEAD)" >> "$GITHUB_ENV"
-          test "$(git -C cp-recovery-src rev-parse HEAD)" = "$RECOVERY_CP_REF"
+          test "$(git -C cp-recovery-src rev-parse HEAD)" = "$(git -C cp-src rev-parse HEAD)"
           test "$(git -C control-seed-src rev-parse HEAD)" = "$C4_SEED_CONTROL_REF"
           echo "CONTROL_COMMIT=$(git -C control-src rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "FOUNDATION_COMMIT=$(git -C foundation-src rev-parse HEAD)" >> "$GITHUB_ENV"
