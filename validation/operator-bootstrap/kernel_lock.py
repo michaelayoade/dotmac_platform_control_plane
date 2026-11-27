@@ -1,0 +1,2989 @@
+"""The refusals `.github/workflows/kernel-lock.yml` needs, out of the YAML.
+
+A lock entry for `dotmac-kernel` is the one part of a pin change that cannot be
+written by hand: its two sha256 values are facts about published artifacts. The
+workflow that resolves them holds `FORGEJO_READ_TOKEN`, so every check it makes
+is a security check, and a security check embedded in a `run:` block is a check
+nobody can plant a defect against.
+
+So the checks live here, as functions, and `tests/architecture/
+test_kernel_lock_workflow.py` plants a defect against each one. The workflow
+runs this module from the TRUSTED checkout — the commit that defines the
+workflow — never from the ref under resolution.
+
+## The subjects, deliberately separate
+
+* `set-kernel-version` — move the pin in the manifest, refusing unless exactly
+  one declaration matched. Two matches means guessing which one is the pin.
+* `manifest-guard` — the ref under resolution supplies the manifest, and
+  Poetry keys HTTP credentials by source NAME. A manifest that keeps the name
+  `forgejo` and moves its URL would have the credential posted to the new
+  host by Poetry itself, with no code execution anywhere. This refuses that,
+  refuses every off-index dependency form, refuses a dependency shape it does
+  not recognise, and refuses a candidate-supplied `poetry.toml`.
+* `acquire` — download the private index's pages and artifacts ONCE, in the
+  only job that holds the credential, validating every index-supplied link
+  against an approved origin and path prefix, and lay the bytes out as a local
+  PEP 503 index. Runs no Poetry and no package code.
+* `mirror-manifest` / `restore` — point the manifest at that local index for
+  the duration of a SECRET-FREE resolution, then put the real index URL back
+  and recompute the lock's `content-hash` with Poetry's own `Locker`, so the
+  pair that leaves describes the manifest a consumer will actually apply.
+* `wheel-only` — every release the resolution reads metadata for offers a
+  parseable wheel, so Poetry's sdist branch — and the PEP 517 build backend at
+  the end of it — is unreachable. Run BEFORE `poetry lock` it is a gate; run
+  after, a closing observation. A dependency with no usable wheel is named and
+  refused, not silently built.
+* `verify` — the lock's hashes are the bytes the index published.
+* `drift` — the whole lock outside the `dotmac-kernel` entry must be
+  identical, and the kernel entry itself may differ only in `version` and
+  `files`. Not three fields of it, and not a blank cheque for the one entry
+  the change is about.
+* `evidence` — assemble what leaves the runner: the manifest/lock PAIR bound
+  to each other and to this run, and a scan that refuses rather than passes
+  when there is no credential to look for.
+
+## The resolver is wheel-only, and that is checked rather than configured
+
+Splitting the credential out of the resolver job removed the credential from
+the build backend's reach. It did not remove the build backend. `resolve` still
+reaches public PyPI, so a release with no usable wheel could still have its
+sdist backend executed — and the answer to that was a scan for the
+CONSEQUENCES of an execution that had already happened.
+
+Preventing the execution is stronger than scanning for its results, so the
+resolution is now wheel-only: `wheel_only_problems` refuses any release that
+offers no parseable wheel, at three points — while the private bundle is being
+laid out, over the pre-resolution lock BEFORE Poetry starts, and over the lock
+that leaves. The predicate is not a Poetry flag; it is the exact condition
+under which `HTTPRepository._get_info_from_sdist` is unreachable. See that
+function's docstring for what it is conservative about and what it does not
+cover.
+
+The credential-encoding scans stay exactly where they were, at exactly the
+strength they had. They are defence in depth. They were never the defence.
+
+## Nothing scanned-only is uploaded
+
+An earlier version uploaded the resolver log, scrubbed of the credential's
+known encodings. The scrubber's own docstring conceded what it could not see —
+a credential split across lines, compressed or archived bytes, a hex rendering,
+bytes that are not UTF-8, or base64 at a non-zero offset inside a larger blob.
+Publishing a file whose scan is known-incomplete is the wrong resolution of
+that finding, so the log is no longer collected at all. What remains in the
+artifact is the manifest and the lock, and for those the answer to a sighting
+is REFUSAL, never redaction: a credential in either of those files means
+something is wrong that redaction would hide.
+
+`credential_encodings` therefore exists only to make that refusal possible. Its
+coverage limits are unchanged and still do not amount to a proof of absence;
+the property the workflow relies on is that the job which produces the lock
+never holds the credential at all.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import html.parser
+import json
+import ntpath
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import tomllib
+import urllib.parse
+import zipfile
+import zlib
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Final
+
+#: The private index this assembly resolves Dotmac packages from. The workflow
+#: names the same URL for its own `curl`; a drift between the two is caught by
+#: `test_kernel_lock_workflow.py`.
+INDEX_URL = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+
+#: The ONLY origin an index-supplied link may name, and the only path prefix
+#: under it. A simple index page is INDEX-CONTROLLED data: every href on it is
+#: attacker-influenced the moment the index is. Validating the origin is what
+#: keeps `curl --netrc` from being pointed somewhere the credential would be
+#: offered — see `approved_artifact_url`.
+ARTIFACT_ORIGIN = "https://registry.dotmac.io"
+ARTIFACT_PATH_PREFIX = "/api/packages/dotmac/pypi/"
+
+#: The Poetry source name the credential is keyed to. `POETRY_HTTP_BASIC_
+#: FORGEJO_PASSWORD` binds to this NAME, not to the URL, which is the whole
+#: reason `manifest_problems` exists.
+INDEX_SOURCE_NAME = "forgejo"
+
+#: The read-only Forgejo identity the credential belongs to. Used to build the
+#: basic-auth encoding the scan looks for, never to authenticate anything here.
+INDEX_USERNAME = "ci-reader"
+
+#: The environment variable the workflow hands the credential to this module
+#: in. Deliberately not named `TOKEN`: nothing here may ever accept it as a
+#: command-line argument, where it would appear in a process listing.
+CREDENTIAL_ENV = "FORGEJO_CREDENTIAL"
+
+#: The package this workflow exists to move. Everything else in the lock is
+#: required to be identical.
+KERNEL = "dotmac-kernel"
+
+#: The only two fields of the `dotmac-kernel` entry a pin move may change.
+#: Everything else on that entry — `source`, `dependencies`, `extras`,
+#: `optional`, `groups`, `python-versions`, `description`, anything new — is
+#: held to the same identity as every other package. The gate this replaced
+#: exempted the whole entry, so a repointed kernel source, a widened
+#: `python-versions` or an added dependency arrived inside the one entry the
+#: change was about and nothing looked.
+KERNEL_MUTABLE_FIELDS = frozenset({"version", "files"})
+
+#: The only other package a dispatch may declare a movement for, alongside the
+#: kernel it always moves. CLOSED — not "every dependency this manifest
+#: happens to carry" — because a declared movement is exempted from the drift
+#: gate's blanket refusal, and widening the set widens what a caller can move
+#: through this workflow without a second reviewer noticing. A name is added
+#: here only by review, in the same change that states why that package's pin
+#: must move together with the kernel's (see `docs/adr` for the composed-
+#: maximum relationship `scripts/kernel_floor.py` enforces between them).
+#:
+#: `dotmac-approvals` joined on 2026-09-25 for the same reason Control did: its
+#: 0.1.0a7 release declares `dotmac-kernel >=0.1.0a100`, so the Gate-0
+#: composition adoption (Control a6 -> a15, Approvals a5 -> a7, kernel a98 ->
+#: a100) cannot move Approvals without moving the kernel with it. A dispatch
+#: still declares ONE movement; the two modules move in two chained runs, each
+#: resolved against the exact commit the previous run's pair produced.
+#:
+#: `dotmac-commercial-agreements` joined on 2026-09-27 for the Gate-0 C2 S4
+#: repin (a2 -> a4, Michael 2026-09-27): its 0.1.0a3/0.1.0a4 releases declare
+#: `dotmac-kernel >=0.1.0a100`, the same composed-maximum relationship, so it
+#: too can only move through this protected, credential-isolated resolver —
+#: never by a local `poetry lock` holding the registry credential.
+DECLARABLE_DEPENDENCIES: Final = frozenset(
+    {
+        "dotmac-deployment-control",
+        "dotmac-approvals",
+        "dotmac-commercial-agreements",
+    }
+)
+
+#: The only two fields a DECLARED dependency's entry may change. Identical
+#: reasoning to `KERNEL_MUTABLE_FIELDS`: a version move changes `version` and
+#: `files` and nothing else, and this is not a second, looser allowlist for
+#: whichever package happens to be declared.
+#: A declared movement may move these three. `dependencies` is included
+#: because a new version is entitled to require different things -- and that
+#: is the reason the kernel pin has to move at all. It is NOT free: the
+#: resolved values must equal the acquired wheel's own `Requires-Dist`,
+#: checked by `metadata_binding_problems` against rehashed bytes.
+DEPENDENCY_MUTABLE_FIELDS: Final = KERNEL_MUTABLE_FIELDS | {"dependencies"}
+
+#: The two files a consumer must apply TOGETHER. The lock's content-hash is
+#: derived from the manifest, so either one alone describes a tree that does
+#: not exist.
+PAIR = ("pyproject.toml", "poetry.lock")
+
+#: Poetry configuration a candidate checkout may not carry. `poetry.toml` is
+#: read from the project directory and configures the resolver that is about to
+#: run against it — `certificates.<source>.cert = false` turns off TLS
+#: verification for a named repository, `keyring.enabled` changes where
+#: credentials come from, and `solver.lazy-wheel` changes how a wheel's
+#: metadata is obtained. This module REFUSES the file rather than reasoning
+#: about which keys are safe: an allowlist of settings is a second thing to
+#: keep in sync with Poetry, and the tree under resolution has no legitimate
+#: need to configure the tool that judges it.
+#:
+#: NOT for the reason an earlier revision of this comment gave. It claimed
+#: `installer.no-binary` "forces source distributions and therefore
+#: build-backend execution". That is false of the command this workflow runs.
+#: In the pinned Poetry (2.4.1) `installer.no-binary` and `installer.only-binary`
+#: are read in exactly one place — `poetry/installation/chooser.py` — which is
+#: the INSTALLER's link chooser. `poetry lock` never constructs one. Neither
+#: setting can make `poetry lock` execute a build backend, and neither can stop
+#: it: what decides that is whether a release offers a parseable wheel, which
+#: is what `wheel_only_problems` below judges. Refusing the file is still
+#: right; the reason is TLS, keyring and metadata transport, not no-binary.
+CANDIDATE_CONFIG_FILES = ("poetry.toml",)
+
+_KERNEL_DECLARATION = re.compile(r'(dotmac-kernel = \{ version = ")[^"]+(")')
+
+_CONTENT_HASH_LINE = re.compile(r'^(content-hash = ")[^"]*(")$', re.MULTILINE)
+
+#: Constraint-table keys `poetry.core.factory.Factory.create_dependency`
+#: actually reads. The traversal below enumerates what it understands and
+#: refuses what it does not, rather than allowing anything that fails to match
+#: a known-bad pattern: an omitted form is otherwise waved through in silence,
+#: which is exactly how `file` — a distinct key from `path`, dispatched three
+#: branches earlier in that same function — was missed.
+RECOGNISED_CONSTRAINT_KEYS = frozenset(
+    {
+        "allow-prereleases",
+        "branch",
+        "develop",
+        "extras",
+        "file",
+        "git",
+        "markers",
+        "optional",
+        "path",
+        "platform",
+        "python",
+        "rev",
+        "source",
+        "subdirectory",
+        "tag",
+        "url",
+        "version",
+    }
+)
+
+#: Dependency forms whose resolution reads or executes something the index does
+#: not name. `path` and `url` and `file` reach outside the index; `git` clones
+#: and can run a build backend from the cloned tree.
+OFF_INDEX_DEPENDENCY_KEYS = ("file", "git", "path", "url")
+
+#: Every dotted path this module TRAVERSES for dependencies. A `dependenc`-named
+#: table anywhere else in the manifest is a form that did not exist when this
+#: was written, and it is refused rather than ignored.
+TRAVERSED_DEPENDENCY_TABLES = (
+    "dependency-groups",
+    "project.dependencies",
+    "project.optional-dependencies",
+    "tool.poetry.dependencies",
+    "tool.poetry.dev-dependencies",
+)
+
+#: `tool.poetry.group.<name>` may carry these and nothing else.
+RECOGNISED_GROUP_KEYS = frozenset({"dependencies", "include-groups", "optional"})
+
+#: A bare `name = "<constraint>"` in a Poetry table is a VERSION constraint and
+#: nothing else. Anything carrying a scheme, an authority or a direct reference
+#: is not a version constraint, and is refused instead of being parsed.
+_PLAIN_CONSTRAINT = re.compile(r"^[0-9A-Za-z .,!*+<>=^~|-]+$")
+
+#: An exact pin: what a mirrored private package must declare, because the
+#: bundle can only be CLOSED around versions known before resolution starts.
+_EXACT_VERSION = re.compile(r"^[0-9]+(\.[0-9]+)*((a|b|rc|\.post|\.dev)[0-9]+)?$")
+
+#: A PEP 508 direct reference — `name @ https://…`, `name @ file:///…`,
+#: `name @ git+ssh://…`. In `[project]` and `[dependency-groups]` a dependency
+#: is a string, so the off-index forms above arrive as one of these.
+_DIRECT_REFERENCE = re.compile(r"@\s*[A-Za-z][A-Za-z0-9+.-]*:")
+
+_PAIR_PROSE = """\
+This lock and this pyproject.toml are ONE artifact. The lock's content-hash is
+derived from the manifest, so applying either alone leaves a tree whose lock
+does not describe its own manifest.
+
+To verify what you downloaded, from inside the artifact directory:
+
+  sha256sum -c SHA256SUMS
+
+To verify the pair is the pair this run produced, and not two files from two
+runs: recompute pair-binding as the sha256 of exactly these bytes, newline
+terminated, in this order:
+
+  pyproject.toml sha256:<the pyproject.toml digest above>
+  poetry.lock sha256:<the poetry.lock digest above>
+
+To verify the pair against Poetry itself, copy BOTH files over a checkout of
+the ref above and run `poetry check --lock`. Applying one without the other
+fails that command on the content-hash, which is the detection this binding
+exists to make possible.
+
+The resolver log is deliberately NOT here. It was uploaded once, scrubbed of
+the credential's known encodings, and the scrubber could not see a credential
+split across lines, compressed, hex-rendered, or base64-encoded at a non-zero
+offset. A file whose scan is known-incomplete does not become safe by being
+scanned, so it is no longer collected. The lock in this directory was produced
+by a job that never held the credential at all.
+
+This artifact is bound to its run by the coordinates above, which the run's own
+log carries. It is not cryptographically signed: attesting it would need
+`id-token: write` and `attestations: write`, a permission expansion this
+workflow has not taken.
+"""
+
+
+class PublishedArtifactUnrecorded(Exception):
+    """Published, then neither recorded nor rolled back. DELIBERATELY not a
+    `Refusal`.
+
+    A `Refusal` says "this input is not acceptable, nothing happened". This says
+    the opposite: an artifact IS at its final path, no digest was returned for
+    it, and the rollback that would have removed it also failed. Nothing
+    downstream may treat the bundle as usable, and a retry cannot simply be
+    re-run because publication is no-overwrite and the destination is occupied.
+    It is reported separately from every refusal for that reason.
+    """
+
+
+class Refusal(Exception):
+    """A condition this module refuses to proceed past."""
+
+
+def _load_toml(path: Path) -> dict[str, Any]:
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+# ── set-kernel-version ──────────────────────────────────────────────────────
+
+
+def replace_kernel_version(text: str, version: str) -> str:
+    """Move the pin, or refuse.
+
+    Exactly one declaration, because a manifest with two is a manifest where
+    "the pin" is ambiguous, and editing the wrong one produces a lock that
+    resolves a version nobody asked for while reporting success.
+    """
+
+    edited, count = _KERNEL_DECLARATION.subn(rf"\g<1>{version}\g<2>", text)
+    if count != 1:
+        raise Refusal(
+            f"expected exactly one {KERNEL} version declaration, matched "
+            f"{count}. Refusing rather than guessing which one the pin is."
+        )
+    return edited
+
+
+# ── declaring one additional dependency movement ────────────────────────────
+
+
+@dataclass(frozen=True)
+class DependencyDelta:
+    """One caller-declared movement of a package in `DECLARABLE_DEPENDENCIES`.
+
+    Exists because `scripts/kernel_floor.py` makes the kernel pin EQUAL the
+    composed maximum, so a real repin can require `dotmac-deployment-control`
+    to move together with the kernel — and the drift gate, correctly, refuses
+    any movement it was not told about. This is the thing a caller tells it.
+    """
+
+    name: str
+    before: str
+    after: str
+
+
+def parse_dependency_delta(
+    name: str, before: str, after: str
+) -> DependencyDelta | None:
+    """The three `workflow_dispatch` inputs, judged, or `None` for kernel-only.
+
+    ALL-OR-NONE. Supplying none of the three preserves today's kernel-only
+    behaviour exactly; supplying some but not all is refused by name, so a
+    caller cannot half-declare a movement and have it partially exempted.
+    """
+
+    fields = {"dependency": name, "dependency_from": before, "dependency_to": after}
+    # EMPTY STRING is the only "not supplied". A whitespace-only input is a
+    # caller who meant to supply something, and `strip()`-ing it to nothing
+    # would silently downgrade a declared movement to a kernel-only run — the
+    # dispatch would look like it had been honoured and would not have been.
+    whitespace = sorted(
+        key for key, value in fields.items() if value and not value.strip()
+    )
+    if whitespace:
+        raise Refusal(
+            "whitespace-only values are refused rather than read as absent: "
+            f"{', '.join(whitespace)}. Leave an input EMPTY to run kernel-only."
+        )
+    blank = sorted(key for key, value in fields.items() if value == "")
+    if len(blank) == 3:
+        return None
+    if blank:
+        raise Refusal(
+            "a declared dependency movement needs all three of `dependency`, "
+            "`dependency_from` and `dependency_to`, or none of them; missing: "
+            f"{', '.join(blank)}"
+        )
+    if name not in DECLARABLE_DEPENDENCIES:
+        raise Refusal(
+            f"{name!r} is not in the closed allowlist of declarable "
+            f"dependencies {sorted(DECLARABLE_DEPENDENCIES)!r}; a name is "
+            "added there only by review"
+        )
+    for label, version in (("dependency_from", before), ("dependency_to", after)):
+        if "+" in version:
+            raise Refusal(
+                f"{label} {version!r} carries a PEP 440 local version segment "
+                "(`+...`); a local segment names a version no index can "
+                "serve, so it can be neither the old nor the new immutable "
+                "coordinate"
+            )
+        if not _EXACT_VERSION.fullmatch(version):
+            raise Refusal(f"{label} {version!r} is not an exact version")
+    if before == after:
+        raise Refusal(
+            f"{name} is declared to move from {before!r} to itself; an "
+            "unchanged declared dependency is not a movement, and the "
+            "resulting lock would say nothing about it"
+        )
+    return DependencyDelta(name=name, before=before, after=after)
+
+
+def _declared_version(declared: Any) -> Any:
+    """What a declaration says its version is, whatever shape it came in."""
+
+    return declared.get("version") if isinstance(declared, dict) else declared
+
+
+def _parse_toml_text(text: str) -> dict[str, Any]:
+    """Parse manifest BYTES. Refuses rather than returning a partial mapping."""
+
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise Refusal(f"the manifest text does not parse as TOML: {exc}") from exc
+
+
+def replace_dependency_version(text: str, delta: DependencyDelta) -> str:
+    """Move the declared dependency's pin, or refuse. Mirrors
+    `replace_kernel_version`, including its ambiguity refusal, and adds one
+    more: the version actually declared must be the one the caller claimed
+    was there, checked at the SOURCE, before anything is resolved against it.
+    """
+
+    before_declarations = dependency_declarations(_parse_toml_text(text), delta.name)
+    if len(before_declarations) != 1:
+        raise Refusal(
+            f"{delta.name} is declared {len(before_declarations)} times"
+            + (
+                " ("
+                + ", ".join(where for where, _ in sorted(before_declarations))
+                + ")"
+                if before_declarations
+                else ""
+            )
+            + "; a movement needs exactly one. Refusing rather than rewriting "
+            "one declaration and leaving another at the old version."
+        )
+    where, declared = before_declarations[0]
+    if not isinstance(declared, dict) or declared.get("version") != delta.before:
+        raise Refusal(
+            f"{delta.name} at {where} declares {_declared_version(declared)!r}, "
+            f"not the declared `dependency_from` {delta.before!r}"
+        )
+
+    anchor = re.compile(rf'({re.escape(delta.name)} = \{{ version = ")([^"]+)(")')
+    matches = list(anchor.finditer(text))
+    if len(matches) != 1:
+        raise Refusal(
+            f"expected exactly one textual {delta.name} version declaration to "
+            f"rewrite, matched {len(matches)}. The parsed manifest names one at "
+            f"{where}, so the text and the parse disagree; refusing rather than "
+            "guessing which span to edit."
+        )
+    if matches[0].group(2) != delta.before:
+        raise Refusal(
+            f"the {delta.name} span about to be rewritten holds "
+            f"{matches[0].group(2)!r}, not the declared `dependency_from` "
+            f"{delta.before!r}"
+        )
+
+    edited = anchor.sub(rf"\g<1>{delta.after}\g<3>", text, count=1)
+
+    # REPARSE. A textual edit that produced something only a regex believes in
+    # would otherwise reach the resolver. The edited bytes must parse, and must
+    # parse to exactly one declaration, at exactly the new version.
+    after_declarations = dependency_declarations(_parse_toml_text(edited), delta.name)
+    if len(after_declarations) != 1:
+        raise Refusal(
+            f"after the edit {delta.name} parses to {len(after_declarations)} "
+            "declarations, expected exactly one"
+        )
+    after_where, after_declared = after_declarations[0]
+    if (
+        not isinstance(after_declared, dict)
+        or after_declared.get("version") != delta.after
+    ):
+        raise Refusal(
+            f"after the edit {delta.name} at {after_where} declares "
+            f"{_declared_version(after_declared)!r}, not {delta.after!r}"
+        )
+    return edited
+
+
+# ── manifest-guard: the candidate checkout ──────────────────────────────────
+
+
+def checkout_problems(root: Path) -> list[str]:
+    """A candidate checkout may supply the manifest. It may not supply config.
+
+    `poetry.toml` in the project directory is Poetry's LOCAL configuration
+    file, and it is read by the resolver that is about to run against this
+    tree. It can disable TLS verification for a named repository, force source
+    distributions (and so build-backend execution), and change where
+    credentials are looked up. We do not assume Poetry ignores it and we do not
+    allowlist "safe" keys: the file is refused.
+    """
+
+    problems: list[str] = []
+    for name in CANDIDATE_CONFIG_FILES:
+        if (root / name).exists():
+            problems.append(
+                f"the checkout under resolution carries `{name}`; that file "
+                "configures the Poetry that is about to resolve it — TLS "
+                "verification, binary-vs-source preference and credential "
+                "lookup are all settable there. The ref supplies the manifest, "
+                "never the configuration."
+            )
+    return problems
+
+
+# ── manifest-guard: the dependency traversal ────────────────────────────────
+
+
+def _walk_keys(node: Any, prefix: str = "") -> Iterator[str]:
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        yield path
+        yield from _walk_keys(value, path)
+
+
+def _is_traversed(path: str) -> bool:
+    if path in TRAVERSED_DEPENDENCY_TABLES:
+        return True
+    parts = path.split(".")
+    if parts[:3] == ["tool", "poetry", "group"] and len(parts) == 5:
+        return parts[4] == "dependencies"
+    # Keys *inside* a table we traverse are dependency names, not tables.
+    return any(
+        path.startswith(f"{table}.") for table in TRAVERSED_DEPENDENCY_TABLES
+    ) or (parts[:3] == ["tool", "poetry", "group"] and len(parts) > 5)
+
+
+def unrecognised_dependency_tables(manifest: dict[str, Any]) -> list[str]:
+    """Every `dependenc`-named table this module does not traverse.
+
+    The point is the NEXT form, not the current ones. Poetry has grown
+    `[tool.poetry.dev-dependencies]`, `[tool.poetry.group.<g>.dependencies]`,
+    PEP 621 `[project.dependencies]` / `[project.optional-dependencies]` and
+    PEP 735 `[dependency-groups]`, each at a different path; a guard that
+    enumerates only the paths it happened to know about lets the next one
+    through in silence. This one refuses a path it does not recognise.
+    """
+
+    problems: list[str] = []
+    for path in _walk_keys(manifest):
+        if "dependenc" not in path.rsplit(".", 1)[-1]:
+            continue
+        if _is_traversed(path):
+            continue
+        problems.append(
+            f"`{path}` names dependencies and is not a form this guard "
+            "traverses. Refusing rather than resolving something unexamined — "
+            "add it to TRAVERSED_DEPENDENCY_TABLES with a plant beside it."
+        )
+    return problems
+
+
+def _constraint_problems(where: str, spec: Any) -> list[str]:
+    """One Poetry constraint: a string, a table, or a list of tables."""
+
+    problems: list[str] = []
+    if isinstance(spec, list):
+        for index, item in enumerate(spec):
+            # Multiple constraints for one name. Poetry resolves EVERY entry,
+            # so a list is exactly as good a place to hide a `git` or `url`
+            # dependency as a bare table — and a traversal that only looked at
+            # tables walked straight past it.
+            problems += _constraint_problems(f"{where}[{index}]", item)
+        return problems
+    if isinstance(spec, str):
+        if not _PLAIN_CONSTRAINT.fullmatch(spec):
+            problems.append(
+                f"{where} is the constraint {spec!r}, which is not a plain "
+                "version constraint; a bare Poetry constraint may not carry a "
+                "scheme, an authority or a direct reference"
+            )
+        return problems
+    if not isinstance(spec, dict):
+        problems.append(
+            f"{where} is a {type(spec).__name__}, which is not a dependency "
+            "shape this guard recognises"
+        )
+        return problems
+
+    for key in sorted(set(spec) - RECOGNISED_CONSTRAINT_KEYS):
+        problems.append(
+            f"{where} carries the unrecognised key `{key}`; this guard refuses "
+            "a dependency form it does not understand rather than assuming it "
+            "is harmless"
+        )
+    for key in OFF_INDEX_DEPENDENCY_KEYS:
+        if key in spec:
+            problems.append(
+                f"{where} is a `{key}` dependency; resolving it reads or "
+                "executes something the index does not name"
+            )
+    source = spec.get("source")
+    if source is not None and source != INDEX_SOURCE_NAME:
+        problems.append(
+            f"{where} resolves from source {source!r}, which this job does not "
+            "hold a credential for"
+        )
+    return problems
+
+
+def _requirement_problems(where: str, requirement: Any) -> list[str]:
+    """One PEP 508 requirement string, as `[project]` and PEP 735 carry them."""
+
+    if isinstance(requirement, dict):
+        if set(requirement) == {"include-group"}:
+            return []
+        return [
+            f"{where} is a table with keys {sorted(requirement)}; the only "
+            "table PEP 735 defines here is `include-group`"
+        ]
+    if not isinstance(requirement, str):
+        return [
+            f"{where} is a {type(requirement).__name__}, not a PEP 508 "
+            "requirement string"
+        ]
+    if _DIRECT_REFERENCE.search(requirement) or "://" in requirement:
+        return [
+            f"{where} is the direct reference {requirement!r}; a PEP 508 URL "
+            "reaches outside the index exactly as a `url`, `file`, `path` or "
+            "`git` table does"
+        ]
+    return []
+
+
+def _poetry_constraint_tables(
+    manifest: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    poetry = manifest.get("tool", {}).get("poetry", {})
+    if not isinstance(poetry, dict):
+        return []
+    tables: list[tuple[str, dict[str, Any]]] = []
+    for key in ("dependencies", "dev-dependencies"):
+        table = poetry.get(key)
+        if isinstance(table, dict):
+            tables.append((f"tool.poetry.{key}", table))
+    groups = poetry.get("group", {})
+    if isinstance(groups, dict):
+        for name, group in sorted(groups.items()):
+            if not isinstance(group, dict):
+                continue
+            deps = group.get("dependencies")
+            if isinstance(deps, dict):
+                tables.append((f"tool.poetry.group.{name}.dependencies", deps))
+    return tables
+
+
+def _group_shape_problems(manifest: dict[str, Any]) -> list[str]:
+    poetry = manifest.get("tool", {}).get("poetry", {})
+    groups = poetry.get("group", {}) if isinstance(poetry, dict) else {}
+    problems: list[str] = []
+    if not isinstance(groups, dict):
+        return problems
+    for name, group in sorted(groups.items()):
+        if not isinstance(group, dict):
+            problems.append(f"tool.poetry.group.{name} is not a table")
+            continue
+        for key in sorted(set(group) - RECOGNISED_GROUP_KEYS):
+            problems.append(
+                f"tool.poetry.group.{name} carries the unrecognised key "
+                f"`{key}`; a group form this guard does not understand is "
+                "refused, not resolved"
+            )
+    return problems
+
+
+def dependency_problems(manifest: dict[str, Any]) -> list[str]:
+    """Every dependency, in every form Poetry accepts, judged."""
+
+    problems = unrecognised_dependency_tables(manifest)
+    problems += _group_shape_problems(manifest)
+
+    for table, deps in _poetry_constraint_tables(manifest):
+        for name, spec in sorted(deps.items()):
+            problems += _constraint_problems(f"{table}.{name}", spec)
+
+    project = manifest.get("project", {})
+    if isinstance(project, dict):
+        listed = project.get("dependencies")
+        if isinstance(listed, list):
+            for index, requirement in enumerate(listed):
+                problems += _requirement_problems(
+                    f"project.dependencies[{index}]", requirement
+                )
+        optional = project.get("optional-dependencies")
+        if isinstance(optional, dict):
+            for extra, requirements in sorted(optional.items()):
+                if not isinstance(requirements, list):
+                    problems.append(
+                        f"project.optional-dependencies.{extra} is not a list"
+                    )
+                    continue
+                for index, requirement in enumerate(requirements):
+                    problems += _requirement_problems(
+                        f"project.optional-dependencies.{extra}[{index}]",
+                        requirement,
+                    )
+
+    pep735 = manifest.get("dependency-groups", {})
+    if isinstance(pep735, dict):
+        for group, requirements in sorted(pep735.items()):
+            if not isinstance(requirements, list):
+                problems.append(f"dependency-groups.{group} is not a list")
+                continue
+            for index, requirement in enumerate(requirements):
+                problems += _requirement_problems(
+                    f"dependency-groups.{group}[{index}]", requirement
+                )
+    return problems
+
+
+def _dependency_declaration(manifest: dict[str, Any], name: str) -> Any:
+    for _table, deps in _poetry_constraint_tables(manifest):
+        if name in deps:
+            return deps[name]
+    return None
+
+
+def _kernel_declaration(manifest: dict[str, Any]) -> Any:
+    return _dependency_declaration(manifest, KERNEL)
+
+
+def _requirement_name(requirement: str) -> str | None:
+    """The project name leading a PEP 508 requirement string, or `None`."""
+
+    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
+    return match.group(1) if match else None
+
+
+def dependency_declarations(
+    manifest: dict[str, Any], name: str
+) -> list[tuple[str, Any]]:
+    """EVERY declaration of `name`, across every surface this file supports.
+
+    `_dependency_declaration` returns the FIRST match and stops. That made the
+    validated declaration and the rewritten one able to be DIFFERENT
+    declarations: a package named in both `tool.poetry.dependencies` and a
+    group, or in PEP 621 `project.dependencies`, passed the version check on
+    one while the textual rewrite moved another, leaving a stale pin behind in
+    a tree that then declared two versions of one package. So the declaration
+    is enumerated and a movement requires EXACTLY ONE.
+
+    The surfaces are the same set `TRAVERSED_DEPENDENCY_TABLES` names, so this
+    cannot see less than the guard that refuses unrecognised tables. Names are
+    compared NORMALISED, because `dotmac_deployment_control` and
+    `dotmac-deployment-control` are one project and a rewrite that missed the
+    other spelling would be the same defect wearing different punctuation.
+    """
+
+    wanted = _normalised(name)
+    found: list[tuple[str, Any]] = []
+
+    for where, table in _poetry_constraint_tables(manifest):
+        for key, value in table.items():
+            if _normalised(str(key)) == wanted:
+                found.append((f"{where}.{key}", value))
+
+    def _scan(where: str, requirements: Any) -> None:
+        if not isinstance(requirements, list):
+            return
+        for index, requirement in enumerate(requirements):
+            if not isinstance(requirement, str):
+                continue
+            declared = _requirement_name(requirement)
+            if declared is not None and _normalised(declared) == wanted:
+                found.append((f"{where}[{index}]", requirement))
+
+    project = manifest.get("project")
+    if isinstance(project, dict):
+        _scan("project.dependencies", project.get("dependencies"))
+        extras = project.get("optional-dependencies")
+        if isinstance(extras, dict):
+            for extra, requirements in sorted(extras.items()):
+                _scan(f"project.optional-dependencies.{extra}", requirements)
+
+    groups = manifest.get("dependency-groups")
+    if isinstance(groups, dict):
+        for group, requirements in sorted(groups.items()):
+            _scan(f"dependency-groups.{group}", requirements)
+
+    return found
+
+
+def declared_version_problems(
+    manifest: dict[str, Any], name: str, expected: str
+) -> list[str]:
+    """The manifest declares `name` EXACTLY ONCE, at `expected`, from the index.
+
+    Exactly once is load-bearing, not tidiness. Two declarations let the
+    version check and the textual rewrite address different ones, which is how
+    a dev-group pin stayed at the old version while the main pin moved.
+    """
+
+    declarations = dependency_declarations(manifest, name)
+    if not declarations:
+        return [f"no {name} dependency to resolve"]
+    if len(declarations) > 1:
+        return [
+            f"{name} is declared {len(declarations)} times, at "
+            + ", ".join(where for where, _ in sorted(declarations))
+            + ". A movement must name exactly one declaration, or the one that "
+            "is checked and the one that is rewritten can differ."
+        ]
+    declared = declarations[0][1]
+    if isinstance(declared, dict):
+        problems: list[str] = []
+        if declared.get("version") != expected:
+            problems.append(
+                f"{name} declares {declared.get('version')!r} after the edit, "
+                f"asked for {expected!r}"
+            )
+        if declared.get("source") != INDEX_SOURCE_NAME:
+            problems.append(
+                f"{name} resolves from {declared.get('source')!r}, not "
+                f"{INDEX_SOURCE_NAME!r}"
+            )
+        return problems
+    return [
+        f"{name} is declared as a bare constraint, so nothing binds it to the "
+        f"{INDEX_SOURCE_NAME!r} index"
+    ]
+
+
+def manifest_problems(
+    manifest: dict[str, Any],
+    kernel_version: str,
+    delta: DependencyDelta | None = None,
+) -> list[str]:
+    """Everything about this manifest that would misdirect the credential.
+
+    The threat is not only code execution. Poetry resolves `POETRY_HTTP_BASIC_
+    FORGEJO_PASSWORD` by the source NAME `forgejo`, and the ref under
+    resolution owns the URL that name points at. Changing the URL and keeping
+    the name is enough to have Poetry send the credential to another host, with
+    nothing untrusted ever executing.
+
+    PREMISE, and it is now enforced rather than asserted: this assembly uses
+    the legacy `[tool.poetry]` layout. A ref that ADDED a PEP 621 `[project]`
+    table alongside it — the documented enrichment shape, where
+    `project.dependencies` supplies dependencies and `tool.poetry.dependencies`
+    only annotates them — used to be unexamined, because the traversal read
+    `tool.poetry` and nothing else. `dependency_problems` reads every form.
+
+    `delta`, when supplied, additionally requires the manifest declares
+    `delta.name` at `delta.after` — the second manifest rewrite the workflow
+    performs, checked the same way the kernel's own edit is checked above.
+    """
+
+    problems: list[str] = []
+    sources = manifest.get("tool", {}).get("poetry", {}).get("source", [])
+    if not isinstance(sources, list):
+        sources = []
+
+    named = [entry for entry in sources if entry.get("name") == INDEX_SOURCE_NAME]
+    if len(named) != 1:
+        problems.append(
+            f"expected exactly one `[[tool.poetry.source]]` named "
+            f"{INDEX_SOURCE_NAME!r}, found {len(named)}"
+        )
+    for entry in named:
+        url = str(entry.get("url", ""))
+        if url != INDEX_URL:
+            problems.append(
+                f"source {INDEX_SOURCE_NAME!r} points at {url!r}, not "
+                f"{INDEX_URL!r} — the credential is keyed to the NAME, so this "
+                "would send it to that host"
+            )
+    for entry in sources:
+        name = str(entry.get("name", "?"))
+        if name == INDEX_SOURCE_NAME:
+            continue
+        problems.append(
+            f"unexpected `[[tool.poetry.source]]` {name!r} at "
+            f"{entry.get('url', '?')!r}; this job resolves against one index"
+        )
+
+    problems += dependency_problems(manifest)
+
+    if "requires-plugins" in manifest.get("tool", {}).get("poetry", {}):
+        problems.append(
+            "`tool.poetry.requires-plugins` is declared; Poetry installs and "
+            "imports plugins before it resolves, which is arbitrary code in "
+            "the step that holds the credential"
+        )
+
+    kernel = _kernel_declaration(manifest)
+    if kernel is None:
+        problems.append(f"no {KERNEL} dependency to resolve")
+    elif isinstance(kernel, dict):
+        if kernel.get("version") != kernel_version:
+            problems.append(
+                f"{KERNEL} declares {kernel.get('version')!r} after the edit, "
+                f"asked for {kernel_version!r}"
+            )
+        if kernel.get("source") != INDEX_SOURCE_NAME:
+            problems.append(
+                f"{KERNEL} resolves from {kernel.get('source')!r}, not "
+                f"{INDEX_SOURCE_NAME!r}"
+            )
+    else:
+        problems.append(
+            f"{KERNEL} is declared as a bare constraint, so nothing binds it "
+            f"to the {INDEX_SOURCE_NAME!r} index"
+        )
+    if delta is not None:
+        problems += declared_version_problems(manifest, delta.name, delta.after)
+    return problems
+
+
+# ── the index is data: every link it supplies is validated ──────────────────
+
+
+class _Links(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        for key, value in attrs:
+            if key == "href" and value:
+                self.hrefs.append(value)
+
+
+def index_links(page: str) -> list[str]:
+    parser = _Links()
+    parser.feed(page)
+    return parser.hrefs
+
+
+def approved_artifact_url(href: str, page_url: str) -> str:
+    """Resolve an index-supplied href, or refuse it.
+
+    A simple index page is data the INDEX controls, and `curl --netrc` offers
+    the credential to whatever host it is pointed at whose name appears in the
+    netrc file. So the destination is validated before the transfer, not after:
+    exactly `https`, exactly the approved authority, under exactly the approved
+    path prefix, with no userinfo and no traversal segment.
+
+    A RELATIVE href is normal on a simple index, so `..` is resolved rather
+    than refused on sight — and then the RESOLVED path is required to be under
+    the approved prefix, which is what a traversal chain fails. Refusing the
+    raw `..` instead would have refused a legitimate index page while proving
+    nothing extra.
+
+    REDIRECT POLICY: redirects are not followed at all — see `curl_argv`, which
+    carries no `--location`, and `transfer_problems`, which refuses any status
+    but 200. There is therefore no second hop to re-validate. This function is
+    still the validator a hop would have to pass, and the test suite drives it
+    with a redirect target to say so.
+    """
+
+    if not href.strip():
+        raise Refusal("the index page carries an empty href")
+    resolved = urllib.parse.urljoin(page_url, href.split("#", 1)[0])
+    parts = urllib.parse.urlsplit(resolved)
+    if parts.scheme != "https":
+        raise Refusal(
+            f"index link {href!r} resolves to {parts.scheme or '(none)'}://, "
+            "not https; the credential is never offered over a scheme that "
+            "does not authenticate the server"
+        )
+    if "@" in parts.netloc:
+        raise Refusal(
+            f"index link {href!r} carries userinfo in its authority, which is "
+            "both a credential and a host-spoofing surface"
+        )
+    approved = urllib.parse.urlsplit(ARTIFACT_ORIGIN)
+    authority = approved.netloc.lower()
+    if parts.netloc.lower() not in {authority, f"{authority}:443"}:
+        raise Refusal(
+            f"index link {href!r} resolves to origin {parts.netloc!r}, not "
+            f"{approved.netloc!r}; refusing to point an authenticated transfer "
+            "at a host the index chose"
+        )
+    if ".." in parts.path.split("/"):
+        raise Refusal(f"index link {href!r} still traverses after resolution")
+    if not parts.path.startswith(ARTIFACT_PATH_PREFIX):
+        raise Refusal(
+            f"index link {href!r} resolves to path {parts.path!r}, which is "
+            f"not under {ARTIFACT_PATH_PREFIX!r} — a `..` chain that walks out "
+            "of the package directory lands here"
+        )
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def curl_argv(url: str, target: Path) -> list[str]:
+    """The transfer, stated once.
+
+    No `--location`. `--proto '=https'` means the transfer will not begin over
+    any other scheme even if something upstream rewrote the URL, and
+    `--max-redirs 0` declares the same intention a second way. `-w` makes the
+    status code observable so a 3xx cannot be mistaken for a download.
+
+    BOUNDED. `--max-filesize` refuses a transfer whose DECLARED length is over
+    the limit, and `--max-time` refuses one that never ends. Neither is
+    sufficient alone: `--max-filesize` believes `Content-Length`, so a chunked
+    response that declares nothing slips past it. The bytes on disk are
+    therefore measured again after the transfer, by `fetch`, which is the check
+    that does not depend on the server being honest.
+    """
+
+    return [
+        "curl",
+        "--netrc",
+        "--proto",
+        "=https",
+        "--max-redirs",
+        "0",
+        "--max-filesize",
+        str(ARTIFACT_MAX_BYTES),
+        "--max-time",
+        str(ARTIFACT_MAX_SECONDS),
+        "--silent",
+        "--show-error",
+        "-w",
+        "%{http_code}",
+        "-o",
+        str(target),
+        url,
+    ]
+
+
+def transfer_problems(url: str, status: str) -> list[str]:
+    """Anything but a 200 refuses, and a 3xx says why in its own words."""
+
+    if status == "200":
+        return []
+    if status.startswith("3"):
+        return [
+            f"{url} answered {status}: a redirect. Redirects are NOT followed "
+            "here — a followed redirect is a second destination the index "
+            "chose, and `curl --netrc` would offer the credential to it if its "
+            "host matched the netrc entry. Refusing."
+        ]
+    return [f"{url} answered {status}, not 200"]
+
+
+@dataclass(frozen=True)
+class CentralDirectory:
+    """What an archive's own end records CLAIM about its central directory."""
+
+    size: int
+    offset: int
+    entries: int
+    zip64: bool
+
+
+def zip_central_directory(path: Path) -> CentralDirectory:
+    """Validate and return the end records' claims, or refuse.
+
+    Reading only the directory SIZE was not enough. These records are the
+    archive's self-description and everything downstream trusts them, so the
+    framing is checked too:
+
+    * the EOCD comment length must account for EXACTLY the bytes after it — a
+      short count leaves trailing bytes a reader ignores, and a long one points
+      past the end;
+    * single disk only. `this disk`, `disk with the central directory` and
+      `entries on this disk` must agree with a one-disk archive; a multi-disk
+      claim is not something this gate resolves;
+    * the directory must LIE INSIDE the file, before the EOCD, and
+      `offset + size` must not run past where the directory has to end;
+    * the entry count must be consistent between the two count fields, and is
+      compared with what `ZipFile` actually enumerates by the caller;
+    * ZIP64 is only believed through its LOCATOR: the `PK\x06\x07` locator must
+      be present, point at an offset inside the file, and that offset must
+      actually hold a `PK\x06\x06` record. A ZIP64 record found by scanning the
+      tail without its locator is not a linked record.
+    """
+
+    size = path.stat().st_size
+    if size < 22:
+        raise Refusal(f"{path.name} is {size} bytes, too short to hold an EOCD")
+    window = min(size, 22 + 0xFFFF + 20)
+    with path.open("rb") as handle:
+        handle.seek(size - window)
+        tail = handle.read(window)
+    base = size - len(tail)
+
+    end = tail.rfind(b"PK\x05\x06")
+    if end < 0:
+        raise Refusal(f"{path.name} has no End Of Central Directory record")
+    if end + 22 > len(tail):
+        raise Refusal(f"{path.name} has a truncated End Of Central Directory record")
+
+    this_disk = int.from_bytes(tail[end + 4 : end + 6], "little")
+    cd_disk = int.from_bytes(tail[end + 6 : end + 8], "little")
+    here = int.from_bytes(tail[end + 8 : end + 10], "little")
+    total = int.from_bytes(tail[end + 10 : end + 12], "little")
+    declared = int.from_bytes(tail[end + 12 : end + 16], "little")
+    offset = int.from_bytes(tail[end + 16 : end + 20], "little")
+    comment = int.from_bytes(tail[end + 20 : end + 22], "little")
+
+    trailing = len(tail) - (end + 22)
+    if comment != trailing:
+        raise Refusal(
+            f"{path.name} declares a {comment}-byte EOCD comment but carries "
+            f"{trailing} bytes after the record; the framing does not close"
+        )
+
+    saturated = 0xFFFF, 0xFFFFFFFF
+    zip64 = (
+        declared == saturated[1]
+        or offset == saturated[1]
+        or total == saturated[0]
+        or here == saturated[0]
+    )
+    zip64_span: tuple[int, int] | None = None
+    if zip64:
+        # ADJACENCY. The locator must sit IMMEDIATELY before the EOCD -- the
+        # format puts it there, and `rfind` anywhere in the tail would accept a
+        # locator buried in member data or in the archive comment, which is an
+        # attacker-supplied region.
+        locator_at = end - 20
+        if locator_at < 0 or tail[locator_at : locator_at + 4] != b"PK\x06\x07":
+            raise Refusal(
+                f"{path.name} saturates a 32-bit end-record field but carries no "
+                "ZIP64 EOCD locator immediately before its EOCD; an unlinked or "
+                "misplaced record is not evidence"
+            )
+        locator_disks = int.from_bytes(
+            tail[locator_at + 16 : locator_at + 20], "little"
+        )
+        locator_disk = int.from_bytes(tail[locator_at + 4 : locator_at + 8], "little")
+        if locator_disk != 0 or locator_disks != 1:
+            raise Refusal(
+                f"{path.name}'s ZIP64 locator names disk {locator_disk} of "
+                f"{locator_disks}; this gate reads single-disk archives only"
+            )
+        record_offset = int.from_bytes(tail[locator_at + 8 : locator_at + 16], "little")
+        if not 0 <= record_offset <= size - 56:
+            raise Refusal(
+                f"{path.name}'s ZIP64 locator points at offset {record_offset}, "
+                "which is not inside this file"
+            )
+        if record_offset < base:
+            with path.open("rb") as handle:
+                handle.seek(record_offset)
+                record = handle.read(56)
+        else:
+            record = tail[record_offset - base : record_offset - base + 56]
+        if len(record) < 56 or not record.startswith(b"PK\x06\x06"):
+            raise Refusal(
+                f"{path.name}'s ZIP64 locator points at {record_offset}, which "
+                "does not hold a complete ZIP64 End Of Central Directory record"
+            )
+        # RECORD LENGTH. The record declares its own remaining size; it must be
+        # at least the fixed 44 bytes that follow the field, and must not run
+        # past the locator that points at it.
+        record_size = int.from_bytes(record[4:12], "little")
+        if record_size < 44:
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record declares {record_size} bytes, "
+                "short of its own fixed 44-byte remainder"
+            )
+        record_end = record_offset + 12 + record_size
+        locator_offset = base + locator_at
+        if record_end != locator_offset:
+            # EXACT, not merely "not past". Bytes between the record's declared
+            # end and its locator are a region no reader accounts for, and the
+            # record's own length field is what would have to be trusted to skip
+            # them. The format puts the locator immediately after the record.
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record declares it ends at "
+                f"{record_end} but its locator begins at {locator_offset}; the "
+                "two must be adjacent with nothing between them"
+            )
+        record_disk = int.from_bytes(record[16:20], "little")
+        record_cd_disk = int.from_bytes(record[20:24], "little")
+        if record_disk != 0 or record_cd_disk != 0:
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record claims disk {record_disk} with "
+                f"its directory on disk {record_cd_disk}; single disk only"
+            )
+        here = int.from_bytes(record[24:32], "little")
+        total = int.from_bytes(record[32:40], "little")
+        declared = int.from_bytes(record[40:48], "little")
+        offset = int.from_bytes(record[48:56], "little")
+        zip64_span = (record_offset, base + locator_at + 20)
+
+    if this_disk != 0 or cd_disk != 0:
+        raise Refusal(
+            f"{path.name} claims disk {this_disk} with its directory on disk "
+            f"{cd_disk}; this gate reads single-disk archives only"
+        )
+    if here != total:
+        raise Refusal(
+            f"{path.name} declares {here} directory entries on this disk but "
+            f"{total} in total; a single-disk archive must agree with itself"
+        )
+    # The directory must end before the FIRST end record, whichever that is: the
+    # ZIP64 record and its locator sit before the EOCD, so with ZIP64 present
+    # the earliest boundary is the ZIP64 record, not the EOCD.
+    directory_end = base + end
+    if zip64_span is not None:
+        directory_end = min(directory_end, zip64_span[0])
+    if offset < 0 or declared < 0:
+        raise Refusal(f"{path.name} declares a negative directory offset or size")
+    if offset + declared > size:
+        raise Refusal(
+            f"{path.name} places its {declared}-byte central directory at "
+            f"{offset}, which runs past the {size}-byte file"
+        )
+    if offset + declared > directory_end:
+        raise Refusal(
+            f"{path.name} places its {declared}-byte central directory at "
+            f"{offset}, overlapping its own end records, which begin at "
+            f"{directory_end}"
+        )
+    return CentralDirectory(size=declared, offset=offset, entries=total, zip64=zip64)
+
+
+def zip_central_directory_bytes(path: Path) -> int:
+    """The validated directory size, for callers that want only the bound."""
+
+    return zip_central_directory(path).size
+
+
+def publish_atomically(staged: Path, target: Path) -> None:
+    """Put `staged` at `target`, REFUSING if anything is already there.
+
+    `Path.replace` is the wrong primitive: it silently overwrites. A second
+    transfer for the same filename, a stale file from an earlier run, or a
+    symlink an attacker planted at the destination would all be replaced
+    without a word, and the bundle would then contain bytes nobody verified
+    under a name something else had already claimed.
+
+    `os.link` is the no-overwrite primitive: it raises `FileExistsError` if the
+    destination exists, and on one filesystem it is atomic. The staged file is
+    then unlinked, so the inode ends up at exactly one path.
+    """
+
+    if target.is_symlink() or target.exists():
+        raise Refusal(
+            f"{target.name} already exists at the destination; refusing to "
+            "overwrite a file this run did not create"
+        )
+    try:
+        os.link(staged, target)
+    except FileExistsError as exc:
+        raise Refusal(
+            f"{target.name} appeared at the destination while this transfer was "
+            "in flight; refusing to overwrite it"
+        ) from exc
+    except OSError as exc:
+        raise Refusal(f"{target.name} could not be published: {exc}") from exc
+
+
+def fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
+    """Download `url` to `target` atomically, or refuse. Returns the digest.
+
+    The bytes land in a PRIVATE, RANDOMLY NAMED staging directory, created mode
+    0700 beside the destination, and `target` is not touched until every check
+    has passed. A predictable `target.part` was the wrong staging name: a stale
+    one from an earlier run, or a symlink planted at that path, would have been
+    written through, and two transfers for one filename would have raced on it.
+    A fresh directory per call cannot collide and cannot be pre-created by
+    anything that does not already control the parent.
+
+    The staging directory is removed in `finally`, so every exit removes it --
+    the two bounds that ABORT a transfer, a bad status, a size overage, a digest
+    mismatch, and anything unforeseen.
+
+    Status, then size, then DIGEST, then publication -- and publication REFUSES
+    rather than overwriting. The digest is computed over the complete bytes and
+    returned, so the value recorded downstream is the value that was verified
+    rather than a second read of the file. `expected_sha256` is compared when a
+    caller has an independent expectation; the INDEX's advertised `#sha256=` is
+    deliberately not that expectation, being stripped in
+    `approved_artifact_url`, because comparing the index against itself proves
+    nothing.
+    """
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=target.parent))
+    try:
+        staging.chmod(0o700)
+        staged = staging / target.name
+        # S603: the argument vector is built by `curl_argv` from a fixed list,
+        # and `url` has already been through `approved_artifact_url` — https,
+        # the approved authority, under the approved path prefix. No shell.
+        completed = subprocess.run(  # noqa: S603
+            curl_argv(url, staged),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise Refusal(
+                f"curl failed for {url} (exit {completed.returncode}): "
+                f"{completed.stderr.strip()}"
+            )
+        problems = transfer_problems(url, completed.stdout.strip())
+        if problems:
+            raise Refusal(problems[0])
+        if staged.is_symlink() or not staged.is_file():
+            raise Refusal(f"{url} reported success but left no regular file in staging")
+        landed = staged.stat().st_size
+        if landed > ARTIFACT_MAX_BYTES:
+            raise Refusal(
+                f"{url} delivered {landed} bytes, over the {ARTIFACT_MAX_BYTES} "
+                "limit; the declared-length bound did not catch it, so the "
+                "bytes were measured"
+            )
+        digest = sha256_of(staged)
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise Refusal(
+                f"{url} hashes to sha256:{digest}, not the expected "
+                f"sha256:{expected_sha256}"
+            )
+        publish_atomically(staged, target)
+    except BaseException:
+        # The refusal that brought us here is what matters, so removal is
+        # BEST EFFORT on this path and this function does not claim it
+        # succeeded. Nothing was published, so there is nothing to roll back.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    # Published. Cleanup is now part of the TRANSACTION, not a `finally`: a
+    # cleanup failure after `os.link` used to let an untyped `PermissionError`
+    # escape while the artifact sat at its final path and no digest was ever
+    # returned -- and because publication is no-overwrite, the retry then
+    # wedged on a destination that already existed.
+    try:
+        shutil.rmtree(staging)
+    except OSError as cleanup_failure:
+        try:
+            target.unlink()
+        except OSError as rollback_failure:
+            raise PublishedArtifactUnrecorded(
+                f"{target} was published, its staging directory {staging} could "
+                f"not be removed ({cleanup_failure}), and the published artifact "
+                f"could not be rolled back either ({rollback_failure}). The "
+                "bundle is NOT usable and a retry cannot overwrite the "
+                "destination; this needs a human."
+            ) from rollback_failure
+        raise Refusal(
+            f"{target.name} was published but its staging directory {staging} "
+            f"could not be removed ({cleanup_failure}); the publication was "
+            "rolled back so this transfer can be retried"
+        ) from cleanup_failure
+    return digest
+
+
+# ── acquire: a closed bundle, downloaded once, by the only job with a key ───
+
+
+def _normalised(name: str) -> str:
+    return re.sub(r"[-_.]+", "_", name).lower()
+
+
+def artifact_belongs_to(filename: str, package: str, version: str) -> bool:
+    prefix = f"{_normalised(package)}-{version}"
+    stem = _normalised(filename.split("-")[0]) if "-" in filename else ""
+    if stem and stem != _normalised(package):
+        return False
+    return filename.lower().startswith(prefix.lower()) and (
+        filename[len(prefix) : len(prefix) + 1] in {"-", "."}
+    )
+
+
+def acquisition_plan(
+    manifest: dict[str, Any], lock: dict[str, Any], kernel_version: str
+) -> dict[str, str]:
+    """Which private packages the bundle must CLOSE over, and at which version.
+
+    The bundle is the resolver's only view of the private index, so it has to
+    be closed before resolution starts. It is closed the only way it can be:
+    every package the manifest binds to the private source, at the exact
+    version the manifest pins, plus every package the PRE-resolution lock
+    already resolved from that source (a transitive private dependency the
+    manifest never names), plus `dotmac-kernel` at the version being moved to.
+
+    A private dependency that is not an EXACT pin is refused. A range cannot be
+    mirrored without deciding what it resolves to, and deciding that here would
+    be this module inventing the answer the resolver exists to produce.
+    """
+
+    plan: dict[str, str] = {}
+    for table, deps in _poetry_constraint_tables(manifest):
+        for name, spec in sorted(deps.items()):
+            if not isinstance(spec, dict):
+                continue
+            if spec.get("source") != INDEX_SOURCE_NAME:
+                continue
+            version = spec.get("version")
+            if not isinstance(version, str) or not _EXACT_VERSION.fullmatch(version):
+                raise Refusal(
+                    f"{table}.{name} resolves from {INDEX_SOURCE_NAME!r} with "
+                    f"the constraint {version!r}. The offline bundle can only "
+                    "be closed around exact pins; a range would need this "
+                    "module to decide what it resolves to."
+                )
+            plan[name] = version
+
+    for entry in lock.get("package", []):
+        source = entry.get("source", {})
+        if not isinstance(source, dict):
+            continue
+        if source.get("reference") != INDEX_SOURCE_NAME:
+            continue
+        name = str(entry.get("name"))
+        plan.setdefault(name, str(entry.get("version")))
+
+    if KERNEL not in plan:
+        raise Refusal(f"no {KERNEL} dependency bound to {INDEX_SOURCE_NAME!r}")
+    plan[KERNEL] = kernel_version
+    return plan
+
+
+def kernel_artifact_names(version: str) -> set[str]:
+    return {
+        f"dotmac_kernel-{version}-py3-none-any.whl",
+        f"dotmac_kernel-{version}.tar.gz",
+    }
+
+
+# ── wheel-only: the resolver is never handed something it must build ────────
+
+#: A wheel filename as POETRY parses one. This is `poetry.utils.patterns
+#: .wheel_file_re` from 2.4.1 — the version `.github/bootstrap/
+#: poetry-requirements.txt` pins — copied deliberately rather than imported,
+#: because this module runs in `acquire`, a job that installs no Poetry at all.
+#:
+#: NOT `endswith(".whl")`. `HTTPRepository._get_info_from_links` sorts links
+#: into wheels and sdists by extension, but then reads each wheel with THIS
+#: pattern and `continue`s past any filename it cannot parse. A release whose
+#: only ".whl" files are unparseable therefore leaves all four wheel slots
+#: empty and falls through to the sdist branch exactly as if it had offered no
+#: wheel at all — so a check on the extension would admit precisely the case
+#: that still builds.
+_WHEEL_FILENAME = re.compile(
+    r"^(?P<namever>(?P<name>.+?)-(?P<ver>\d[^-]*))"
+    r"(-(?P<build>\d[^-]*))?"
+    r"-(?P<pyver>[^-]+)"
+    r"-(?P<abi>[^-]+)"
+    r"-(?P<plat>[^-]+)"
+    r"\.whl$"
+)
+
+
+def parseable_wheels(filenames: Iterable[str]) -> list[str]:
+    """The subset of these filenames Poetry would accept as a metadata source."""
+
+    return sorted(name for name in filenames if _WHEEL_FILENAME.match(name))
+
+
+def wheel_only_problems(
+    offers: Iterable[tuple[str, str, Iterable[str]]],
+) -> list[str]:
+    """Every release here offers a wheel, so no build backend can run.
+
+    THE MECHANISM, stated as the condition it actually is. Poetry decides where
+    a release's metadata comes from in `HTTPRepository._get_info_from_links`:
+    if the release offers at least one parseable wheel it returns from a wheel
+    branch, always, and `_get_info_from_sdist` is unreachable. Only when no
+    parseable wheel is present does it reach
+    `_get_info_from_metadata(sdists[0]) or _get_info_from_sdist(sdists[0])`,
+    and `_get_info_from_sdist` is `PackageInfo.from_sdist`, which unpacks the
+    archive and — when its PKG-INFO carries no `Requires-Dist` — calls
+    `get_pep517_metadata`, which runs the project's own build backend in a
+    subprocess. That is arbitrary published code executing inside the resolver.
+
+    So "a wheel is offered" is not a preference or a flag. It is the exact
+    predicate under which that code path cannot be taken, and this refuses
+    every release that fails it, BY NAME, rather than letting the resolver
+    discover the answer by running the thing.
+
+    There is no Poetry setting that does this. `installer.no-binary` and
+    `installer.only-binary` are the INSTALLER's link chooser and have no
+    bearing on `poetry lock` — see `CANDIDATE_CONFIG_FILES`.
+
+    WHAT THIS IS CONSERVATIVE ABOUT, and it errs towards refusing:
+
+    * A sdist-only release whose index serves PEP 658 core metadata would be
+      read by `_get_info_from_metadata` without any build. This refuses it
+      anyway. Admitting it would mean trusting an index-supplied `.metadata`
+      link to exist at resolution time, which is a promise about a remote
+      server, not a fact about these files.
+
+    WHAT IT DOES NOT COVER, which is a smaller set but not empty:
+
+    * A YANKED wheel. `_get_info_from_links` drops yanked links before it
+      classifies them, and a lock's `files` list does not record yanked state.
+      A release whose only wheel is yanked passes this and still builds. The
+      answer is not available from the artifacts this workflow holds.
+    * A candidate VERSION the solver considers and discards. Metadata is
+      fetched for candidates that never reach a lock, and no check over the
+      locks before and after can see one. That region is unmonitored, not
+      covered — `drift_problems` refuses any package that appears or
+      disappears, so the SET is pinned, but the versions explored inside it
+      are not.
+    """
+
+    problems: list[str] = []
+    for name, version, filenames in offers:
+        files = sorted(filenames)
+        if not files:
+            problems.append(
+                f"{name} {version} offers no published files at all. Nothing "
+                "here can say where its metadata would come from, and a "
+                "release with no files is not an index release — it is a "
+                "directory, a git clone or a URL, every one of which resolves "
+                "by running a build backend."
+            )
+        elif not parseable_wheels(files):
+            problems.append(
+                f"{name} {version} offers {files} and not one usable wheel "
+                "among them. Resolution would have to take its metadata from "
+                "the source distribution, which unpacks the archive and, when "
+                "PKG-INFO carries no `Requires-Dist`, EXECUTES that project's "
+                "PEP 517 build backend inside this job. A dependency with no "
+                "usable wheel is refused; there is no fallback that builds it."
+            )
+    return problems
+
+
+def lock_wheel_problems(lock: dict[str, Any]) -> list[str]:
+    """`wheel_only_problems` over every package a lock names.
+
+    Run on the PRE-resolution lock this is a gate: it refuses before Poetry
+    starts, which is the only position from which refusing prevents anything.
+    Run again on the produced lock it is the closing observation, and together
+    with `drift_problems` — which refuses any package that appeared or
+    disappeared — the two describe the same set of packages.
+    """
+
+    return wheel_only_problems(
+        (
+            str(entry.get("name")),
+            str(entry.get("version")),
+            [str(item.get("file")) for item in entry.get("files", [])],
+        )
+        for entry in lock.get("package", [])
+    )
+
+
+def acquire(
+    plan: dict[str, str],
+    out: Path,
+    *,
+    expected_artifacts: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Download the closed bundle and lay it out as a local PEP 503 index.
+
+    Runs in the ONLY job that holds the credential, and runs no Poetry and no
+    package code: `curl`, `sha256`, and writing HTML. Returns filename → digest.
+    """
+
+    if expected_artifacts is not None:
+        if out.exists() or out.is_symlink():
+            raise Refusal("exact acquisition requires a fresh destination")
+        if not expected_artifacts or any(
+            not isinstance(name, str)
+            or Path(name).name != name
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or sum(
+                artifact_belongs_to(name, package, version)
+                for package, version in plan.items()
+            )
+            != 1
+            for name, digest in expected_artifacts.items()
+        ):
+            raise Refusal("unusable exact artifact expectations")
+
+    files_dir = out / "files"
+    simple_dir = out / "simple"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    digests: dict[str, str] = {}
+
+    for package, version in sorted(plan.items()):
+        page = out / "pages" / f"{package}.html"
+        fetch(f"{INDEX_URL}/{package}/", page)
+        wanted: dict[str, str] = {}
+        for href in index_links(page.read_text(encoding="utf-8", errors="replace")):
+            url = approved_artifact_url(href, f"{INDEX_URL}/{package}/")
+            filename = url.rsplit("/", 1)[-1]
+            if artifact_belongs_to(filename, package, version):
+                if expected_artifacts is not None and filename in wanted:
+                    raise Refusal("duplicate artifact entry on the private index")
+                wanted[filename] = url
+        if expected_artifacts is not None:
+            expected_names = {
+                name
+                for name in expected_artifacts
+                if artifact_belongs_to(name, package, version)
+            }
+            if set(wanted) != expected_names:
+                raise Refusal("private index artifact set disagrees with the lock")
+        if not wanted:
+            raise Refusal(
+                f"{package} {version} is not published on the index. This is a "
+                "refusal in its own right: a resolver error later would report "
+                "it as a lock problem rather than as 'it was never published', "
+                "which is the fact that matters."
+            )
+        offered = wheel_only_problems([(package, version, list(wanted))])
+        if offered:
+            # THE SDIST IS STILL ACQUIRED AND STILL HASHED. What this refuses
+            # is a private release that offers the resolver NOTHING BUT an
+            # sdist — because the mirror page written below is the resolver's
+            # whole view of this package, and a page with no wheel on it is a
+            # build. A page carrying both is not: the wheel's presence is what
+            # makes the sdist unreachable as a metadata source, which is why
+            # both links stay and the lock keeps both hashes.
+            raise Refusal(offered[0])
+        if package == KERNEL:
+            expected = kernel_artifact_names(version)
+            if set(wanted) != expected:
+                raise Refusal(
+                    f"the index publishes {sorted(wanted)} for {KERNEL} "
+                    f"{version}; this workflow pins the pair {sorted(expected)}"
+                )
+        for filename, url in sorted(wanted.items()):
+            target = files_dir / filename
+            # The digest RETURNED by `fetch` is the one it verified before it
+            # renamed the file into place. Re-reading the file here would record
+            # a second measurement of bytes that could, in principle, differ
+            # from the ones that passed the size and digest checks.
+            if expected_artifacts is None:
+                digests[filename] = fetch(url, target)
+            else:
+                digests[filename] = fetch(
+                    url, target, expected_sha256=expected_artifacts[filename]
+                )
+                if digests[filename] != expected_artifacts[filename]:
+                    raise Refusal("acquired digest disagrees with the lock")
+
+        page_dir = simple_dir / package
+        page_dir.mkdir(parents=True, exist_ok=True)
+        rows = "\n".join(
+            f'    <a href="../../files/{name}#sha256={digests[name]}">{name}</a><br>'
+            for name in sorted(wanted)
+        )
+        page_dir.joinpath("index.html").write_text(
+            f"<!DOCTYPE html>\n<html><body>\n{rows}\n</body></html>\n",
+            encoding="utf-8",
+        )
+
+    if expected_artifacts is not None:
+        actual = list(files_dir.iterdir())
+        if (
+            digests != expected_artifacts
+            or {path.name for path in actual} != set(expected_artifacts)
+            or any(path.is_symlink() or not path.is_file() for path in actual)
+            or any(
+                sha256_hex(path.read_bytes()) != expected_artifacts[path.name]
+                for path in actual
+            )
+        ):
+            raise Refusal("acquired files do not close over the exact lock set")
+
+    (out / "digests.json").write_text(
+        json.dumps(digests, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return digests
+
+
+# ── the mirror swap, and putting the real URL back ──────────────────────────
+
+
+def point_at_mirror(manifest_text: str, mirror_url: str) -> str:
+    """Aim the private source at the local bundle for a SECRET-FREE resolve.
+
+    The private index needs a credential, so a resolver job that holds none
+    cannot reach it — the bundle is not an optimisation, it is the only way the
+    split exists. `manifest-guard` has already proven the source URL is the
+    real index before this runs, so what is being replaced is known.
+    """
+
+    if manifest_text.count(INDEX_URL) != 1:
+        raise Refusal(
+            f"expected exactly one {INDEX_URL!r} in the manifest, found "
+            f"{manifest_text.count(INDEX_URL)}"
+        )
+    return manifest_text.replace(INDEX_URL, mirror_url)
+
+
+def restore_index_url(text: str, mirror_url: str, *, required: bool = True) -> str:
+    """Put the real index URL back wherever the mirror URL reached.
+
+    The manifest that leaves must be the manifest a consumer applies, and the
+    lock's `[package.source]` entries must name the index the packages actually
+    came from. The mirror URL is an implementation detail of one job and must
+    not survive into the artifact.
+    """
+
+    if required and mirror_url not in text:
+        raise Refusal(f"{mirror_url!r} does not appear; nothing to restore")
+    return text.replace(mirror_url, INDEX_URL)
+
+
+def set_content_hash(lock_text: str, digest: str) -> str:
+    edited, count = _CONTENT_HASH_LINE.subn(rf"\g<1>{digest}\g<2>", lock_text)
+    if count != 1:
+        raise Refusal(
+            f"expected exactly one `content-hash` line in the lock, matched " f"{count}"
+        )
+    return edited
+
+
+def poetry_content_hash(manifest: Path, lock: Path) -> str:
+    """Poetry's OWN content hash for a manifest, computed offline.
+
+    Restoring the source URL changes the manifest, and `source` is one of the
+    keys Poetry's `Locker` hashes — so the hash the offline resolution wrote
+    describes the mirror manifest, not the one that leaves. This asks Poetry's
+    own implementation for the right value rather than re-implementing an
+    algorithm that would then be free to drift from it.
+
+    It is a private attribute, so it is checked rather than trusted, and the
+    workflow runs `poetry check --lock` immediately afterwards — that command
+    is offline, is Poetry's own answer to "does this lock describe this
+    manifest", and is what actually proves this step.
+    """
+
+    try:
+        from poetry.packages.locker import Locker
+    except ImportError as error:  # pragma: no cover - environment-dependent
+        raise Refusal(
+            "Poetry is not importable, so its content hash cannot be asked "
+            f"for: {error}"
+        ) from error
+    locker = Locker(lock, _load_toml(manifest))
+    digest = getattr(locker, "_content_hash", None)
+    if not isinstance(digest, str) or not digest:
+        raise Refusal(
+            "Poetry's Locker did not yield a content hash; its internals have "
+            "moved and this step must be rewritten against the new shape "
+            "rather than guessed at"
+        )
+    return digest
+
+
+# ── verify: the lock's hashes are the index's bytes ─────────────────────────
+
+
+def hash_problems(
+    lock: dict[str, Any], digests: dict[str, str], kernel_version: str
+) -> list[str]:
+    """Every private entry's files, against the bytes that were downloaded.
+
+    The bytes came off the index in the acquisition job, were hashed there, and
+    travelled to the resolver as files. Comparing the lock with the index's own
+    ADVERTISED hashes would compare the index with itself; this compares the
+    lock with what those bytes actually hash to.
+    """
+
+    problems: list[str] = []
+    kernel = [e for e in lock.get("package", []) if e.get("name") == KERNEL]
+    if len(kernel) != 1:
+        return [f"the lock carries {len(kernel)} {KERNEL} entries, expected one"]
+    if kernel[0].get("version") != kernel_version:
+        problems.append(
+            f"lock resolved {kernel[0].get('version')!r}, asked for "
+            f"{kernel_version!r}"
+        )
+    expected = kernel_artifact_names(kernel_version)
+    locked = {f["file"]: f["hash"] for f in kernel[0].get("files", [])}
+    if set(locked) != expected:
+        problems.append(
+            f"the {KERNEL} entry names {sorted(locked)}; the pair this "
+            f"workflow verifies is {sorted(expected)}"
+        )
+
+    for entry in lock.get("package", []):
+        source = entry.get("source", {})
+        if not isinstance(source, dict):
+            continue
+        if source.get("reference") != INDEX_SOURCE_NAME:
+            continue
+        for item in entry.get("files", []):
+            name, digest = item.get("file"), item.get("hash")
+            if name not in digests:
+                problems.append(
+                    f"{entry.get('name')}: the lock names {name!r}, which is "
+                    "not a file this run downloaded from the index"
+                )
+                continue
+            if digest != f"sha256:{digests[name]}":
+                problems.append(
+                    f"{name}: lock says {digest!r}, the published bytes hash "
+                    f"to sha256:{digests[name]}"
+                )
+    return problems
+
+
+def acquired_matches_lock(
+    acquired: dict[str, str], lock: dict[str, Any], name: str, version: str
+) -> list[str]:
+    """The bytes acquired for `name`/`version` and the lock's `files` for it
+    name exactly the same artifacts, with identical hashes.
+
+    Two distinct defects, checked in both directions: a real artifact that was
+    acquired but that the lock never names (the resolver had bytes nothing
+    downstream can verify), and a `files` entry with no acquired artifact
+    behind it (a hash for bytes this run never actually held). Collapsing the
+    two into one message would hide which direction failed.
+    """
+
+    matching = {
+        filename: digest
+        for filename, digest in acquired.items()
+        if artifact_belongs_to(filename, name, version)
+    }
+    entries = [
+        entry
+        for entry in lock.get("package", [])
+        if entry.get("name") == name and entry.get("version") == version
+    ]
+    if len(entries) != 1:
+        return [
+            f"the lock carries {len(entries)} {name} {version} entries, expected one"
+        ]
+    locked = {
+        item.get("file"): item.get("hash") for item in entries[0].get("files", [])
+    }
+
+    problems: list[str] = []
+    for filename, digest in sorted(matching.items()):
+        expected = f"sha256:{digest}"
+        if filename not in locked:
+            problems.append(
+                f"{filename} was acquired but the lock's {name} {version} "
+                "entry does not name it"
+            )
+        elif locked[filename] != expected:
+            problems.append(
+                f"{filename}: the lock says {locked[filename]!r}, the "
+                f"acquired bytes hash to {expected!r}"
+            )
+    for filename in sorted(set(locked) - set(matching)):
+        problems.append(
+            f"the lock's {name} {version} entry names {filename!r}, which is "
+            "not an artifact this run acquired"
+        )
+    return problems
+
+
+# ── drift ───────────────────────────────────────────────────────────────────
+
+
+def _entries(lock: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for entry in lock.get("package", []):
+        key = (str(entry.get("name")), str(entry.get("version")))
+        if key in found:
+            raise Refusal(f"the lock carries two entries for {key}")
+        found[key] = entry
+    if not found:
+        raise Refusal("the lock has no packages at all")
+    return found
+
+
+def _changed_fields(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    return sorted(
+        field
+        for field in set(before) | set(after)
+        if before.get(field) != after.get(field)
+    )
+
+
+def _kernel_entry_problems(
+    old: dict[tuple[str, str], dict[str, Any]],
+    new: dict[tuple[str, str], dict[str, Any]],
+    *,
+    unmoved_is_permitted: bool = False,
+) -> list[str]:
+    """The kernel entry may move its version and its files. Nothing else.
+
+    `unmoved_is_permitted` is True only when the dispatch DECLARED a dependency
+    movement. Then an identical kernel entry is the honest outcome, not an
+    empty lock: a composition whose kernel already moved in an earlier chained
+    run (Control a6 -> a15 took kernel a98 -> a100) can move a second declared
+    module (Approvals a5 -> a7) without inventing a kernel change. "Unmoved"
+    means the entry is byte-for-byte identical, so nothing on it is exempt. A
+    kernel-only dispatch keeps the old refusal: with no declared movement an
+    unmoved kernel really does leave a lock that says nothing.
+
+    The gate this replaced compared every entry EXCEPT this one, and then let
+    this one change arbitrarily. So the single entry the whole change is about
+    was the one place a repointed `source`, a widened `python-versions`, an
+    added `dependencies` table or a flipped `optional` could arrive unread.
+    """
+
+    old_kernel = {key: value for key, value in old.items() if key[0] == KERNEL}
+    new_kernel = {key: value for key, value in new.items() if key[0] == KERNEL}
+    if not new_kernel:
+        return [f"the resolved lock has no {KERNEL} entry"]
+    if len(new_kernel) != 1 or len(old_kernel) != 1:
+        return [
+            f"expected exactly one {KERNEL} entry on each side, found "
+            f"{len(old_kernel)} before and {len(new_kernel)} after"
+        ]
+    if old_kernel == new_kernel:
+        if unmoved_is_permitted:
+            return []
+        return [f"{KERNEL} did not move; this lock says nothing"]
+
+    before = next(iter(old_kernel.values()))
+    after = next(iter(new_kernel.values()))
+    problems = [
+        f"{KERNEL} changed `{field}`, which a pin move may not change: "
+        f"{before.get(field)!r} -> {after.get(field)!r}"
+        for field in _changed_fields(before, after)
+        if field not in KERNEL_MUTABLE_FIELDS
+    ]
+    source = after.get("source")
+    if isinstance(source, dict) and source.get("url") != INDEX_URL:
+        problems.append(
+            f"{KERNEL} resolved from {source.get('url')!r}, not {INDEX_URL!r}"
+        )
+    return problems
+
+
+#: A wheel's METADATA is a small text file. These bound what this gate will
+#: read out of an archive it did not build: a member that inflates past the
+#: first limit, or compresses better than the second, is refused rather than
+#: decompressed. The numbers are generous for real metadata and hostile to an
+#: archive designed to exhaust the reader.
+METADATA_MAX_BYTES: Final = 1 << 20
+METADATA_MAX_COMPRESSION_RATIO: Final = 200
+
+#: Bounds that apply BEFORE the archive is opened or enumerated. `zipfile`
+#: reads the whole central directory when it opens a file, so a per-member
+#: limit arrives too late to protect the reader from an archive with millions
+#: of entries: the file's own size on disk is the only bound available before
+#: any parsing happens, and it is checked first. The member count and the total
+#: uncompressed size are then checked before any member is read.
+WHEEL_MAX_BYTES: Final = 64 << 20
+
+#: Bounds on a TRANSFER from the index, applied while it happens and again to
+#: the bytes that landed. An unbounded download is unbounded regardless of what
+#: the later per-file limits say, because those run after the disk has already
+#: been filled.
+ARTIFACT_MAX_BYTES: Final = 128 << 20
+ARTIFACT_MAX_SECONDS: Final = 300
+ARCHIVE_MAX_MEMBERS: Final = 2_048
+ARCHIVE_MAX_TOTAL_UNCOMPRESSED: Final = 256 << 20
+#: A member NAME is attacker-controlled and is read before any content is. Bound
+#: its length, and bound the sum of every name — that sum IS the central
+#: directory's size, which `zipfile` has already read by the time this runs, so
+#: the bound exists to refuse the archive rather than to avoid reading it.
+ARCHIVE_MAX_NAME_BYTES: Final = 256
+ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES: Final = 1 << 20
+
+#: Core Metadata headers that may appear AT MOST ONCE. A second `Name` or
+#: `Version` makes the file state two identities, and which one a reader
+#: believes becomes a question about parse order.
+METADATA_SINGLE_HEADERS: Final = frozenset({"metadata-version", "name", "version"})
+#: `Name: value`. A line that is not this and is not a continuation is not a
+#: header, and a file carrying one is not Core Metadata this gate will read.
+_METADATA_HEADER = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]*(.*)$")
+#: `2.1`, `2.4`. A Core Metadata version this gate cannot even shape-check is
+#: not one it should claim to have parsed.
+_METADATA_VERSION = re.compile(r"^\d+\.\d+$")
+
+#: The only key this gate understands inside a Poetry constraint table. A
+#: `markers`, `extras`, `optional` or `python` key changes what the constraint
+#: MEANS, and a comparison that ignored it would be comparing a version string
+#: while the real condition sat in a key it never read.
+MODELLED_CONSTRAINT_KEYS: Final = frozenset({"version"})
+
+
+def parse_core_metadata(text: str) -> dict[str, list[str]]:
+    """Core Metadata headers, parsed STRICTLY, or a refusal.
+
+    The permissive version of this read lowercased keys, kept the first value
+    it saw, stopped at the first blank line, and silently ignored any line it
+    did not understand. Malformed metadata therefore PASSED: a file with no
+    `Metadata-Version`, a second `Name`, a line with no colon, or headers
+    sitting after the body all read as acceptable, and the gate went on to
+    compare requirements it had extracted from something it had not actually
+    parsed.
+
+    So: headers end at the first blank line and nothing after it is read; every
+    line before it must be a header or an RFC 822 continuation; a continuation
+    with no preceding header is refused; `Metadata-Version`, `Name` and
+    `Version` must each appear EXACTLY once; and `Metadata-Version` must be
+    shape-checkable. Values are returned as lists, so a caller cannot silently
+    collapse a repeated header the way `setdefault` did.
+    """
+
+    headers: dict[str, list[str]] = {}
+    order: list[str] = []
+    last: str | None = None
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            break
+        if line[:1] in (" ", "\t"):
+            if last is None:
+                raise Refusal(
+                    f"METADATA line {number} is a continuation with no header "
+                    "before it"
+                )
+            headers[last][-1] += " " + line.strip()
+            continue
+        match = _METADATA_HEADER.match(line)
+        if match is None:
+            raise Refusal(
+                f"METADATA line {number} is neither a header nor a "
+                f"continuation: {line[:60]!r}"
+            )
+        key = match.group(1).lower()
+        headers.setdefault(key, []).append(match.group(2).strip())
+        order.append(key)
+        last = key
+
+    if not headers:
+        raise Refusal("METADATA carries no headers at all")
+    for key in sorted(METADATA_SINGLE_HEADERS):
+        found = headers.get(key, [])
+        if len(found) != 1:
+            raise Refusal(
+                f"METADATA declares `{key}` {len(found)} times, expected "
+                "exactly once"
+            )
+    version = headers["metadata-version"][0]
+    if not _METADATA_VERSION.match(version):
+        raise Refusal(
+            f"METADATA declares Metadata-Version {version!r}, which is not a "
+            "shape this gate can check"
+        )
+    return headers
+
+
+def sha256_of(path: Path) -> str:
+    """The digest of the bytes on disk RIGHT NOW."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def wheel_identity_problems(wheel: Path, name: str, version: str) -> list[str]:
+    """The FILENAME says which project and version these bytes are."""
+
+    match = _WHEEL_FILENAME.match(wheel.name)
+    if match is None:
+        return [f"{wheel.name} is not a parseable wheel filename"]
+    problems: list[str] = []
+    if _normalised(match.group("name")) != _normalised(name):
+        return [f"{wheel.name} names project {match.group('name')!r}, not {name!r}"]
+    if match.group("ver") != version:
+        problems.append(
+            f"{wheel.name} names version {match.group('ver')!r}, not {version!r}"
+        )
+    return problems
+
+
+def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]:
+    """The METADATA text, with the archive bound to the project it claims.
+
+    Four independent statements of identity have to agree before a single
+    requirement line is believed: the FILENAME, the `.dist-info` DIRECTORY, and
+    METADATA's own `Name` and `Version`. A wheel whose filename says a13 while
+    its dist-info says a6 is not a naming inconsistency to tidy up — it is an
+    archive asserting two identities, and the one this gate would otherwise
+    read is whichever the zip happened to list first.
+    """
+
+    expected_dir = f"{_normalised(name)}-{version}.dist-info"
+
+    # BEFORE opening. `zipfile` reads the entire central directory on open, so
+    # every per-member bound below arrives too late to protect the reader from
+    # an archive with millions of entries. The file's size on disk is the only
+    # thing knowable before any parsing, and it bounds the central directory
+    # too, so it is checked first.
+    try:
+        size = wheel.stat().st_size
+    except OSError as exc:
+        raise Refusal(f"{wheel.name} cannot be read: {exc}") from exc
+    if size > WHEEL_MAX_BYTES:
+        raise Refusal(
+            f"{wheel.name} is {size} bytes on disk, over the "
+            f"{WHEEL_MAX_BYTES} limit; refusing to open it"
+        )
+
+    # The declared central-directory size, read from the EOCD before anything
+    # opens the archive — because opening it is what reads that directory.
+    directory = zip_central_directory(wheel)
+    if directory.size > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
+        raise Refusal(
+            f"{wheel.name} declares a {directory.size}-byte central "
+            f"directory, over the {ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} limit; "
+            "refusing to open it"
+        )
+    if directory.entries > ARCHIVE_MAX_MEMBERS:
+        raise Refusal(
+            f"{wheel.name} declares {directory.entries} directory entries, over "
+            f"the {ARCHIVE_MAX_MEMBERS} limit; refusing to open it"
+        )
+
+    # A corrupt, truncated or non-zip file is a REFUSAL, not a traceback. `main`
+    # catches `Refusal` and nothing else, so an uncontrolled exception here
+    # would surface as a stack trace with no `::error::` line — the operator
+    # would see a crashed gate rather than a refused input, and could not tell
+    # which of the two had happened.
+    try:
+        archive = zipfile.ZipFile(wheel)
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, EOFError) as exc:
+        raise Refusal(
+            f"{wheel.name} is not a readable zip archive: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    with archive:
+        members = archive.infolist()
+        # The declared count, compared with what was actually enumerated. A
+        # directory that claims one number and yields another is describing an
+        # archive other than the one being read, and every bound above was
+        # computed from the claim.
+        if len(members) != directory.entries:
+            raise Refusal(
+                f"{wheel.name} declares {directory.entries} directory entries "
+                f"but enumerates {len(members)}; its end records describe a "
+                "different archive"
+            )
+        if len(members) > ARCHIVE_MAX_MEMBERS:
+            raise Refusal(
+                f"{wheel.name} declares {len(members)} members, over the "
+                f"{ARCHIVE_MAX_MEMBERS} limit; refusing to read any of them"
+            )
+        total = sum(member.file_size for member in members)
+        if total > ARCHIVE_MAX_TOTAL_UNCOMPRESSED:
+            raise Refusal(
+                f"{wheel.name} declares {total} uncompressed bytes across its "
+                f"members, over the {ARCHIVE_MAX_TOTAL_UNCOMPRESSED} limit"
+            )
+        # A secondary check, and deliberately not the central-directory bound:
+        # summed filenames exclude the 46-byte per-member header, every extra
+        # field and every file comment, so an archive can declare a vast
+        # directory while its names total almost nothing. The real bound is
+        # `zip_central_directory_bytes` above, read from the EOCD.
+        names = sum(len(member.filename.encode("utf-8")) for member in members)
+        if names > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
+            raise Refusal(
+                f"{wheel.name}'s member names alone total {names} bytes, over "
+                f"the {ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} limit"
+            )
+        for member in members:
+            encoded = member.filename.encode("utf-8")
+            if len(encoded) > ARCHIVE_MAX_NAME_BYTES:
+                raise Refusal(
+                    f"{wheel.name} carries a member name of {len(encoded)} "
+                    f"bytes, over the {ARCHIVE_MAX_NAME_BYTES} limit: "
+                    f"{member.filename[:60]!r}…"
+                )
+            # NOT `name` — that is this function's parameter, and binding it
+            # here made the identity check below compare the project name
+            # against a member path. Same shadowing defect as the `_wheel`
+            # helper collision, inside the function it was added to protect.
+            member_name = member.filename
+            if (
+                member_name.startswith("/")
+                or "\\" in member_name
+                or ntpath.splitdrive(member_name)[0]
+            ):
+                raise Refusal(
+                    f"{wheel.name} carries an absolute or non-POSIX member "
+                    f"name {member_name!r}"
+                )
+            if any(part == ".." for part in member_name.split("/")):
+                raise Refusal(
+                    f"{wheel.name} carries a traversing member name " f"{member_name!r}"
+                )
+        candidates = [
+            info
+            for info in members
+            if info.filename.endswith(".dist-info/METADATA")
+            and info.filename.count("/") == 1
+        ]
+        if not candidates:
+            raise Refusal(
+                f"{wheel.name} carries NO top-level dist-info/METADATA member"
+            )
+        if len(candidates) != 1:
+            raise Refusal(
+                f"{wheel.name} carries {len(candidates)} top-level "
+                "dist-info/METADATA members, expected exactly one; which one "
+                "describes the wheel is then a question about zip ordering"
+            )
+        info = candidates[0]
+        directory = info.filename.split("/", 1)[0]
+        if _normalised(directory) != _normalised(expected_dir):
+            raise Refusal(
+                f"{wheel.name} carries its metadata under {directory!r}, not "
+                f"{expected_dir!r}; the archive names two identities"
+            )
+        if info.file_size > METADATA_MAX_BYTES:
+            raise Refusal(
+                f"{wheel.name}: {info.filename} declares {info.file_size} "
+                f"uncompressed bytes, over the {METADATA_MAX_BYTES} limit; "
+                "refusing to decompress it"
+            )
+        if info.compress_size and (
+            info.file_size / info.compress_size > METADATA_MAX_COMPRESSION_RATIO
+        ):
+            raise Refusal(
+                f"{wheel.name}: {info.filename} compresses "
+                f"{info.file_size}:{info.compress_size}, past the "
+                f"{METADATA_MAX_COMPRESSION_RATIO}:1 limit; refusing to "
+                "decompress it"
+            )
+        try:
+            raw = archive.read(info)
+        except (
+            zipfile.BadZipFile,
+            zipfile.LargeZipFile,
+            OSError,
+            EOFError,
+            zlib.error,
+        ) as exc:
+            raise Refusal(
+                f"{wheel.name}: {info.filename} cannot be decompressed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+    if len(raw) > METADATA_MAX_BYTES:
+        raise Refusal(
+            f"{wheel.name}: {info.filename} inflated to {len(raw)} bytes, over "
+            f"the {METADATA_MAX_BYTES} limit declared in its own header"
+        )
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Refusal(
+            f"{wheel.name}: METADATA is not valid UTF-8 ({exc}); it was "
+            "previously decoded with errors replaced, which turned undecodable "
+            "bytes into characters the parser then accepted"
+        ) from exc
+
+    headers = parse_core_metadata(text)
+    declared_name = headers["name"][0]
+    declared_version = headers["version"][0]
+    if _normalised(declared_name) != _normalised(name):
+        raise Refusal(
+            f"{wheel.name}: METADATA declares Name {declared_name!r}, not {name!r}"
+        )
+    if declared_version != version:
+        raise Refusal(
+            f"{wheel.name}: METADATA declares Version {declared_version!r}, "
+            f"not {version!r}"
+        )
+    return headers
+
+
+def requires_dist(headers: dict[str, list[str]]) -> list[str]:
+    """The `Requires-Dist` values, taken from the PARSED headers.
+
+    This used to rescan the raw text itself, which made it a SECOND reader of
+    the same bytes — and the wrong one. `parse_core_metadata` joins RFC 822
+    continuations; a raw line scan cannot, so a folded requirement lost its
+    continuation and arrived here truncated:
+
+        Requires-Dist: dotmac-kernel
+          (>=0.1.0a100)
+
+        strict parser -> {"dotmac_kernel": ">=0.1.0a100"}
+        raw scanner   -> {"dotmac_kernel": ""}
+
+    An EMPTY constraint, from a wheel that plainly declared one. The strict
+    parser's correct result was computed and then thrown away. So the scanner
+    is gone and there is one reader: whatever `parse_core_metadata` understood
+    is what the comparison uses.
+    """
+
+    if not isinstance(headers, dict):
+        raise Refusal(
+            f"parsed headers are a {type(headers).__name__}, not a mapping; "
+            "this function reads `parse_core_metadata`'s output and refuses "
+            "anything else rather than coercing it"
+        )
+    values = headers.get("requires-dist", [])
+    if not isinstance(values, list):
+        raise Refusal(
+            f"`requires-dist` is a {type(values).__name__}, not a list of "
+            "header values"
+        )
+    for value in values:
+        if not isinstance(value, str):
+            raise Refusal(
+                f"a `requires-dist` value is {type(value).__name__}, not a string"
+            )
+    return list(values)
+
+
+def metadata_dependencies(requirements: Iterable[str]) -> dict[str, str]:
+    """`Requires-Dist` as the mapping a lock entry records, or a refusal.
+
+    A requirement carrying an environment marker or an extra is not modelled
+    here and is REFUSED rather than skipped: quietly ignoring the part of the
+    metadata a comparison cannot model is how a comparison stops being able to
+    disagree, which is this one's entire purpose.
+    """
+
+    mapping: dict[str, str] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, str):
+            raise Refusal(
+                f"a Requires-Dist value is {type(requirement).__name__}, not a "
+                "string; this gate refuses rather than coercing it"
+            )
+        if ";" in requirement:
+            raise Refusal(
+                f"the wheel declares a conditional requirement {requirement!r}; "
+                "this gate models only unconditional `Requires-Dist` and "
+                "refuses rather than ignoring the part it cannot model"
+            )
+        if "[" in requirement:
+            raise Refusal(
+                f"the wheel declares an extras requirement {requirement!r}, "
+                "which selects optional dependencies this gate does not model"
+            )
+        name = _requirement_name(requirement)
+        if name is None:
+            raise Refusal(f"cannot read a project name from {requirement!r}")
+        specifier = requirement[len(name) :].strip()
+        if specifier.startswith("(") and specifier.endswith(")"):
+            specifier = specifier[1:-1].strip()
+        key = _normalised(name)
+        if key in mapping:
+            raise Refusal(
+                f"the wheel declares {name} twice in `Requires-Dist`; which "
+                "constraint binds is then a question about zip ordering"
+            )
+        mapping[key] = re.sub(r"\s+", "", specifier)
+    return mapping
+
+
+def locked_dependencies(entry: dict[str, Any]) -> dict[str, str]:
+    """A lock entry's `dependencies`, keyed for comparison, or a refusal.
+
+    Two refusals live here rather than silent behaviour. A table whose keys
+    NORMALISE to the same project (`dotmac-kernel` beside `dotmac_kernel`)
+    would otherwise have one entry overwrite the other, so whichever the
+    comparison saw would be an accident of dict ordering. And a constraint
+    table carrying `markers`, `extras`, `optional` or `python` means something
+    this gate does not model; comparing only its `version` would compare a
+    string while the real condition sat in a key nobody read.
+    """
+
+    declared = entry.get("dependencies")
+    if declared is None:
+        return {}
+    if not isinstance(declared, dict):
+        raise Refusal("a lock entry's `dependencies` is not a table")
+    mapping: dict[str, str] = {}
+    for name, constraint in declared.items():
+        key = _normalised(str(name))
+        if key in mapping:
+            raise Refusal(
+                f"the lock entry declares {name!r} and another spelling of the "
+                "same project; which constraint binds is then a question about "
+                "table ordering"
+            )
+        if isinstance(constraint, dict):
+            unmodelled = sorted(set(constraint) - MODELLED_CONSTRAINT_KEYS)
+            if unmodelled:
+                raise Refusal(
+                    f"the lock entry's {name!r} constraint carries "
+                    f"{', '.join(unmodelled)}, which this gate does not model; "
+                    "comparing only its version would ignore the condition"
+                )
+            constraint = constraint.get("version", "")
+        elif isinstance(constraint, list):
+            raise Refusal(
+                f"the lock entry's {name!r} constraint is a LIST of "
+                "constraints, which this gate does not model"
+            )
+        mapping[key] = re.sub(r"\s+", "", str(constraint))
+    return mapping
+
+
+def metadata_binding_problems(
+    entry: dict[str, Any], wheel: Path, digests: dict[str, str]
+) -> list[str]:
+    """The moved package's locked `dependencies` ARE the acquired wheel's.
+
+    A declared movement may change `dependencies`, because a new version is
+    entitled to require different things — Control a13 requiring kernel
+    `>=0.1.0a100` is exactly why the kernel pin has to move. But that makes
+    `dependencies` the one field through which an arbitrary constraint could
+    arrive inside a reviewed pin change, so it is bound to the artifact's own
+    declaration rather than trusted.
+
+    The bytes are REHASHED here, immediately before being read, and must match
+    BOTH the acquisition record and the lock. `digests.json` is a claim about
+    what was downloaded; the lock is a claim about what was resolved; neither
+    is a statement about the file that is about to be opened.
+    """
+
+    name = str(entry.get("name"))
+    version = str(entry.get("version"))
+    problems = wheel_identity_problems(wheel, name, version)
+    if problems:
+        return problems
+
+    locked_files = {
+        item.get("file"): item.get("hash") for item in entry.get("files", [])
+    }
+    if wheel.name not in locked_files:
+        return [
+            f"{wheel.name} is not named by the lock entry for {name} {version}, "
+            "so its metadata describes bytes this lock does not claim"
+        ]
+    recorded = digests.get(wheel.name)
+    if recorded is None:
+        return [f"{wheel.name} has no acquisition digest to verify against"]
+
+    actual = sha256_of(wheel)
+    if actual != recorded:
+        return [
+            f"{wheel.name} on disk hashes to sha256:{actual}, but the "
+            f"acquisition recorded sha256:{recorded}; refusing to read metadata "
+            "out of bytes that changed after they were acquired"
+        ]
+    if locked_files[wheel.name] != f"sha256:{actual}":
+        return [
+            f"{wheel.name} on disk hashes to sha256:{actual}, but the lock says "
+            f"{locked_files[wheel.name]!r}; refusing to read metadata out of "
+            "bytes the lock does not claim"
+        ]
+
+    expected = metadata_dependencies(
+        requires_dist(wheel_metadata(wheel, name, version))
+    )
+    recorded_deps = locked_dependencies(entry)
+    for dependency in sorted(set(expected) | set(recorded_deps)):
+        if dependency not in recorded_deps:
+            problems.append(
+                f"the wheel requires {dependency} {expected[dependency]!r}, "
+                "which the lock entry does not record"
+            )
+        elif dependency not in expected:
+            problems.append(
+                f"the lock records a dependency on {dependency} "
+                f"{recorded_deps[dependency]!r} that the wheel's "
+                "`Requires-Dist` does not declare"
+            )
+        elif expected[dependency] != recorded_deps[dependency]:
+            problems.append(
+                f"{dependency}: the wheel declares {expected[dependency]!r}, "
+                f"the lock records {recorded_deps[dependency]!r}"
+            )
+    return problems
+
+
+def _declared_delta_problems(
+    old: dict[tuple[str, str], dict[str, Any]],
+    new: dict[tuple[str, str], dict[str, Any]],
+    delta: DependencyDelta,
+    bundle: Path | None = None,
+) -> list[str]:
+    """The DECLARED dependency's entry may move its version and its files.
+    Nothing else — the same rule as `_kernel_entry_problems`, for the one
+    additional package a caller declared a movement for.
+
+    Unlike the kernel, this package's presence in the lock at all is
+    conditional on the manifest, so an unexpected count on either side is
+    reported with the counts rather than assumed to be exactly one.
+    """
+
+    old_entries = {key: value for key, value in old.items() if key[0] == delta.name}
+    new_entries = {key: value for key, value in new.items() if key[0] == delta.name}
+    if len(old_entries) != 1 or len(new_entries) != 1:
+        return [
+            f"expected exactly one {delta.name} entry on each side, found "
+            f"{len(old_entries)} before and {len(new_entries)} after"
+        ]
+
+    ((old_key, before),) = old_entries.items()
+    ((new_key, after),) = new_entries.items()
+    problems: list[str] = []
+    if old_key[1] != delta.before:
+        problems.append(
+            f"{delta.name} was locked at {old_key[1]!r} before this run, not "
+            f"the declared `dependency_from` {delta.before!r}"
+        )
+    if new_key[1] != delta.after:
+        problems.append(
+            f"{delta.name} resolved to {new_key[1]!r}, not the declared "
+            f"`dependency_to` {delta.after!r}"
+        )
+    if before == after:
+        problems.append(f"{delta.name} did not move; this lock says nothing")
+        return problems
+
+    problems += [
+        f"{delta.name} changed `{field}`, which a declared movement may not "
+        f"change: {before.get(field)!r} -> {after.get(field)!r}"
+        for field in _changed_fields(before, after)
+        if field not in DEPENDENCY_MUTABLE_FIELDS
+    ]
+    source = after.get("source")
+    if isinstance(source, dict) and source.get("url") != INDEX_URL:
+        problems.append(
+            f"{delta.name} resolved from {source.get('url')!r}, not {INDEX_URL!r}"
+        )
+
+    # `dependencies` is the one field a movement may change, so it is the one
+    # field bound to something outside the lock. MANDATORY: a declared movement
+    # with no bundle would permit exactly the change this binding constrains.
+    if bundle is None:
+        problems.append(
+            f"{delta.name} declares a movement but no acquired bundle was given "
+            "to bind its `dependencies` to the published wheel's Requires-Dist"
+        )
+        return problems
+    digests_path = bundle / "digests.json"
+    if not digests_path.is_file():
+        problems.append(f"the bundle at {bundle} carries no digests.json")
+        return problems
+    digests = json.loads(digests_path.read_text(encoding="utf-8"))
+    wheels = sorted(
+        path
+        for path in (bundle / "files").glob("*.whl")
+        if artifact_belongs_to(path.name, delta.name, delta.after)
+    )
+    if len(wheels) != 1:
+        problems.append(
+            f"expected exactly one acquired {delta.name} {delta.after} wheel in "
+            f"{bundle / 'files'}, found {len(wheels)}"
+        )
+        return problems
+    problems += metadata_binding_problems(after, wheels[0], digests)
+    return problems
+
+
+def drift_problems(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    delta: DependencyDelta | None = None,
+    bundle: Path | None = None,
+) -> list[str]:
+    """Everything outside the moved pin(s) that is not identical.
+
+    The comparison this replaced keyed on `(name, version)` and compared file
+    hashes, so a package silently repointed at a different index — a changed
+    `[package.source]`, same name, same version, same files — resolved clean.
+    So did changed `dependencies`, `extras`, `python-versions`, `optional`,
+    `groups`, and every field of `[metadata]`. Whole entries, whole tables.
+
+    `delta`, when supplied, excludes `delta.name` from the blanket "everything
+    else must be identical" comparison exactly as `KERNEL` already is, and
+    checks it with `_declared_delta_problems` instead. Being a member of
+    `DECLARABLE_DEPENDENCIES` does not by itself exempt a package — only a
+    delta supplied to THIS call does; with `delta=None` a `dotmac-deployment-
+    control` movement is still reported as unrelated drift, unchanged from
+    before this existed.
+    """
+
+    problems: list[str] = []
+    old = _entries(before)
+    new = _entries(after)
+
+    excluded = {KERNEL} | ({delta.name} if delta is not None else set())
+    old_other = {key: value for key, value in old.items() if key[0] not in excluded}
+    new_other = {key: value for key, value in new.items() if key[0] not in excluded}
+
+    for name, version in sorted(set(new_other) - set(old_other)):
+        problems.append(f"{name} {version} appeared")
+    for name, version in sorted(set(old_other) - set(new_other)):
+        problems.append(f"{name} {version} disappeared")
+    for key in sorted(set(old_other) & set(new_other)):
+        fields = _changed_fields(old_other[key], new_other[key])
+        if fields:
+            problems.append(f"{key[0]} {key[1]} changed {', '.join(fields)}")
+
+    problems += _kernel_entry_problems(old, new, unmoved_is_permitted=delta is not None)
+    if delta is not None:
+        problems += _declared_delta_problems(old, new, delta, bundle)
+
+    old_meta = before.get("metadata", {})
+    new_meta = after.get("metadata", {})
+    for field in sorted(set(old_meta) | set(new_meta)):
+        if field == "content-hash":
+            continue
+        if old_meta.get(field) != new_meta.get(field):
+            problems.append(
+                f"lock metadata `{field}` changed: "
+                f"{old_meta.get(field)!r} -> {new_meta.get(field)!r}"
+            )
+    old_hash = old_meta.get("content-hash")
+    new_hash = new_meta.get("content-hash")
+    if not old_hash or not new_hash:
+        problems.append("a lock is missing `metadata.content-hash` entirely")
+    elif old_hash == new_hash:
+        problems.append(
+            "the content-hash is unchanged, so the manifest edit never reached "
+            "the lock and this lock does not describe the edited manifest"
+        )
+
+    for table in sorted((set(before) | set(after)) - {"package", "metadata"}):
+        if before.get(table) != after.get(table):
+            problems.append(f"the lock's top-level `{table}` table changed")
+    return problems
+
+
+# ── evidence ────────────────────────────────────────────────────────────────
+
+
+def credential_encodings(credential: str) -> dict[str, str]:
+    """The forms of the credential worth looking for, keyed by a human label.
+
+    An empty credential raises. A scan that cannot tell "no credential is
+    present" from "there was no credential to look for" reports success on the
+    run where the secret was never configured, and `grep -q -- ""` — the shape
+    this replaced — matches every line of every file instead.
+
+    Coverage is unchanged and still partial: not a credential split across
+    lines, compressed or archived bytes, a hex rendering, non-UTF-8 bytes, or
+    base64 at a non-zero offset inside a larger blob. That is why the only
+    files it is pointed at are ones whose answer to a sighting is REFUSAL. No
+    file is uploaded on the strength of this scan alone.
+    """
+
+    if not credential:
+        raise Refusal(
+            f"{CREDENTIAL_ENV} is unset or empty. There is nothing to scan the "
+            "evidence for, so this scan cannot say the evidence is clean."
+        )
+    basic = f"{INDEX_USERNAME}:{credential}".encode()
+    candidates = {
+        "the credential itself": credential,
+        "percent-encoded": urllib.parse.quote(credential, safe=""),
+        "percent-encoded, spaces as +": urllib.parse.quote_plus(credential),
+        "base64": base64.b64encode(credential.encode()).decode("ascii"),
+        f"base64 basic-auth ({INDEX_USERNAME}:...)": base64.b64encode(basic).decode(
+            "ascii"
+        ),
+    }
+    first_label: dict[str, str] = {}
+    for label, form in candidates.items():
+        first_label.setdefault(form, label)
+    return {label: form for form, label in first_label.items()}
+
+
+def credential_sightings(paths: Iterable[Path], credential: str) -> list[str]:
+    """`<file>: <which encoding>` for every place the credential still is."""
+
+    forms = credential_encodings(credential)
+    found: list[str] = []
+    for path in sorted(paths):
+        payload = path.read_bytes()
+        for label, form in forms.items():
+            if form.encode("utf-8") in payload:
+                found.append(f"{path.name}: {label}")
+    return found
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def pair_binding(digests: dict[str, str]) -> str:
+    """One value over the manifest and the lock, in a fixed order.
+
+    Recomputable by hand from the two digests printed beside it, which is the
+    point: the consumer verifies the pair from the artifact alone.
+    """
+
+    missing = [name for name in PAIR if name not in digests]
+    if missing:
+        raise Refusal(f"cannot bind the pair without {', '.join(missing)}")
+    body = "".join(f"{name} sha256:{digests[name]}\n" for name in PAIR)
+    return sha256_hex(body.encode("utf-8"))
+
+
+def sha256sums(digests: dict[str, str]) -> str:
+    """The `sha256sum -c` format, so verification needs no tool of ours."""
+
+    return "".join(f"{digests[name]}  {name}\n" for name in sorted(digests))
+
+
+def coordinates_text(
+    coordinates: dict[str, str],
+    digests: dict[str, str],
+    content_hash: str,
+    binding: str,
+) -> str:
+    rows: list[tuple[str, str]] = list(coordinates.items())
+    rows.append(("", ""))
+    rows += [(f"sha256:{name}", digest) for name, digest in sorted(digests.items())]
+    rows.append(("pair-binding", binding))
+    rows.append(("lock-content-hash", content_hash))
+    width = max(len(label) for label, _ in rows)
+    lines = [
+        f"{label.ljust(width)}  {value}".rstrip() if label else ""
+        for label, value in rows
+    ]
+    return "\n".join(lines) + "\n\n" + _PAIR_PROSE
+
+
+def build_evidence(
+    out: Path,
+    manifest: Path,
+    lock: Path,
+    coordinates: dict[str, str],
+    credential: str,
+) -> list[str]:
+    """Write the artifact directory. Returns the sightings that must refuse.
+
+    The manifest and the lock, and nothing else that carries resolver output.
+    Every byte here is either one of those two files or derived from them by
+    this module.
+    """
+
+    out.mkdir(parents=True, exist_ok=True)
+    written: dict[str, bytes] = {
+        "pyproject.toml": manifest.read_bytes(),
+        "poetry.lock": lock.read_bytes(),
+    }
+    for name, payload in written.items():
+        (out / name).write_bytes(payload)
+
+    digests = {name: sha256_hex(payload) for name, payload in written.items()}
+    with (out / "poetry.lock").open("rb") as handle:
+        content_hash = str(tomllib.load(handle)["metadata"]["content-hash"])
+    (out / "coordinates.txt").write_text(
+        coordinates_text(coordinates, digests, content_hash, pair_binding(digests)),
+        encoding="utf-8",
+    )
+    everything = {
+        path.name: sha256_hex(path.read_bytes())
+        for path in out.iterdir()
+        if path.is_file()
+    }
+    (out / "SHA256SUMS").write_text(sha256sums(everything), encoding="utf-8")
+    return credential_sightings(
+        [path for path in out.iterdir() if path.is_file()], credential
+    )
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────
+
+
+def _report(subject: str, problems: list[str]) -> int:
+    if problems:
+        for problem in problems:
+            print(f"::error::{subject}: {problem}")
+        return 1
+    print(f"{subject}: clean")
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    edit = subcommands.add_parser("set-kernel-version")
+    edit.add_argument("--manifest", type=Path, required=True)
+    edit.add_argument("--kernel-version", required=True)
+
+    set_dependency = subcommands.add_parser("set-dependency-version")
+    set_dependency.add_argument("--manifest", type=Path, required=True)
+    set_dependency.add_argument("--dependency", required=True)
+    set_dependency.add_argument("--dependency-from", required=True)
+    set_dependency.add_argument("--dependency-to", required=True)
+
+    guard = subcommands.add_parser("manifest-guard")
+    guard.add_argument("--manifest", type=Path, required=True)
+    guard.add_argument("--checkout", type=Path, required=True)
+    guard.add_argument("--kernel-version", required=True)
+
+    fetch_bundle = subcommands.add_parser("acquire")
+    fetch_bundle.add_argument("--manifest", type=Path, required=True)
+    fetch_bundle.add_argument("--lock", type=Path, required=True)
+    fetch_bundle.add_argument("--kernel-version", required=True)
+    fetch_bundle.add_argument("--out", type=Path, required=True)
+
+    aim = subcommands.add_parser("mirror-manifest")
+    aim.add_argument("--manifest", type=Path, required=True)
+    aim.add_argument("--mirror-url", required=True)
+
+    restore = subcommands.add_parser("restore")
+    restore.add_argument("--manifest", type=Path, required=True)
+    restore.add_argument("--lock", type=Path, required=True)
+    restore.add_argument("--mirror-url", required=True)
+
+    verify = subcommands.add_parser("verify")
+    verify.add_argument("--lock", type=Path, required=True)
+    verify.add_argument("--digests", type=Path, required=True)
+    verify.add_argument("--kernel-version", required=True)
+    verify.add_argument("--dependency", default="")
+    verify.add_argument("--dependency-from", default="")
+    verify.add_argument("--dependency-to", default="")
+
+    wheel_only = subcommands.add_parser("wheel-only")
+    wheel_only.add_argument("--lock", type=Path, required=True)
+
+    drift = subcommands.add_parser("drift")
+    drift.add_argument("--before", type=Path, required=True)
+    drift.add_argument("--after", type=Path, required=True)
+    drift.add_argument("--dependency", default="")
+    drift.add_argument("--dependency-from", default="")
+    drift.add_argument("--dependency-to", default="")
+    drift.add_argument("--bundle", type=Path, default=None)
+
+    delta_inputs = subcommands.add_parser("delta")
+    delta_inputs.add_argument("--dependency", default="")
+    delta_inputs.add_argument("--dependency-from", default="")
+    delta_inputs.add_argument("--dependency-to", default="")
+
+    declared = subcommands.add_parser("declared")
+    declared.add_argument("--manifest", type=Path, required=True)
+    declared.add_argument("--name", required=True)
+    declared.add_argument("--version", required=True)
+
+    evidence = subcommands.add_parser("evidence")
+    evidence.add_argument("--out", type=Path, required=True)
+    evidence.add_argument("--manifest", type=Path, required=True)
+    evidence.add_argument("--lock", type=Path, required=True)
+    evidence.add_argument("--coordinate", action="append", default=[])
+    return parser
+
+
+def _run(args: argparse.Namespace) -> int:
+    if args.command == "set-kernel-version":
+        text = args.manifest.read_text(encoding="utf-8")
+        args.manifest.write_text(
+            replace_kernel_version(text, args.kernel_version), encoding="utf-8"
+        )
+        print(f"{KERNEL} -> {args.kernel_version}")
+        return 0
+    if args.command == "set-dependency-version":
+        delta = parse_dependency_delta(
+            args.dependency, args.dependency_from, args.dependency_to
+        )
+        if delta is None:
+            raise Refusal(
+                "set-dependency-version requires --dependency, "
+                "--dependency-from and --dependency-to together"
+            )
+        text = args.manifest.read_text(encoding="utf-8")
+        args.manifest.write_text(
+            replace_dependency_version(text, delta), encoding="utf-8"
+        )
+        print(f"{delta.name} -> {delta.after}")
+        return 0
+    if args.command == "manifest-guard":
+        return _report(
+            "the tree under resolution",
+            checkout_problems(args.checkout)
+            + manifest_problems(_load_toml(args.manifest), args.kernel_version),
+        )
+    if args.command == "acquire":
+        plan = acquisition_plan(
+            _load_toml(args.manifest), _load_toml(args.lock), args.kernel_version
+        )
+        for package, version in sorted(plan.items()):
+            print(f"bundling {package} {version}")
+        digests = acquire(plan, args.out)
+        for name, digest in sorted(digests.items()):
+            print(f"{name}  {digest}")
+        return 0
+    if args.command == "mirror-manifest":
+        args.manifest.write_text(
+            point_at_mirror(args.manifest.read_text(encoding="utf-8"), args.mirror_url),
+            encoding="utf-8",
+        )
+        print(f"the private source now points at {args.mirror_url}")
+        return 0
+    if args.command == "restore":
+        args.manifest.write_text(
+            restore_index_url(
+                args.manifest.read_text(encoding="utf-8"), args.mirror_url
+            ),
+            encoding="utf-8",
+        )
+        args.lock.write_text(
+            restore_index_url(
+                args.lock.read_text(encoding="utf-8"),
+                args.mirror_url,
+                required=False,
+            ),
+            encoding="utf-8",
+        )
+        digest = poetry_content_hash(args.manifest, args.lock)
+        args.lock.write_text(
+            set_content_hash(args.lock.read_text(encoding="utf-8"), digest),
+            encoding="utf-8",
+        )
+        print(f"the index URL is restored and the content-hash is {digest}")
+        return 0
+    if args.command == "verify":
+        digests = json.loads(args.digests.read_text(encoding="utf-8"))
+        lock = _load_toml(args.lock)
+        problems = hash_problems(lock, digests, args.kernel_version)
+        delta = parse_dependency_delta(
+            args.dependency, args.dependency_from, args.dependency_to
+        )
+        if delta is not None:
+            problems += acquired_matches_lock(digests, lock, delta.name, delta.after)
+        return _report("the lock against the published bytes", problems)
+    if args.command == "wheel-only":
+        return _report(
+            "the resolution is wheel-only",
+            lock_wheel_problems(_load_toml(args.lock)),
+        )
+    if args.command == "drift":
+        delta = parse_dependency_delta(
+            args.dependency, args.dependency_from, args.dependency_to
+        )
+        return _report(
+            "unrelated lock drift",
+            drift_problems(
+                _load_toml(args.before), _load_toml(args.after), delta, args.bundle
+            ),
+        )
+    if args.command == "delta":
+        delta = parse_dependency_delta(
+            args.dependency, args.dependency_from, args.dependency_to
+        )
+        if delta is None:
+            print("no declared dependency movement: kernel-only")
+        else:
+            print(f"declared movement: {delta.name} {delta.before} -> {delta.after}")
+        return 0
+    if args.command == "declared":
+        manifest = _load_toml(args.manifest)
+        return _report(
+            f"the manifest declares {args.name}",
+            declared_version_problems(manifest, args.name, args.version),
+        )
+    if args.command != "evidence":
+        raise Refusal(f"unknown command {args.command!r}")
+    credential = os.environ.get(CREDENTIAL_ENV, "")
+    coordinates = dict(item.split("=", 1) for item in args.coordinate if "=" in item)
+    sightings = build_evidence(
+        args.out, args.manifest, args.lock, coordinates, credential
+    )
+    return _report("the credential reached the evidence", sightings)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    try:
+        return _run(args)
+    except PublishedArtifactUnrecorded as fatal:
+        # Reported separately from every refusal: a refusal means nothing
+        # happened, this means something did and was not recorded.
+        print(f"::error::PUBLISHED BUT UNRECORDED: {fatal}")
+        return 2
+    except Refusal as refusal:
+        print(f"::error::{refusal}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

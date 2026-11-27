@@ -1,5 +1,5 @@
 # VALIDATION BRANCH ONLY: never merge this replacement of ci.yml.
-name: Host-gated registry source qualification
+name: Operator bootstrap source qualification (synthetic only)
 on:
   workflow_dispatch:
 permissions:
@@ -21,21 +21,31 @@ jobs:
           python -I -S -B -c 'import os; assert not any(v for k,v in os.environ.items() if k.startswith(("FORGEJO_", "POETRY_HTTP_BASIC_"))), "unexpected registry credential"'
           cd validation/host-gated
           sha256sum -c SOURCE-SHA256SUMS
+          (cd "$GITHUB_WORKSPACE/validation/operator-bootstrap" && sha256sum -c SOURCE-SHA256SUMS)
           chmod 700 .
           chmod 600 *.py *.json README.md
       - name: Run fully mocked owner, SQL and API tests
         run: |
           set -euo pipefail
-          python -I -S -B - "$GITHUB_WORKSPACE/validation/host-gated" "$RUNNER_TEMP/host-mocked-tests.json" <<'PYTEST'
+          python -I -S -B - "$GITHUB_WORKSPACE/validation/host-gated" "$RUNNER_TEMP/host-mocked-tests.json" "$GITHUB_WORKSPACE/validation/operator-bootstrap" <<'PYTEST'
           import importlib, json, pathlib, sys, unittest
           sys.path.insert(0, sys.argv[1])
           suite = unittest.TestSuite()
           for name in ("test_revocation_sql", "test_bootstrap_api", "test_orchestrator", "test_host_gate", "test_execute_canary", "test_execute_bootstrap"):
               suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(name)))
+          old_count = suite.countTestCases()
+          assert old_count == 130, "old mocked coverage changed"
+          sys.path.insert(0, sys.argv[3])
+          added = unittest.TestSuite()
+          for name in ("test_reader_lifecycle", "test_reader_revocation_sql", "test_operator_acquisition", "test_operator_bootstrap"):
+              added.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(name)))
+          new_count = added.countTestCases()
+          assert new_count > 0, "new mocked coverage absent"
+          suite.addTests(added)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
-          receipt = {"tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True}
+          receipt = {"tests": result.testsRun, "old_tests": old_count, "operator_bootstrap_tests": new_count, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True, "production_authority": False, "live_registry_contact": False}
           pathlib.Path(sys.argv[2]).write_text(json.dumps(receipt, indent=2) + "\n")
-          raise SystemExit(0 if result.wasSuccessful() and result.testsRun > 0 and not result.skipped else 1)
+          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == old_count + new_count and not result.skipped else 1)
           PYTEST
       - name: Retain mocked test receipt
         if: always()
@@ -61,6 +71,7 @@ jobs:
           python -I -S -B -c 'import os; assert not any(v for k,v in os.environ.items() if k.startswith(("FORGEJO_", "POETRY_HTTP_BASIC_"))), "unexpected registry credential"'
           cd validation/host-gated
           sha256sum -c SOURCE-SHA256SUMS
+          (cd "$GITHUB_WORKSPACE/validation/operator-bootstrap" && sha256sum -c SOURCE-SHA256SUMS)
       - name: Qualify exact transactions in isolated Unix-only PostgreSQL16
         run: |
           set -euo pipefail
@@ -73,15 +84,22 @@ jobs:
           trap '"$CP_PG_BIN/pg_ctl" -D "$CP_PG_DATA" -m immediate -w stop > "$RUNNER_TEMP/cp-pg-stop.log" 2>&1 || true' EXIT
           "$CP_PG_BIN/pg_ctl" -D "$CP_PG_DATA" -l "$RUNNER_TEMP/cp-pg-server.log" -o "-k $CP_TEST_PG_SOCKET -p 55439 -c listen_addresses=''" -w start
           export CP_TEST_PG_SOCKET
-          python -I -S -B - "$GITHUB_WORKSPACE/validation/host-gated" "$RUNNER_TEMP/host-pg-tests.json" <<'PYTEST'
+          python -I -S -B - "$GITHUB_WORKSPACE/validation/host-gated" "$RUNNER_TEMP/host-pg-tests.json" "$GITHUB_WORKSPACE/validation/operator-bootstrap" <<'PYTEST'
           import importlib, json, pathlib, sys, unittest
           sys.path.insert(0, sys.argv[1])
           module = importlib.import_module("test_sql_native")
           suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+          old_count = suite.countTestCases()
+          assert old_count == 9, "old PostgreSQL coverage changed"
+          sys.path.insert(0, sys.argv[3])
+          added = unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module("test_reader_sql_native"))
+          new_count = added.countTestCases()
+          assert new_count > 0, "new PostgreSQL coverage absent"
+          suite.addTests(added)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
-          receipt = {"tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True, "postgres_major": 16, "unix_socket_only": True, "docker_used": False}
+          receipt = {"tests": result.testsRun, "old_tests": old_count, "operator_bootstrap_tests": new_count, "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped), "successful": result.wasSuccessful(), "synthetic_only": True, "postgres_major": 16, "unix_socket_only": True, "docker_used": False, "production_authority": False, "live_registry_contact": False}
           pathlib.Path(sys.argv[2]).write_text(json.dumps(receipt, indent=2) + "\n")
-          raise SystemExit(0 if result.wasSuccessful() and result.testsRun > 0 and not result.skipped else 1)
+          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == old_count + new_count and not result.skipped else 1)
           PYTEST
       - name: Retain PostgreSQL transaction receipt
         if: always()
