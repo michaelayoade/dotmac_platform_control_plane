@@ -6,7 +6,7 @@ No candidate source, credential store, registry client or module loader lives he
 import time
 
 USER = "cp-bundle-reader"
-TOKEN_NAME = "cp-artifact-bootstrap-20261127-r1"
+TOKEN_NAME = "cp-artifact-bootstrap-20261127-r2"
 SCOPE = "read:package"
 
 
@@ -63,8 +63,14 @@ def make_reader_backend(cfg, host_gate, runtime, audit, sql, orchestrator,
                 raise Refused("reader_duplicate_or_invalid_unit")
             orgs = meta.get("org_memberships")
             if (type(orgs) is not list or len(orgs) != 1
-                    or orgs[0].get("is_owner") is not False):
+                    or type(orgs[0]) is not dict or "is_owner" not in orgs[0]
+                    or (orgs[0]["is_owner"] is not None
+                        and orgs[0]["is_owner"] is not False)):
                 raise Refused("reader_org_owner_flag")
+            # JSON null means the optional column is unavailable/unknown; it
+            # is never interpreted as False. Non-owner authority is established
+            # by exact sole team6/read-role membership and the core no-Owners
+            # audit, together with the fixed identity and grant checks above.
             # Core readiness checks intentionally expect zero tokens. Validate
             # the actual token set separately above; normalize only this audit.
             self.require_cp_ready({**meta, "tokens": []}, 6, 10)

@@ -18,7 +18,7 @@ import stat
 import sys
 import types
 
-RUN = "cp-artifact-bootstrap-20261127-r1"
+RUN = "cp-artifact-bootstrap-20261127-r2"
 SOURCE_ROOT = Path("/root") / RUN
 PRESERVED_ROOT = Path("/root/cp-reader-host-gated-20261125")
 OUTPUT_ROOT = Path("/root/cp-artifact-bootstrap-receipts")

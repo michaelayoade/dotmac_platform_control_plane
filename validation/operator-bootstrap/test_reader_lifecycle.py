@@ -1,5 +1,6 @@
 """Synthetic lifecycle failures and adapter refusals; no real effect is called."""
 import copy
+import json
 from pathlib import Path
 import runpy
 import time
@@ -41,6 +42,7 @@ class ReaderTests(unittest.TestCase):
     def setUpClass(cls):
         cls.host = runpy.run_path(str(CORE / "host_gate.py"))
         cls.core = runpy.run_path(str(CORE / "orchestrator.py"))
+        cls.audit = runpy.run_path(str(CORE / "audit.py"))
 
     def setUp(self):
         self.meta = metadata()
@@ -176,3 +178,69 @@ class ReaderTests(unittest.TestCase):
                 lambda *a: response, lambda v: None)
             with self.assertRaises(Refused):
                 backend.request("reader_get", None)
+
+    def native_ready_backend(self):
+        # Evaluate only captured nonsecret metadata through the frozen core
+        # readiness owner; transport, Docker, mint and acquisition are unused.
+        def no_effect(*args, **kwargs):
+            raise AssertionError("readiness must not call an effect")
+        return make_reader_backend(self.cfg, self.host, {}, self.audit,
+            {"build_revocation_sql": build_revocation_sql}, self.core,
+            no_effect, no_effect)
+
+    def captured_metadata(self):
+        return json.loads(Path(__file__).with_name("native-metadata.fixture.json").read_text())
+
+    def test_captured_optional_owner_column_uses_real_core_audit(self):
+        native = self.captured_metadata()
+        self.assertIn("is_owner", native["org_memberships"][0])
+        self.assertIsNone(native["org_memberships"][0]["is_owner"])
+        backend = self.native_ready_backend()
+        self.assertIsNone(backend.require_reader_ready(native))
+        # False remains a distinct, explicitly supported observation.
+        native["org_memberships"][0]["is_owner"] = False
+        self.assertIsNone(backend.require_reader_ready(native))
+        checks = self.audit["evaluate"](native, {
+            "forgejo_user": USER, "forgejo_org": "dotmac",
+            "forgejo_team": "cp-bundle-readers", "require_restricted": False}, "pre")
+        self.assertTrue(checks)
+        self.assertTrue(all(check["ok"] for check in checks))
+        self.assertEqual([check["ok"] for check in checks
+                          if check["check"] == "user_not_in_owners"], [True])
+
+    def test_captured_owner_flag_requires_present_null_or_false(self):
+        backend = self.native_ready_backend()
+        for value in (True, 0, 1, 0.0, "false", "null", "", [], {}):
+            with self.subTest(value=value):
+                native = self.captured_metadata()
+                native["org_memberships"][0]["is_owner"] = value
+                with self.assertRaises(Refused):
+                    backend.require_reader_ready(native)
+        native = self.captured_metadata()
+        del native["org_memberships"][0]["is_owner"]
+        with self.assertRaises(Refused):
+            backend.require_reader_ready(native)
+
+    def test_captured_team_grant_identity_and_zero_token_guards_remain_strict(self):
+        backend = self.native_ready_backend()
+        mutations = (
+            lambda m: m["users"][0].update(id=11),
+            lambda m: m["users"][0].update(is_admin=True),
+            lambda m: m["users"][0].update(is_restricted=True),
+            lambda m: m["org_memberships"][0].update(org_id=3),
+            lambda m: m["team_memberships"][0].update(team_id=7),
+            lambda m: m["team_memberships"][0].update(team_name="Owners", authorization=4),
+            lambda m: m["teams"][0].update(authorization=4),
+            lambda m: m["teams"][0].update(member_count=2),
+            lambda m: m["teams"][0]["units"][0].update(access_mode=2),
+            lambda m: m["teams"][0]["units"].append({"type": 9, "access_mode": 1}),
+            lambda m: m.update(access_rows=[{"repo_id": 1, "mode": 1}]),
+            lambda m: m.update(public_keys=[{"id": 1}]),
+            lambda m: m.update(tokens=[{"id": 31}]),
+        )
+        for number, mutate in enumerate(mutations):
+            with self.subTest(mutation=number):
+                native = self.captured_metadata()
+                mutate(native)
+                with self.assertRaises((Refused, self.host["Refused"])):
+                    backend.require_reader_ready(native)

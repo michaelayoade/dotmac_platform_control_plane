@@ -25,7 +25,7 @@ def build_revocation_sql(binding):
     if type(binding) is not dict or set(binding) != _KEYS:
         raise ValueError("reader_binding_keys")
     fixed = {"kind": "reader", "user_id": 10, "username": "cp-bundle-reader",
-             "token_name": "cp-artifact-bootstrap-20261127-r1", "scope": "read:package"}
+             "token_name": "cp-artifact-bootstrap-20261127-r2", "scope": "read:package"}
     if any(type(binding[k]) is not type(v) or binding[k] != v
            for k, v in fixed.items()):
         raise ValueError("reader_binding_identity")

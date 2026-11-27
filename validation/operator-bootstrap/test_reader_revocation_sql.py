@@ -5,7 +5,7 @@ from reader_revocation_sql import build_revocation_sql
 
 def binding():
     return {"kind": "reader", "token_id": 31, "user_id": 10,
-            "username": "cp-bundle-reader", "token_name": "cp-artifact-bootstrap-20261127-r1",
+            "username": "cp-bundle-reader", "token_name": "cp-artifact-bootstrap-20261127-r2",
             "scope": "read:package", "created_unix": 1795644000}
 
 
@@ -25,7 +25,7 @@ class ReaderSQLTests(unittest.TestCase):
         changes = {"kind": ("canary", "bootstrap", None), "user_id": (1, 11, True, 10.0),
                    "username": ("dotmac-admin", "cp-bundle-reader'", None),
                    "scope": ("write:package", "read:package,read:user", None),
-                   "token_name": ("cp-artifact-bootstrap-20261127-r2", "x';DELETE", None),
+                   "token_name": ("cp-artifact-bootstrap-20261127-r1", "x';DELETE", None),
                    "token_id": (True, 31.0, 0, -1, 2**63, "31", *range(1, 31)),
                    "created_unix": (True, 1.0, 0, -1, 2**63, "1")}
         for field, values in changes.items():

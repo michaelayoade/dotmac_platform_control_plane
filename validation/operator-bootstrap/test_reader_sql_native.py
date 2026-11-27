@@ -23,7 +23,7 @@ MARKER = {"status": "EXACT_TOKEN_ROW_TRANSACTION_COMMITTED", "deleted_rows": 1}
 
 def synthetic_binding():
     return {"kind": "reader", "token_id": 31, "user_id": 10,
-            "username": "cp-bundle-reader", "token_name": "cp-artifact-bootstrap-20261127-r1",
+            "username": "cp-bundle-reader", "token_name": "cp-artifact-bootstrap-20261127-r2",
             "scope": "read:package", "created_unix": 1795644000}
 
 
@@ -123,7 +123,7 @@ INSERT INTO access_token VALUES
     (16, 5, 'retained-16', 'read:package', 1700000000),
     (26, 5, 'retained-26', 'read:package', 1700000000),
     (28, 5, 'retained-28', 'read:package', 1700000000),
-    (31, 10, 'cp-artifact-bootstrap-20261127-r1', 'read:package', 1795644000),
+    (31, 10, 'cp-artifact-bootstrap-20261127-r2', 'read:package', 1795644000),
     (32, 10, 'unrelated-token', 'read:package', 1795643999);
 '''))
 
