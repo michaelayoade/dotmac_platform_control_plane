@@ -640,12 +640,40 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "the per-subject lock target every admission and root mutation takes "
         "FOR UPDATE; append-only by trigger, so a row is never removed",
     ),
+    _retain(
+        "mod_deploy",
+        "deploy_settings",
+        "the attended, approved CURRENT deploy policy: six named settings (pull "
+        "allowlist, legacy env-file allowlist and ceiling, role-job windows, lease "
+        "ceilings, window max days), each row with its setting_version, approver_ref "
+        "and register_ref. Control a18 changes a row by UPDATE, has no delete path "
+        "and grants no DELETE; every change is also a platform audit event. Retained, "
+        "not a gauge: no other table rebuilds it, and deleting a row silently reverts "
+        "to a default that can be WIDER than the approved value (lease ceiling 900 s, "
+        "window 30 days), so no operator command may target it either",
+    ),
     _retain("mod_deploy", "deployment_plans", "what a deployment was told to do"),
+    _retain(
+        "mod_deploy",
+        "deployment_sets",
+        "append-only evidence of a deployment set: a primary plan, an optional "
+        "companion plan, the order policy and the set digest one approval covers; a "
+        "trigger refuses UPDATE, DELETE and TRUNCATE",
+    ),
     _retain(
         "mod_deploy",
         "deployment_targets",
         "deployment-target identity — the authority vendor `v017` transferred "
         "this to",
+    ),
+    _retain(
+        "mod_deploy",
+        "legacy_env_policy_versions",
+        "append-only evidence, one row per policy VERSION of a target's legacy env "
+        "file: the operator-fixed whole-file sha256, the secret-class env NAMES it "
+        "may supply (names only, never values), expiry and enabled/retired state. A "
+        "change or retirement is a new row; a trigger refuses UPDATE, DELETE and "
+        "TRUNCATE",
     ),
     _retain("mod_deploy", "observation_attempts", "every attempt to observe a target"),
     _retain(
