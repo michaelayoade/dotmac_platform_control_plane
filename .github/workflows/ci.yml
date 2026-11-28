@@ -24,6 +24,7 @@ jobs:
           (cd "$GITHUB_WORKSPACE/validation/operator-bootstrap" && sha256sum -c SOURCE-SHA256SUMS)
           (cd "$GITHUB_WORKSPACE/validation/candidate-image" && sha256sum -c SOURCE-SHA256SUMS)
           bash -n "$GITHUB_WORKSPACE/validation/candidate-image/fixtures/acceptance.sh"
+          python -I -S -B -c 'import ast,pathlib,sys; [ast.parse(pathlib.Path(p).read_bytes(), filename=p) for p in sys.argv[1:]]' "$GITHUB_WORKSPACE/validation/candidate-image/fixtures/data_governance.py" "$GITHUB_WORKSPACE/validation/candidate-image/e16_run.py"
           chmod 700 .
           chmod 600 *.py *.json README.md
       - name: Run fully mocked owner, SQL and API tests
@@ -79,6 +80,7 @@ jobs:
           (cd "$GITHUB_WORKSPACE/validation/operator-bootstrap" && sha256sum -c SOURCE-SHA256SUMS)
           (cd "$GITHUB_WORKSPACE/validation/candidate-image" && sha256sum -c SOURCE-SHA256SUMS)
           bash -n "$GITHUB_WORKSPACE/validation/candidate-image/fixtures/acceptance.sh"
+          python -I -S -B -c 'import ast,pathlib,sys; [ast.parse(pathlib.Path(p).read_bytes(), filename=p) for p in sys.argv[1:]]' "$GITHUB_WORKSPACE/validation/candidate-image/fixtures/data_governance.py" "$GITHUB_WORKSPACE/validation/candidate-image/e16_run.py"
       - name: Qualify exact transactions in isolated Unix-only PostgreSQL16
         run: |
           set -euo pipefail
