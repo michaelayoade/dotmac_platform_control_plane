@@ -1,0 +1,10 @@
+# Vendored from .cutover-private/cp-generic-deploy-20261122/a2-gates/observer/ (final pins, L-r6a/L-r6b)
+# EXCEPT the readback: the architect r8 proposal (a2-gates/observer-r8-proposed/), which replaces
+# 70804d18d6af… and is approved (register v2155+; Michael, 2026-11-24).
+# The workflow refuses to run unless these digests match the bytes here.
+0380398a21b18aba21d3f10c9a67f8b450e176a297e1e0049217d33ea172c7ce  a2-observer-absence.sql.tmpl
+b87822722a8e4dcfa200c947e1ad62254790d67b662f1383b61847d4a4047139  a2-observer-create.sql.tmpl
+1e8e2ee6368b1bbe6a66bce54a8c3a534e77a136c6d3e3d031e7f419919f23a0  a2-observer-drop.sql.tmpl
+94fb64b6b9825b7ba628d43ac4e0fbc49d911f5a20ebbe95a07b59d4dfa79e68  a2-observer-readback.sql.tmpl
+b42c1e516ae631b98c8e47b0212de7833d2bca1b511a10efbde6cecb3468fd44  a2-observer-secdef-names.sql.tmpl
+3f8681183e04544d6e505aede5d671550fca35f653b51ce67b64fc63fdb75526  a2-observer-secret.py

@@ -1,0 +1,3 @@
+-- a2 recovery observer role (C5) post-drop absence check, per-run template. Substitution: <N> only.
+-- Run with psql -A -t. Output: `role_absent|true` or `role_absent|false`.
+SELECT 'role_absent|' || (count(*) = 0)::text FROM pg_roles WHERE rolname = 'a2_recovery_observer_r<N>';

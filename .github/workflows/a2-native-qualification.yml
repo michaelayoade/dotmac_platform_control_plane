@@ -1,0 +1,541 @@
+name: a2-native-qualification
+
+# Foundation a2 Gate 2 items #1 (NATIVE_PG) and #2 (i) (NATIVE_BAO): real
+# PostgreSQL 16 and a real OpenBao 2.5.3 server, on disposable GitHub-hosted
+# runners. Each job emits a VALUES-FREE receipt as a workflow artifact.
+#
+# This workflow PUBLISHES NOTHING: permissions are read-only, there is no push,
+# no registry login, no release step; artifacts are workflow artifacts only. The
+# image is built locally on the runner (to bind its id) and never pushed.
+#
+# Triggers: workflow_dispatch and pull_request only. Never push to main (a CP
+# main merge spends a production image).
+
+on:
+  workflow_dispatch:
+    inputs:
+      cp_ref:
+        description: >-
+          Commit of dotmac_platform_control_plane whose tests and artifacts are
+          qualified. Default: CP #269 head (carries #266 and the consume test).
+        required: false
+        default: ""
+      control_ref:
+        description: >-
+          Commit of dotmac_deployment_control whose wheel is built and bound.
+          Default: Control #76 head (P0-built recovery source).
+        required: false
+        default: ""
+      require_complete:
+        description: >-
+          Fail unless EVERY scenario is PASS (a BLOCKED scenario fails the job).
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/a2-native-qualification.yml"
+      - "a2_native_qualification/**"
+
+permissions:
+  contents: read
+
+env:
+  # The COMBINED draft ref: CP #269 + #272 + the Control a18 lock (kernel-lock run
+  # 45759607636). The image and the recovery source both come from it.
+  CP_REF_DEFAULT: c512c23d059b51cace2f98df4d61432e2f24ba3b
+  CONTROL_REF_DEFAULT: 3bd99c2ce19b287f22f9ff8ad92907b4e45324c8
+  # The recovery source (conformance/recovery_source/test_contract.py) comes from the
+  # same combined ref, not from a separate #272 checkout.
+  # C4 seed pairing (architect r8 D3): the seed uses the Control version the BUILT
+  # IMAGE carries (a18 on the combined ref); this checkout supplies only the test signer.
+  C4_SEED_CONTROL_REF: b48ebb9f824fa2a63adca33491308431bebd13ab
+  # The Starter commit CP #269's own Lane 3 step pins for the Foundation import.
+  FOUNDATION_REF: f50d497e4df178e1411d2b4fccbfa153a21fd12a
+  OPENBAO_IMAGE: openbao/openbao@sha256:fdc6da21ca6963560c32336fd7feb9cf2d5e52668f1a1647205a4b41171f0806
+  REQUIRE_COMPLETE: ${{ github.event_name == 'workflow_dispatch' && inputs.require_complete }}
+
+jobs:
+  selftest:
+    # Offline tests of the receipt tooling: synthetic junit, no engine, no secret.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Receipt tooling self-tests
+        run: python -I a2_native_qualification/test_selftest.py
+
+  pg:
+    needs: selftest
+    runs-on: ubuntu-24.04
+    env:
+      COMPOSE_PROJECT_NAME: a2-native-pg-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_DB_PORT: "5439"
+      TEST_RESTORE_DB_PORT: "5440"
+      TEST_DB_HOST: 127.0.0.1
+      TEST_DB_NAME: vendor_cp_test
+      TEST_DB_ADMIN_USER: postgres
+      TEST_DB_ADMIN_PASSWORD: postgres
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5439/vendor_cp_test
+      # A skipped test is not a pass: a missing database is a failure.
+      REQUIRE_POSTGRES_TESTS: "1"
+      LANE3_REQUIRE_FOUNDATION: "1"
+      D16_DISPOSABLE_PG16: "1"
+      # The installed wheel carries no migration lineage; it travels as data.
+      VENDOR_MIGRATION_ROOT: ${{ github.workspace }}/cp-src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch the CP source under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_platform_control_plane
+          ref: ${{ inputs.cp_ref || env.CP_REF_DEFAULT }}
+          path: cp-src
+          persist-credentials: false
+      - name: Fetch the CP recovery source (#272) for the recovery contract suite
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_platform_control_plane
+          ref: ${{ inputs.cp_ref || env.CP_REF_DEFAULT }}
+          path: cp-recovery-src
+          persist-credentials: false
+      - name: Fetch the Control source that supplies the C4 test signer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_deployment_control
+          ref: ${{ env.C4_SEED_CONTROL_REF }}
+          path: control-seed-src
+          persist-credentials: false
+      - name: Fetch the Control source to build
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_deployment_control
+          ref: ${{ inputs.control_ref || env.CONTROL_REF_DEFAULT }}
+          path: control-src
+          persist-credentials: false
+      - name: Fetch the exact Foundation source (Lane 3 import)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_starter_mt
+          ref: ${{ env.FOUNDATION_REF }}
+          path: foundation-src
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - name: Record the three source commits
+        run: |
+          set -euo pipefail
+          for d in cp-src cp-recovery-src control-src control-seed-src foundation-src; do
+            test -z "$(git -C "$d" status --porcelain=v1 --untracked-files=all)"
+          done
+          echo "CP_COMMIT=$(git -C cp-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "RECOVERY_CP_COMMIT=$(git -C cp-recovery-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          test "$(git -C cp-recovery-src rev-parse HEAD)" = "$(git -C cp-src rev-parse HEAD)"
+          test "$(git -C control-seed-src rev-parse HEAD)" = "$C4_SEED_CONTROL_REF"
+          echo "CONTROL_COMMIT=$(git -C control-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "FOUNDATION_COMMIT=$(git -C foundation-src rev-parse HEAD)" >> "$GITHUB_ENV"
+          test "$(git -C foundation-src rev-parse HEAD)" = "$FOUNDATION_REF"
+          echo "QUAL_WORKFLOW_SHA256=$(sha256sum .github/workflows/a2-native-qualification.yml | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "OUT_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+      - name: Cite the Control and CP source CI runs (ids and outcomes only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out"
+          cite() {
+            gh api "repos/$1/actions/runs?head_sha=$2&per_page=20" \
+              --jq '[.workflow_runs[] | select(.name=="CI")] | sort_by(.created_at) | last // {} | {repository: "'"$1"'", head_sha: "'"$2"'", run_id: (.id // null), status: (.status // "none"), conclusion: (.conclusion // null)}' \
+              2>/dev/null || echo '{"repository":"'"$1"'","head_sha":"'"$2"'","run_id":null,"status":"lookup_failed","conclusion":null}'
+          }
+          {
+            echo '{"control":'; cite michaelayoade/dotmac_deployment_control "$CONTROL_COMMIT"
+            echo ',"cp_recovery":'; cite michaelayoade/dotmac_platform_control_plane "$RECOVERY_CP_COMMIT"
+            echo ',"cp_lease":'; cite michaelayoade/dotmac_platform_control_plane "$CP_COMMIT"
+            echo '}'
+          } > "$out/ci-runs.json"
+          python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$out/ci-runs.json"
+      - name: Build the Control wheel
+        run: |
+          set -euo pipefail
+          (cd control-src && poetry build --format wheel --output "$RUNNER_TEMP/control-dist")
+          control_wheel="$(ls "$RUNNER_TEMP"/control-dist/*.whl)"
+          echo "CONTROL_WHEEL_NAME=$(basename "$control_wheel")" >> "$GITHUB_ENV"
+          echo "CONTROL_WHEEL_SHA256=$(sha256sum "$control_wheel" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+      - name: Build the hash-pinned runtime wheelhouse for the Control wheel
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"
+          wh="$out/wheelhouse"
+          mkdir -p "$wh"
+          python -m venv "$RUNNER_TEMP/dl-venv"
+          # Credentials only in an env var (never an argument, never logged).
+          export PIP_EXTRA_INDEX_URL="https://ci-reader:${FORGEJO_READ_TOKEN}@registry.dotmac.io/api/packages/dotmac/pypi/simple"
+          "$RUNNER_TEMP/dl-venv/bin/python" -m pip download --disable-pip-version-check \
+            --only-binary=:all: --dest "$wh" "$RUNNER_TEMP"/control-dist/*.whl
+          cp "$RUNNER_TEMP"/control-dist/*.whl "$wh"/
+          unset PIP_EXTRA_INDEX_URL
+          python3 -I a2_native_qualification/qual.py wheelhouse-lock --wheelhouse "$wh" \
+            --lock-out "$out/runtime-lock.txt" --manifest-out "$out/wheelhouse-manifest.json"
+          # Prove the lock installs OFFLINE, hash-checked, from the wheelhouse alone.
+          python -m venv "$RUNNER_TEMP/offline-venv"
+          "$RUNNER_TEMP/offline-venv/bin/python" -m pip install --disable-pip-version-check \
+            --require-hashes --no-index --find-links "$wh" -r "$out/runtime-lock.txt"
+          "$RUNNER_TEMP/offline-venv/bin/python" -c 'import dotmac_deployment_control'
+      - name: Install CP dependencies and the BUILT CP wheel (not the source tree)
+        working-directory: cp-src
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          poetry install --no-root --no-interaction --no-ansi
+          poetry build --no-interaction --no-ansi
+          cp_wheel="$(ls dist/*.whl)"
+          poetry run python -m pip install --disable-pip-version-check --no-deps --no-index --force-reinstall "$cp_wheel"
+          echo "CP_WHEEL_NAME=$(basename "$cp_wheel")" >> "$GITHUB_ENV"
+          echo "CP_WHEEL_SHA256=$(sha256sum "$cp_wheel" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          # Installed-artifact parity: the tests must import the installed wheel.
+          parity=false
+          if poetry run python -c 'import vendor_cp, sys; sys.exit(0 if "site-packages" in vendor_cp.__file__ else 1)'; then
+            parity=true
+          fi
+          echo "PARITY=$parity" >> "$GITHUB_ENV"
+          test "$parity" = true
+      - name: Start disposable PostgreSQL 16 and migrate
+        working-directory: cp-src
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.test.yml up -d --wait
+          server_version="$(docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d vendor_cp_test -Atc 'SHOW server_version')"
+          test "${server_version%%.*}" = 16
+          echo "PG_SERVER_VERSION=${server_version}" >> "$GITHUB_ENV"
+          echo "PG_IMAGE=$(grep -o 'postgres:16@sha256:[0-9a-f]\{64\}' docker-compose.test.yml | head -1)" >> "$GITHUB_ENV"
+          MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test \
+            poetry run dotmac-platform admin migrate
+      - name: Run the named scenarios (existing CP tests, by name)
+        id: tests
+        working-directory: cp-src
+        env:
+          PYTHONPATH: ${{ github.workspace }}/foundation-src/packages/dotmac-deployment-foundation/src
+          PYTHONDONTWRITEBYTECODE: "1"
+          LANE3_STARTER_SOURCE_DIR: ${{ github.workspace }}/foundation-src
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          mapfile -t targets < <(python3 -I "$GITHUB_WORKSPACE/a2_native_qualification/qual.py" pg-select --scenarios "$GITHUB_WORKSPACE/a2_native_qualification/scenarios.json")
+          # The scenario files are run by name from the checkout under test.
+          set +e
+          poetry run pytest -rs -p no:cacheprovider -o junit_family=xunit1 \
+            --junitxml="$RUNNER_TEMP/out/pg-junit.xml" "${targets[@]}" 2>&1 | tee "$RUNNER_TEMP/out/pg.log"
+          rc="${PIPESTATUS[0]}"
+          echo "PYTEST_RC=${rc}" >> "$GITHUB_ENV"
+          exit 0
+      - name: Recovery contract suite against the BUILT Control wheel (own environment)
+        working-directory: cp-recovery-src
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -uo pipefail
+          # A separate project directory gets its own virtualenv, so the #272
+          # vendor_cp and the Control wheel never touch the pg job's environment.
+          set +e
+          (
+            set -e
+            poetry install --no-root --no-interaction --no-ansi
+            poetry build --no-interaction --no-ansi
+            # Control and ALL its runtime deps come from the hash-pinned lock and the
+            # wheelhouse, offline: the one install path that is proven. The CP wheel
+            # goes on top without dependencies.
+            poetry run python -m pip install --disable-pip-version-check --require-hashes --no-index --find-links "$RUNNER_TEMP/out/wheelhouse" -r "$RUNNER_TEMP/out/runtime-lock.txt"
+            poetry run python -m pip install --disable-pip-version-check --no-deps --no-index dist/*.whl
+            # The suite must import the INSTALLED Control wheel and CP wheel,
+            # never a sibling source tree.
+            poetry run python -c 'import dotmac_deployment_control as c, vendor_cp, sys; sys.exit(0 if "site-packages" in c.__file__ and "site-packages" in vendor_cp.__file__ else 1)'
+          )
+          prc=$?
+          echo "RECOVERY_PARITY=$([ "$prc" = 0 ] && echo true || echo false)" >> "$GITHUB_ENV"
+          if [ "$prc" = 0 ]; then
+            # The reviewed #272 invocation (README): --noconftest, BOTH files, and
+            # CONFORMANCE_DATABASE_URL is never set (the suite is offline).
+            unset CONFORMANCE_DATABASE_URL
+            files="conformance/recovery_source/test_contract.py tests/unit/test_foundation_execution_approval.py"
+            # shellcheck disable=SC2086
+            poetry run pytest --noconftest --collect-only -q -p no:cacheprovider $files > "$RUNNER_TEMP/out/recovery-collect.txt" 2>&1
+            # shellcheck disable=SC2086
+            poetry run pytest --noconftest -rs -p no:cacheprovider -o junit_family=xunit1 \
+              --junitxml="$RUNNER_TEMP/out/recovery-junit.xml" $files 2>&1 | tee "$RUNNER_TEMP/out/recovery.log"
+          fi
+          exit 0
+      - name: Control native-PG scenarios (a) and (d), on real PostgreSQL 16
+        working-directory: control-src
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+          # No PGPASSWORD here: it would override .pgpass and send the wrong
+          # password for app_admin / app_user / platform_api.
+          TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5442/postgres
+          REQUIRE_NO_SKIPS: "1"
+          DOTMAC_MIGRATION_BINDINGS: tests.migration_bindings:CANARY_PREREQUISITE_BINDINGS
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -uo pipefail
+          # Set up exactly as Control's own canary job does: a disposable PG16
+          # (same pinned image as the CP compose), cluster roles, real passwords
+          # via .pgpass (never trust auth).
+          set +e
+          (
+            set -e
+            docker run -d --name a2-control-pg -e POSTGRES_PASSWORD=postgres \
+              -p 127.0.0.1:5442:5432 "$PG_IMAGE"
+            for _ in $(seq 1 40); do
+              docker exec a2-control-pg pg_isready -U postgres && break
+              sleep 2
+            done
+            psql_() { docker exec -e PGPASSWORD=postgres a2-control-pg psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "$1"; }
+            psql_ "CREATE ROLE app_admin LOGIN BYPASSRLS CREATEROLE PASSWORD 'app_admin'"
+            for role in app_user platform_api; do psql_ "CREATE ROLE ${role} LOGIN PASSWORD '${role}'"; done
+            umask 077
+            {
+              echo "localhost:5442:*:app_admin:app_admin"
+              echo "localhost:5442:*:app_user:app_user"
+              echo "localhost:5442:*:platform_api:platform_api"
+            } > "$HOME/.pgpass"
+            chmod 600 "$HOME/.pgpass"
+            poetry install --no-interaction
+          )
+          src=$?
+          if [ "$src" = 0 ]; then
+            mapfile -t ctargets < <(python3 -I "$GITHUB_WORKSPACE/a2_native_qualification/qual.py" pg-select --control --scenarios "$GITHUB_WORKSPACE/a2_native_qualification/scenarios.json")
+            poetry run pytest -rs -p no:cacheprovider -o junit_family=xunit1 \
+              --junitxml="$RUNNER_TEMP/out/control-junit.xml" "${ctargets[@]}" 2>&1 | tee "$RUNNER_TEMP/out/control-pg.log"
+          fi
+          docker rm -f a2-control-pg >/dev/null 2>&1
+          exit 0
+      - name: Build the CP image locally (bound by id, never pushed)
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
+            --build-arg "SOURCE_REVISION=${CP_COMMIT}" \
+            --tag a2-native-qual-cp:local cp-src
+          echo "CP_IMAGE_ID=$(docker image inspect --format '{{.Id}}' a2-native-qual-cp:local)" >> "$GITHUB_ENV"
+      - name: C4 recovery-observe native proof (kit-v9 candidate container code in the built CP image)
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -uo pipefail
+          set +e   # every stage is judged explicitly; none may abort the step
+          out="$RUNNER_TEMP/out"
+          c4="$GITHUB_WORKSPACE/a2_native_qualification/c4"
+          work="$(mktemp -d)"
+          role_suffix="r${GITHUB_RUN_ID}"
+          role="a2_recovery_observer_${role_suffix}"
+          psql_() { docker compose -f cp-src/docker-compose.test.yml exec -T postgres psql -U postgres -d vendor_cp_test -v ON_ERROR_STOP=1 "$@"; }
+          fail() {
+            python3 -I -c 'import json,sys; json.dump({"status":"FAIL","stage":sys.argv[1],"detail":sys.argv[2],"script":"a2_recovery_observe_container.py"}, open(sys.argv[3],"w"), sort_keys=True)' "$1" "${2:-}" "$out/recovery-observe-native.json"
+            echo "recovery_observe_native: FAIL at $1 ${2:-}"
+            exit 0
+          }
+          (cd cp-src && poetry run python "$GITHUB_WORKSPACE/a2_native_qualification/test_observer_driver.py")
+          # 1. The vendored script must equal the pinned kit-v9 candidate bytes.
+          grep -qxF "$(sha256sum "$c4/a2_recovery_observe_container.py" | cut -d' ' -f1)  a2_recovery_observe_container.py" "$c4/PINS" || fail pin_mismatch
+          script_sha="$(sha256sum "$c4/a2_recovery_observe_container.py" | cut -d' ' -f1)"
+          # 2. Seed one requested rollout (original authorization committed, no dispatch)
+          #    in the migrated real schema, with Control's own test doubles.
+          # Seed pairing (architect r8 D3): the seed runs in the cp-src venv, so it
+          # writes with the SAME Control version the built image carries; the
+          # Control checkout at C4_SEED_CONTROL_REF supplies only its test signer.
+          img_v="$(docker run --rm --pull=never --entrypoint python a2-native-qual-cp:local -c 'from importlib.metadata import version; print(version("dotmac-deployment-control"))' 2>/dev/null)"
+          env_v="$(cd cp-src && poetry run python -c 'from importlib.metadata import version; print(version("dotmac-deployment-control"))' 2>/dev/null)"
+          src_v="$(sed -n 's/^version = "\(.*\)"/\1/p' control-seed-src/pyproject.toml | head -1)"
+          export C4_SEED_REF="$C4_SEED_CONTROL_REF" C4_IMAGE_CONTROL_VERSION="$img_v"
+          [ -n "$img_v" ] && [ "$img_v" = "$env_v" ] && [ "$img_v" = "$src_v" ] || fail version_pairing "image=$img_v seed_env=$env_v signer_checkout=$src_v"
+          (cd cp-src && poetry run python "$c4/seed.py" \
+              "postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test" \
+            "$GITHUB_WORKSPACE/control-seed-src/tests/authorization_support.py" > "$work/coords.json" 2> "$work/seed.err") || fail seed "$(grep -E '^[A-Za-z_.]*(Error|Exception)' "$work/seed.err" | head -1 | cut -c1-240)"
+          read -r ROLLOUT_REF PLAN_ID C1 C2 < <(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["rollout_ref"], d["plan_id"], d["rollout_command_id"], d["dispatch_command_id"])' "$work/coords.json") || fail coords
+          # 3. Create the observer role exactly as REVIEW-P2-L1 r3 C5 specifies.
+          umask 077
+          python3 -I -c 'import secrets; print(secrets.token_urlsafe(32))' > "$work/pw"
+          echo "::add-mask::$(cat "$work/pw")"
+          python3 -I "$c4/c4.py" scram "$work/pw" > "$work/verifier"
+          python3 -I "$c4/c4.py" render "$role_suffix" vendor_cp_test > "$work/create.sql"
+          psql_ -v "scram_verifier=$(cat "$work/verifier")" < "$work/create.sql" >/dev/null || fail observer_create
+          python3 -I "$c4/c4.py" readback-sql "$role" vendor_cp_test | psql_ -At > "$work/readback.json" || fail readback
+          # 4. Run the kit code, unchanged, inside the built CP image as that role.
+          printf 'A2_OBSERVE_DSN=postgresql://%s:%s@127.0.0.1:5439/vendor_cp_test?application_name=a2-recovery-observe\n' "$role" "$(cat "$work/pw")" > "$work/dsn.env"
+          docker run --rm -i --pull=never --network host --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp --pids-limit 64 --memory 512m \
+            --env-file "$work/dsn.env" a2-native-qual-cp:local \
+            python - "$ROLLOUT_REF" "$PLAN_ID" "$C1" "$C2" < "$c4/a2_recovery_observe_container.py" \
+            > "$work/stdout" 2> "$work/stderr"
+          rc=$?
+          # Never let the password reach the receipt (token_urlsafe: sed-safe chars).
+          sed -i "s/$(cat "$work/pw")/***/g" "$work/stderr"
+          # 5. Sensitivity: the observer must be unable to write.
+          psql_wrc=0
+          PGOPTIONS="" docker compose -f cp-src/docker-compose.test.yml exec -T postgres \
+            psql -U "$role" -d vendor_cp_test -v ON_ERROR_STOP=1 -c "UPDATE mod_deploy.rollouts SET status = status" >/dev/null 2>&1 || psql_wrc=$?
+          python3 -I "$c4/c4.py" result "$work/readback.json" "$work/stdout" "$work/stderr" "$rc" "$psql_wrc" "$script_sha" "${CP_IMAGE_ID:-unbuilt}" "$out/recovery-observe-native.json"
+          # Names-only drop, as r3 specifies (the CI database is disposable anyway).
+          psql_ -c "REVOKE ALL ON mod_deploy.rollouts, mod_deploy.rollout_attempts, mod_deploy.rollout_attempt_settlements, public.platform_idempotency_records FROM ${role}; REVOKE USAGE ON SCHEMA mod_deploy, public FROM ${role}; REVOKE CONNECT ON DATABASE vendor_cp_test FROM ${role}; DROP ROLE ${role};" >/dev/null 2>&1 || true
+          exit 0
+      - name: Observer SQL native proof (vendored snippet and templates, N=999)
+        run: bash a2_native_qualification/observer/run.sh
+      - name: Write the receipt
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 -I a2_native_qualification/qual.py pg-receipt \
+            --scenarios a2_native_qualification/scenarios.json \
+            --junit "$RUNNER_TEMP/out/pg-junit.xml" --log "$RUNNER_TEMP/out/pg.log" \
+            --out-dir "$RUNNER_TEMP/out" --stem "a2-native-pg-qualification-${OUT_DATE}" \
+            --cp-repo michaelayoade/dotmac_platform_control_plane --cp-commit "$CP_COMMIT" \
+            --control-repo michaelayoade/dotmac_deployment_control --control-commit "$CONTROL_COMMIT" \
+            --foundation-repo michaelayoade/dotmac_starter_mt --foundation-commit "$FOUNDATION_COMMIT" \
+            --cp-wheel-name "$CP_WHEEL_NAME" --cp-wheel-sha256 "$CP_WHEEL_SHA256" \
+            --control-wheel-name "$CONTROL_WHEEL_NAME" --control-wheel-sha256 "$CONTROL_WHEEL_SHA256" \
+            --cp-image-id "${CP_IMAGE_ID:-unbuilt}" --parity "${PARITY:-false}" \
+            --server-version "${PG_SERVER_VERSION:-unknown}" --postgres-image "${PG_IMAGE:-unknown}" \
+            --pytest-rc "${PYTEST_RC:-255}" \
+            --wheelhouse-manifest "$RUNNER_TEMP/out/wheelhouse-manifest.json" \
+            --ci-runs "$RUNNER_TEMP/out/ci-runs.json" \
+            --observer-sql-result "$RUNNER_TEMP/out/observer-sql-native.json" \
+            --recovery-collect "$RUNNER_TEMP/out/recovery-collect.txt" \
+            --observe-result "$RUNNER_TEMP/out/recovery-observe-native.json" \
+            --control-junit "$RUNNER_TEMP/out/control-junit.xml" \
+            --recovery-junit "$RUNNER_TEMP/out/recovery-junit.xml" \
+            --recovery-cp-commit "$RECOVERY_CP_COMMIT" \
+            --recovery-parity "${RECOVERY_PARITY:-false}"
+          (cd "$RUNNER_TEMP/out" && sha256sum pg.log pg-junit.xml > a2-native-pg-qualification-inputs.sha256) || true
+      - name: Retain the runtime lock and wheelhouse (workflow artifact only)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: a2-native-runtime-wheelhouse-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/out/wheelhouse
+            ${{ runner.temp }}/out/runtime-lock.txt
+            ${{ runner.temp }}/out/wheelhouse-manifest.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop PostgreSQL
+        if: always()
+        working-directory: cp-src
+        run: docker compose -f docker-compose.test.yml down -v
+      - name: Retain the receipt (workflow artifact only; nothing is published)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: a2-native-pg-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/out
+            !${{ runner.temp }}/out/wheelhouse
+          if-no-files-found: error
+          retention-days: 90
+      - name: Gate (FAIL always fails; INCOMPLETE fails when completeness is required)
+        run: |
+          set -euo pipefail
+          flag=""
+          if [ "$REQUIRE_COMPLETE" != "true" ]; then flag="--allow-incomplete"; fi
+          python3 -I a2_native_qualification/qual.py gate $flag \
+            --receipt "$RUNNER_TEMP/out/a2-native-pg-qualification-${OUT_DATE}.json"
+
+  bao:
+    needs: selftest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Start a real OpenBao 2.5.3 server (file storage, initialised here)
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/bao"
+          mkdir -p "$work/config" "$work/audit" "$work/data"
+          chmod 777 "$work/audit" "$work/data"
+          cat > "$work/config/bao.hcl" <<'HCL'
+          storage "file" {
+            path = "/openbao/file"
+          }
+          listener "tcp" {
+            address     = "0.0.0.0:8200"
+            tls_disable = true
+          }
+          disable_mlock = true
+          api_addr      = "http://127.0.0.1:8200"
+          ui            = false
+          audit "file" "qualification" {
+            description = "disposable qualification audit sink"
+            options {
+              file_path = "/bao-audit/audit.log"
+              mode      = "0644"
+            }
+          }
+          HCL
+          docker pull "$OPENBAO_IMAGE"
+          docker run -d --name a2-native-bao \
+            -p 127.0.0.1:18201:8200 \
+            -v "$work/config:/cfg:ro" \
+            -v "$work/data:/openbao/file" \
+            -v "$work/audit:/bao-audit" \
+            "$OPENBAO_IMAGE" server -config=/cfg/bao.hcl
+          echo "QUAL_WORKFLOW_SHA256=$(sha256sum .github/workflows/a2-native-qualification.yml | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "OUT_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+      - name: Run the OpenBao checks
+        id: checks
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out"
+          python3 -I a2_native_qualification/bao_qualify.py \
+            --addr http://127.0.0.1:18201 \
+            --audit-container-path /bao-audit/audit.log \
+            --audit-host-path "$RUNNER_TEMP/bao/audit/audit.log" \
+            --out "$out/bao-results.json" 2>&1 | tee "$out/bao.log"
+          exit 0
+      - name: Write the receipt
+        if: always()
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"
+          python3 -I a2_native_qualification/qual.py bao-receipt \
+            --results "$out/bao-results.json" --log "$out/bao.log" \
+            --out-dir "$out" --stem "a2-native-bao-qualification-${OUT_DATE}" \
+            --image "$OPENBAO_IMAGE"
+      - name: Stop OpenBao
+        if: always()
+        run: docker rm -f a2-native-bao || true
+      - name: Retain the receipt (workflow artifact only; nothing is published)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: a2-native-bao-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 90
+      - name: Gate
+        run: |
+          python3 -I a2_native_qualification/qual.py gate \
+            --receipt "$RUNNER_TEMP/out/a2-native-bao-qualification-${OUT_DATE}.json"

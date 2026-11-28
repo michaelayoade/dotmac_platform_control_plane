@@ -1,0 +1,4 @@
+# Vendored from kit-v9 source candidate; no native qualification implied.
+# Workflow verifies the observer bytes before execution.
+kit_v9_sha256sums_sha256 3ba245cf86e6bdb806d7bdf3454aabb22a853cb3309c416e7234a4b43123f9f0
+1463be1adc07c009b2bfb408e864f732c3ca9c9af256e128d4bd3e38ead934dc  a2_recovery_observe_container.py

@@ -1,0 +1,16 @@
+-- a2 recovery observer role (C5) P1 helper, per-run template. Substitution: <N> only. NOT part of the sitting or the A-text pins.
+-- Prints the NAMES (never bodies) of the SECURITY DEFINER functions the role can REACH (USAGE on the schema AND EXECUTE on the
+-- function), outside pg_catalog and information_schema, with NO allowlist. Run with psql -A -t.
+-- Output rows: `secdef_reachable|schema.function(argument types)` or the single row `secdef_reachable|none`.
+WITH r AS (
+  SELECT (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') AS name
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE p.prosecdef
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND has_schema_privilege('a2_recovery_observer_r<N>', n.oid, 'USAGE')
+    AND has_function_privilege('a2_recovery_observer_r<N>', p.oid, 'EXECUTE')
+)
+SELECT 'secdef_reachable|' || name FROM r
+UNION ALL
+SELECT 'secdef_reachable|none' WHERE NOT EXISTS (SELECT 1 FROM r)
+ORDER BY 1;
