@@ -23,6 +23,7 @@ jobs:
           sha256sum -c SOURCE-SHA256SUMS
           (cd "$GITHUB_WORKSPACE/validation/operator-bootstrap" && sha256sum -c SOURCE-SHA256SUMS)
           (cd "$GITHUB_WORKSPACE/validation/candidate-image" && sha256sum -c SOURCE-SHA256SUMS)
+          bash -n "$GITHUB_WORKSPACE/validation/candidate-image/fixtures/acceptance.sh"
           chmod 700 .
           chmod 600 *.py *.json README.md
       - name: Run fully mocked owner, SQL and API tests
@@ -77,6 +78,7 @@ jobs:
           sha256sum -c SOURCE-SHA256SUMS
           (cd "$GITHUB_WORKSPACE/validation/operator-bootstrap" && sha256sum -c SOURCE-SHA256SUMS)
           (cd "$GITHUB_WORKSPACE/validation/candidate-image" && sha256sum -c SOURCE-SHA256SUMS)
+          bash -n "$GITHUB_WORKSPACE/validation/candidate-image/fixtures/acceptance.sh"
       - name: Qualify exact transactions in isolated Unix-only PostgreSQL16
         run: |
           set -euo pipefail

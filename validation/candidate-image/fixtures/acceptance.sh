@@ -1,0 +1,1182 @@
+#!/usr/bin/env bash
+# Accept, or refuse, one locally built candidate image.
+#
+# Invoked as `.github/candidate/acceptance.sh <image-reference>` by
+# `.github/workflows/production-image.yml`, BEFORE anything is pushed. That
+# ordering is the whole point of this file: the previous pipeline pushed and
+# then smoked, so a failing smoke left published bytes nobody had accepted and
+# the registry became the record of what was built rather than of what passed.
+#
+# It lives under `.github/` and not under `scripts/` deliberately. `scripts/` is
+# where production instructions live, and those are being retired into the
+# installed console script; this is a CI-only harness that must never become a
+# production entry point. `vendor_cp.installed_surface` refuses new
+# `scripts/`-shaped production invocations, and putting this there would have
+# been the first one.
+#
+# Every check runs against the EXACT bytes that will be published. Where a check
+# needs the application's own code it runs INSIDE the candidate container, not
+# against the checkout — a test of a checkout proves what the source says, and
+# the whole class of defect this pipeline exists to catch is an artifact that
+# disagrees with its source.
+set -euo pipefail
+
+IMAGE="${1:?usage: acceptance.sh <image-reference>}"
+WORKDIR="$(mktemp -d)"
+DB_PORT="${CANDIDATE_DB_PORT:-5449}"
+DB_CONTAINER="candidate-postgres"
+APP_CONTAINER="candidate-app"
+DEPLOY_VOLUME=""
+CANDIDATE_NETWORK="candidate-vendor-backend"
+PG_IMAGE="${CANDIDATE_POSTGRES_IMAGE:-postgres:16}"
+# The platform host this run addresses. It is a Host HEADER only — every request
+# below dials 127.0.0.1 explicitly — so this name is never resolved and no such
+# host need exist.
+#
+# It was `candidate.dotmac.invalid`, chosen so it could not possibly resolve, and
+# that choice broke the API journey in a way worth recording. `.invalid` is an
+# IANA SPECIAL-USE domain, and `email-validator` (behind pydantic's `EmailStr`)
+# refuses one in the domain part regardless of deliverability checking. The
+# platform login body is an `EmailStr`, so an administrator the CLI had just
+# created successfully — the CLI does not validate as an `EmailStr` — was
+# rejected with 422 before any credential was checked. The battery reported
+# "the API did not issue a bearer token", which was true and named nothing.
+HOSTNAME_HEADER="candidate.dotmac.io"
+
+pass() { printf '  ok    %s\n' "$*"; }
+# A refusal that names nothing costs a whole run to diagnose. This renders the
+# reason and the response SHAPE, and never a value: a successful body carries a
+# bearer token, and a failing one is only a step away from carrying an echoed
+# credential.
+refusal_reason() {
+    python3 - "$1" <<'REASON'
+import json
+import sys
+
+raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+try:
+    body = json.loads(raw)
+except Exception:
+    print(raw[:200].replace("\n", " "))
+    raise SystemExit(0)
+if isinstance(body, dict):
+    print(f"detail={body.get('detail')!r} keys={sorted(body)}")
+else:
+    print(str(body)[:200])
+REASON
+}
+fail() { printf '  FAIL  %s\n' "$*" >&2; exit 1; }
+step() { printf '\n== %s\n' "$*"; }
+
+cleanup() {
+    docker rm -f "$APP_CONTAINER" "$DB_CONTAINER" >/dev/null 2>&1 || true
+    docker network rm "$CANDIDATE_NETWORK" >/dev/null 2>&1 || true
+    if test -n "$DEPLOY_VOLUME"; then
+        docker volume rm "$DEPLOY_VOLUME" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+# ── The production-shaped environment ───────────────────────────────────────
+# Taken from `.env.production.example` rather than invented, so the candidate is
+# exercised in the composition it will actually run in. The three differences are
+# named: the database points at a disposable container, the signing key is
+# generated per run by the image itself and never leaves this runner, and
+# `CSRF_SECRET` is a throwaway literal.
+#
+# That third one is not a convenience — it is a FINDING. `dotmac_kernel`
+# `validate_settings` treats `CSRF_SECRET` as production-fatal in three separate
+# ways: unset (still the dev default), shorter than 32 bytes, or equal to
+# `JWT_SECRET`/`SESSION_HASH_SECRET`. Any of them raises in the application
+# lifespan when `ENVIRONMENT=production`. `.env.production.example` declares
+# `CSRF_ENABLED=true` and does NOT declare `CSRF_SECRET` at all, and
+# `vendor_cp.production_secrets` does not materialize one: `SECRET_FIELDS`
+# carries `jwt_secret` and `session_hash_secret` on the runtime record and no
+# CSRF field. A host whose `.env` was built from that template therefore cannot
+# boot this artifact.
+#
+# The battery supplies its own so the remaining checks can run at all. It does
+# NOT repair the production secret contract — that changes what
+# `materialize_production_secrets.py` requires of an OpenBao record that already
+# exists, which is a deployment-window decision and not this file's to make.
+psql_admin() { docker exec -i "$DB_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres "$@"; }
+
+dsn() {
+    local role="$1" database="$2" password
+    case "$role" in
+        app_admin) password=admin ;;
+        app_user) password=app ;;
+        platform_api) password=platform ;;
+        *) fail "no candidate password is declared for database role $role" ;;
+    esac
+    printf 'postgresql+psycopg://%s:%s@127.0.0.1:%s/%s' \
+        "$role" "$password" "$DB_PORT" "$database"
+}
+
+# Runs python inside the candidate image with a production-shaped environment.
+in_image() {
+    local db="${CANDIDATE_DB:-candidate}"
+    docker run --rm --network host \
+        --env "DATABASE_URL=$(dsn app_user "$db")" \
+        --env "PLATFORM_DATABASE_URL=$(dsn platform_api "$db")" \
+        --env "MIGRATION_DATABASE_URL=$(dsn app_admin "$db")" \
+        --entrypoint python "$IMAGE" -c "$SCRIPT"
+}
+
+step "0  disposable database, initialised by the production role script"
+docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+docker network rm "$CANDIDATE_NETWORK" >/dev/null 2>&1 || true
+docker network create "$CANDIDATE_NETWORK" >/dev/null
+docker run -d --name "$DB_CONTAINER" \
+    --network "$CANDIDATE_NETWORK" \
+    --network-alias db \
+    --env POSTGRES_USER=postgres \
+    --env POSTGRES_PASSWORD=postgres \
+    --env 'POSTGRES_INITDB_ARGS=--auth-local=trust --auth-host=scram-sha-256' \
+    --env POSTGRES_DB=candidate \
+    --env VENDOR_DB_ADMIN_PASSWORD=admin \
+    --env VENDOR_DB_APP_USER_PASSWORD=app \
+    --env VENDOR_DB_PLATFORM_API_PASSWORD=platform \
+    --env VENDOR_DB_DISPATCHER_PASSWORD=dispatcher \
+    --volume "$PWD/deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro" \
+    --volume "$PWD/deploy/postgres/bootstrap-credential-function.sql:/docker-entrypoint-initdb.d/003-bootstrap-credential-function.sql:ro" \
+    --volume "$PWD/.github/candidate/postgres-hba.sh:/docker-entrypoint-initdb.d/002-candidate-hba.sh:ro" \
+    --publish "127.0.0.1:${DB_PORT}:5432" \
+    "$PG_IMAGE" >/dev/null
+# ONE predicate, and it has to discriminate two things this step used to
+# conflate. `pg_isready` answers "is a server accepting connections", which is
+# TRUE while the entrypoint is still running /docker-entrypoint-initdb.d
+# against its TEMPORARY server — before `001-vendor-roles.sh` has created a
+# single role, and before the temporary server is STOPPED to start the real
+# one. So the old wait could return on either side of initialisation, and the
+# next statement would meet `role "app_admin" does not exist` or a refused
+# connection, intermittently, depending on which finished first.
+#
+# `-h 127.0.0.1` forces TCP, and the entrypoint's temporary server sets
+# `listen_addresses=''` — it is reachable only over the unix socket. So a TCP
+# connection cannot be answered by it, and asking that connection for the role
+# proves BOTH halves at once: the real server is up, and initialisation ran.
+# Waiting for the role over the socket and then for liveness would NOT be
+# equivalent: both can be satisfied inside the initialisation window, with the
+# stop still ahead.
+#
+# The `pass` line below has always CLAIMED the roles were created. It is now
+# the thing that was checked. A step reporting success it never observed is
+# how this survived being green.
+initialised() {
+    docker exec -e PGPASSWORD=postgres "$DB_CONTAINER" \
+        psql -h 127.0.0.1 -p 5432 -U postgres -d candidate -tAc \
+        "select 1 from pg_roles where rolname = 'app_admin'" 2>/dev/null \
+        | grep -qx 1
+}
+for _ in $(seq 1 60); do
+    initialised && break
+    sleep 1
+done
+initialised \
+    || fail "the disposable database never finished initialising: no app_admin \
+over a TCP connection, so either init-roles.sh did not run or the server never \
+came up"
+pass "database up, roles created by deploy/postgres/init-roles.sh"
+psql_admin --dbname candidate --command \
+    'CREATE DATABASE vendor_control_plane OWNER app_admin' >/dev/null \
+    || fail "the production-named authentication subject could not be created"
+
+step "0a loopback trust is blind; the bridge oracle discriminates"
+# Reproduce the retired probe first. A deliberately invalid password succeeds
+# from inside PostgreSQL because 127.0.0.1 selects the earlier trust rule.
+docker exec --env PGPASSWORD=deliberately-invalid-candidate-proof \
+    "$DB_CONTAINER" psql -X --no-password --host 127.0.0.1 --port 5432 \
+    --username app_user --dbname vendor_control_plane --command 'SELECT 1' >/dev/null \
+    || fail "the loopback control did not reproduce the trusted path"
+pass "control: container-local 127.0.0.1 accepts deliberately invalid material"
+
+# Prove the exact network subject exists before interpreting any credential
+# failure. Readiness is over db:5432, while database/role existence is checked
+# through the container's trusted local socket without reading any credential.
+docker exec "$DB_CONTAINER" pg_isready --host db --port 5432 \
+    --dbname vendor_control_plane >/dev/null \
+    || fail "the bridge listener is not accepting connections"
+subject="$(psql_admin --tuples-only --no-align --dbname vendor_control_plane --command \
+    "SELECT CASE WHEN current_database() = 'vendor_control_plane' AND
+        (SELECT array_agg(rolname ORDER BY rolname) FROM pg_roles
+         WHERE rolname IN ('app_admin','app_user','platform_api') AND rolcanlogin)
+        = ARRAY['app_admin','app_user','platform_api']::name[]
+     THEN 'ready' ELSE 'not-ready' END")"
+test "$subject" = ready \
+    || fail "the database authentication subject is not the declared role set"
+
+# Read the shell payload from the INSTALLED wheel inside the exact image under
+# test. The source checkout is not mounted. The same payload is carried in the
+# isolated target adapter archive and executed by the production coordinator.
+docker run --rm --network none --entrypoint python "$IMAGE" -c \
+    'from vendor_cp.production_secrets import rotation_database_auth_oracle_program as p; print(p(), end="")' \
+    >"$WORKDIR/database-auth-oracle.shprogram" \
+    || fail "the installed image cannot produce the database auth oracle"
+
+run_database_auth_oracle() {
+    docker exec --interactive "$DB_CONTAINER" sh -ceu \
+        "$(cat "$WORKDIR/database-auth-oracle.shprogram")" rotation-auth "$1"
+}
+
+if printf '%s\n' deliberately-invalid-candidate-proof \
+    | run_database_auth_oracle app_user; then
+    fail "the db:5432 bridge accepted deliberately invalid material"
+fi
+printf '%s\n' app | run_database_auth_oracle app_user \
+    || fail "the db:5432 bridge refused the active app_user material"
+pass "subject: db:5432 SCRAM refuses invalid and admits active material"
+
+# ═══════════════════════════════════════════════════════════════════════════
+step "1  the installed CLI, and that it is installed"
+docker run --rm --entrypoint dotmac-platform "$IMAGE" --version >/dev/null \
+    || fail "the console script is not installed in the candidate"
+docker run --rm --network none \
+    --env DATABASE_URL=postgresql+psycopg://x@127.0.0.1:5432/none \
+    --env PLATFORM_DATABASE_URL=postgresql+psycopg://x@127.0.0.1:5432/none \
+    --entrypoint dotmac-platform "$IMAGE" \
+    --format json diagnose self --strict >/dev/null \
+    || fail "diagnose self --strict found the candidate is not running installed"
+pass "dotmac-platform resolves, reports a metadata version, and is installed"
+
+step "13 the distribution manifest the release receipt will carry"
+# The receipt records a per-file digest for the wheel and the sdist, READ out of
+# this document rather than re-measured: a second `poetry build` produces a
+# different archive for identical source, because a zip carries timestamps.
+#
+# That makes the document one of the things a candidate must demonstrate. The
+# pipeline step that reads it runs on the publication path ONLY, so without this
+# a malformed or silently narrowed manifest would first be discovered after the
+# push — the precise failure shape this whole ordering exists to prevent.
+SCRIPT="
+import json, re
+from importlib.metadata import version
+
+document = json.load(open('/app/distributions.json'))
+assert document['contract'] == 'dotmac-distribution-digests/1', document.get('contract')
+files = document['files']
+wheels = [f for f in files if f['filename'].endswith('.whl')]
+sdists = [f for f in files if f['filename'].endswith('.tar.gz')]
+assert len(wheels) == 1, wheels
+assert len(sdists) == 1, sdists
+for entry in files:
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', entry['sha256']), entry
+    assert entry['size_bytes'] > 0, entry
+# Tied to the INSTALLED distribution rather than free-floating. A manifest that
+# described some other build would satisfy every check above.
+installed = version('dotmac-vendor-control-plane')
+assert wheels[0]['filename'].split('-')[1] == installed, (wheels[0]['filename'], installed)
+assert sdists[0]['filename'].endswith(installed + '.tar.gz'), (sdists[0]['filename'], installed)
+print(wheels[0]['filename'], '+', sdists[0]['filename'], 'at', installed)
+"
+distribution_report="$(in_image)" \
+    || fail "the candidate's distribution manifest is absent, malformed, or describes another build"
+pass "distribution manifest: $distribution_report"
+
+step "14 the artifact refuses a production environment the deploy would reject"
+# `scripts/deploy_production.sh` asks the IMAGE whether this host environment is
+# bootable — running the kernel's own `validate_settings` after the pull and
+# before the database is started, so a fatal setting cannot be discovered at
+# lifespan with the migrations already applied.
+#
+# That check runs only at deploy time, which is exactly the unmonitored-region
+# shape this battery exists to close. So the PROPERTY it depends on is proved
+# here, against the same bytes: the artifact must refuse a production
+# environment whose CSRF_SECRET is absent, short, or reused, and its refusals
+# must name no value — the deploy PRINTS that verdict.
+SCRIPT="
+from dotmac_kernel.config import Settings, validate_settings
+
+base = dict(
+    environment='production',
+    database_url='postgresql+psycopg://x@127.0.0.1:5432/none',
+    platform_database_url='postgresql+psycopg://x@127.0.0.1:5432/none',
+    platform_root_domain='candidate.dotmac.io',
+    trusted_hosts='candidate.dotmac.io',
+    jwt_secret='jwt-' + 'j' * 40,
+    session_hash_secret='session-' + 's' * 40,
+    csrf_enabled=True,
+)
+conforming = 'csrf-' + 'c' * 40
+
+absent = validate_settings(Settings(**base))
+assert any('CSRF_SECRET' in error for error in absent), absent
+
+for rejected, why in ((conforming[:20], 'shorter than 32 bytes'), (base['jwt_secret'], 'reused')):
+    errors = validate_settings(Settings(csrf_secret=rejected, **base))
+    assert any('CSRF_SECRET' in error for error in errors), (why, errors)
+
+clean = validate_settings(Settings(csrf_secret=conforming, **base))
+assert not [error for error in clean if 'CSRF_SECRET' in error], clean
+
+# The deploy prints this verdict into an operator's terminal and its logs, so a
+# refusal that interpolated a value would put a production credential there.
+for message in absent:
+    for value in (base['jwt_secret'], base['session_hash_secret'], conforming):
+        assert value not in message, message
+print(len(absent), 'refusal(s) with CSRF_SECRET absent;', len(clean), 'remaining with it set')
+"
+verdict_report="$(in_image)" \
+    || fail "the artifact does not refuse a production environment the deploy preflight would reject"
+pass "validate_settings refuses an absent/short/reused CSRF_SECRET and names no value: $verdict_report"
+
+step "12 no checkout dependency — the counter-proof, run inside the candidate"
+# The positive case above passes from `site-packages`. It would ALSO pass from a
+# source tree if the check were weak, which is exactly how a package can report
+# one identity while being another. So the same binary is pointed at a checkout
+# and must REFUSE with 6 (integrity/identity), not 0.
+#
+# Mounted at `/checkout/tree` rather than `/checkout/src` deliberately. What the
+# counter-proof needs is that `vendor_cp` resolves outside the installed tree,
+# which any directory provides. Naming it `src` would plant a production-shaped
+# import-root assignment in a file the installed-surface ratchet scans, and it
+# would then have to be declared as debt it is not — the ratchet caught exactly
+# that when this check was first written.
+set +e
+docker run --rm --network none \
+    --env DATABASE_URL=postgresql+psycopg://x@127.0.0.1:5432/none \
+    --env PLATFORM_DATABASE_URL=postgresql+psycopg://x@127.0.0.1:5432/none \
+    --env PYTHONPATH=/checkout/tree \
+    --volume "$PWD/src:/checkout/tree:ro" \
+    --entrypoint dotmac-platform "$IMAGE" \
+    diagnose self --strict >/dev/null 2>&1
+counter=$?
+set -e
+test "$counter" -eq 6 \
+    || fail "pointed at a checkout the candidate exited $counter, expected 6"
+pass "the same command refuses a checkout with 6 — the check cannot pass both ways"
+
+step "2  the application imports, and publishes the production documentation surface"
+# No ENVIRONMENT is set on purpose: `classify_environment` fails closed, so an
+# image with nothing declared must already serve the production inventory.
+SCRIPT="
+from vendor_cp.main import app; import dotmac_kernel.api_documentation as policy; assert app is not None; assert policy.classify_environment(None) == policy.PRODUCTION; paths = {getattr(route, 'path', '') for route in app.routes}; assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; assert not policy.audit_api_documentation( app, policy.api_documentation_policy(policy.PRODUCTION)); assert '/openapi.json' in paths, 'the document plane must be served, not merely declared'
+"
+in_image || fail "the built bytes do not serve the production documentation policy"
+pass "app imports; /docs, /docs/oauth2-redirect and /redoc are ABSENT from the live inventory"
+
+step "10 the documentation gate refuses an omission too, in the artifact"
+# ADR-0016's gate is bidirectional. Asserting only that the interactive routes
+# are gone would pass on an application that serves nothing at all, so the
+# DOCUMENT plane's presence is asserted in the same breath above, and here the
+# development policy is applied to the same app to prove the gate can still
+# object in the other direction.
+SCRIPT="
+import dotmac_kernel.api_documentation as policy
+from vendor_cp.main import app
+findings = policy.audit_api_documentation(app, policy.api_documentation_policy(policy.DEVELOPMENT))
+assert findings, 'the production artifact satisfied the DEVELOPMENT policy, so the gate is not discriminating'
+assert any('no route is mounted' in f for f in findings), findings
+"
+in_image || fail "the documentation gate did not object to an under-published plane"
+pass "the gate objects to omission as well as over-publication"
+
+step "11 the provisioning laboratory is absent, and the refusals are live in the artifact"
+SCRIPT="
+from vendor_cp.deployment_profile import ProductionProfileRefusedError, deployment_profile, validate_profile_for_environment
+import vendor_cp.assembly as assembly
+from dotmac_kernel import create_app
+
+def refuses(code):
+    try:
+        validate_profile_for_environment(deployment_profile(code), environment='production', provider_mode='fake')
+    except ProductionProfileRefusedError:
+        return True
+    return False
+
+assert refuses('full'), 'a production environment accepted the laboratory profile'
+paths = {getattr(r, 'path', '') for r in create_app(assembly.build_spec(deployment_profile('production-bootstrap'))).routes}
+withheld = [p for p in paths if p.startswith('/platform/vendor/provisioning')]
+assert not withheld, withheld
+assert not [p for p in paths if p.startswith('/platform/vendor/licences')]
+assert not [p for p in paths if p.startswith('/platform/vendor/offer-versions')]
+# NON-VACUITY: the same artifact must still be able to mount them, or the
+# absence above is a statement about a build that has no such routes at all.
+lab = {getattr(r, 'path', '') for r in create_app(assembly.build_spec(deployment_profile('full'))).routes}
+assert [p for p in lab if p.startswith('/platform/vendor/provisioning')], 'the laboratory routes do not exist in this artifact at all'
+"
+in_image || fail "the production surface policy is not live in the built bytes"
+pass "provisioning/licences/offers withheld under production-bootstrap; present under full"
+
+step "3  fresh zero-to-head migration"
+docker run --rm --network host \
+    --env "MIGRATION_DATABASE_URL=$(dsn app_admin candidate)" \
+    --env "DATABASE_URL=$(dsn app_admin candidate)" \
+    --entrypoint dotmac-platform "$IMAGE" admin migrate >/dev/null \
+    || fail "the candidate could not migrate an empty database to heads"
+pass "empty database reaches composed heads"
+
+step "4  historical artifact native transition and database ownership sensitivity"
+: "${NATIVE_SOURCE_IMAGE:?build_native_source_fixture.sh must supply a distinct source fixture}"
+test -s native-source-descriptor.toml && test -s native-source.bundle \
+    || fail "the pinned historical source fixture declarations/objects are absent"
+# Fixture construction alone uses direct Alembic, in the INSTALLED HISTORICAL
+# source image. Deployment acceptance below calls the target's native owner.
+psql_admin -c "CREATE DATABASE prodshape OWNER app_admin;" >/dev/null
+SCRIPT="
+from alembic import command
+from vendor_cp.migrations import make_alembic_config
+command.upgrade(make_alembic_config('$(dsn app_admin prodshape)'), 'v016_licensing_authority')
+"
+docker run --rm --network host \
+    --env "DATABASE_URL=$(dsn app_admin prodshape)" \
+    --env "MIGRATION_DATABASE_URL=$(dsn app_admin prodshape)" \
+    --entrypoint python "$NATIVE_SOURCE_IMAGE" -I -c "$SCRIPT" \
+    || fail "could not build the pre-upgrade historical source fixture"
+# Set the source schema owner to the same intended profile as BOTH restores.
+# Keep the dump's ACL bytes intact; only database ownership differs in lane B.
+psql_admin --dbname prodshape -c "ALTER SCHEMA public OWNER TO app_admin;" >/dev/null
+docker exec "$DB_CONTAINER" pg_dump -U postgres --format custom --dbname prodshape \
+    > "$WORKDIR/prodshape.dump"
+test -s "$WORKDIR/prodshape.dump" || fail "the production-shaped dump is empty"
+
+# Restore under one identical owner and strict recipe. The template's existing
+# public schema must be dropped/recreated by the dump along with its ACLs, so
+# --clean --if-exists applies identically to both fresh disposable databases.
+# The driver compares both full catalogues and heads to prodshape before it
+# changes ONLY lane B's database owner; the lanes must differ only in DATABASE ownership.
+psql_admin -c "CREATE DATABASE restored_ok OWNER app_admin;" >/dev/null
+psql_admin -c "CREATE DATABASE restored_wrong_owner OWNER app_admin;" >/dev/null
+for target in restored_ok restored_wrong_owner; do
+    psql_admin --dbname "$target" -c "ALTER SCHEMA public OWNER TO app_admin;" >/dev/null
+    docker exec -i "$DB_CONTAINER" pg_restore -U postgres \
+        --exit-on-error --clean --if-exists --no-owner --role=app_admin \
+        --dbname "$target" < "$WORKDIR/prodshape.dump" >/dev/null 2>&1 \
+        || fail "$target strict historical restore failed"
+done
+for target in restored_ok restored_wrong_owner; do
+    restored_tables="$(psql_admin --tuples-only --no-align --dbname "$target" -c \
+      "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema');" | tr -d ' ')"
+    test "$restored_tables" -gt 0 \
+        || fail "$target restored zero tables, so the upgrade below would be a fresh install"
+done
+
+# Both copies begin with identical database/schema ownership. The driver must
+# prove source/copy equality before it plants the single database-owner defect.
+ok_owners="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT pg_get_userbyid(datdba) || '|' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public') FROM pg_database WHERE datname=current_database();")"
+bad_owners="$(psql_admin --tuples-only --no-align --dbname restored_wrong_owner -c \
+  "SELECT pg_get_userbyid(datdba) || '|' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public') FROM pg_database WHERE datname=current_database();")"
+test "$ok_owners" = "app_admin|app_admin" \
+    || fail "lane A initial ownership is $ok_owners, expected app_admin|app_admin"
+test "$bad_owners" = "app_admin|app_admin" \
+    || fail "lane B initial ownership is $bad_owners, expected app_admin|app_admin"
+pass "both strict restores begin with identical database and public schema owners"
+
+# Save actual local OCI descriptors before publication. A config ID is never a
+# manifest coordinate; no manifest is synthesized and no registry push occurs.
+python3 - "$IMAGE" "$NATIVE_SOURCE_IMAGE" "$WORKDIR" <<'NATIVE_COORDINATES'
+import importlib.util
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+spec = importlib.util.spec_from_file_location("identity", ".github/candidate/record_identity.py")
+identity = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(identity)
+coordinates = {}
+docker_image_ids = {}
+for side, image in zip(("target", "source"), sys.argv[1:3]):
+    inspected, = json.loads(identity.docker("image", "inspect", image))
+    docker_image_id = inspected["Id"]
+    if not isinstance(docker_image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", docker_image_id):
+        raise ValueError("invalid inspected Docker image ID")
+    docker_image_ids[side] = docker_image_id
+    revision = inspected["Config"]["Labels"]["org.opencontainers.image.revision"]
+    platform = identity.platform({key.lower(): value for key, value in inspected.items()})
+    path = pathlib.Path(sys.argv[3]) / (side + ".tar")
+    identity.docker("image", "save", "--platform", platform, "-o", str(path), docker_image_id)
+    manifest, config, layers = identity.archive_oci_coordinate(path, platform, revision)
+    if layers != inspected["RootFS"]["Layers"]:
+        raise ValueError("exported layers differ from actual image")
+    coordinates[side] = dict(manifest_digest=manifest, config_digest=config,
+        layers=layers, source_revision=revision, platform=platform,
+        coordinate_scope="acceptance-local OCI export; not future registry index")
+    path.unlink()
+coordinates["docker_image_ids"] = docker_image_ids
+(pathlib.Path(sys.argv[3]) / "native-coordinate.json").write_text(json.dumps(coordinates))
+NATIVE_COORDINATES
+# Git bundles carry actual objects only: never runner .git/config, credential
+# helpers, hooks, environment or a source/package overlay into the candidate.
+test "$(git rev-parse HEAD)" = "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" \
+    || fail "candidate label differs from the exact checkout revision"
+git bundle create "$WORKDIR/source.bundle" HEAD
+cp native-source.bundle native-source-descriptor.toml "$WORKDIR/"
+db_identity="$(docker container inspect --format '{{.Id}}' "$DB_CONTAINER")"
+docker run --rm --user 0:0 --pid host --network host --cap-add SYS_PTRACE \
+    --env "DATABASE_URL=$(dsn app_user restored_ok)" \
+    --env "PLATFORM_DATABASE_URL=$(dsn platform_api restored_ok)" \
+    --env "MIGRATION_DATABASE_URL=$(dsn app_admin restored_ok)" \
+    --volume /var/run/docker.sock:/var/run/docker.sock \
+    --volume /usr/bin/docker:/usr/bin/docker:ro \
+    --volume "$WORKDIR:/inputs:ro" \
+    --volume "$PWD/.github/candidate/native_transition_acceptance.py:/native_transition_acceptance.py:ro" \
+    --entrypoint python "$IMAGE" -I /native_transition_acceptance.py \
+    "$IMAGE" "$NATIVE_SOURCE_IMAGE" "$db_identity" "$PG_IMAGE" \
+    > candidate-native-acceptance.json \
+    || fail "installed candidate native historical transition refused; see CI native report/log"
+test -s candidate-native-acceptance.json || fail "native acceptance report is absent"
+pass "lane A: a correctly-owned restored copy upgrades through native_upgrade"
+pass "lane B: a wrongly-owned restored copy is refused before DDL by host source preflight"
+pass "database sensitivity: rollback-only CREATE SCHEMA succeeds for owner; SQLSTATE 42501 permission denied for database for wrong owner"
+pass "native authorization, target revision, tree bytes and durable replay sensitivities passed"
+
+# Synthetic contracts run by the native snapshot's actual Docker image ID, without
+# application checkout, database, Docker socket, host credentials or network.
+step "4a installed committed-migration continuation core/host/operator contracts"
+contract_image_id="$(python3 -I -B "$PWD/.github/candidate/committed_continuation_acceptance.py" \
+    prepare "$PWD" "$WORKDIR/continuation-checks" \
+    candidate-native-acceptance.json "$WORKDIR/native-coordinate.json" candidate-identity.json)" \
+    || fail "could not prepare lock-hashed continuation test tools"
+docker run --rm --pull never --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+    --volume "$WORKDIR/continuation-checks:/checks:ro" \
+    --entrypoint python "$contract_image_id" -I -B /checks/committed_continuation_acceptance.py run \
+    > candidate-committed-continuation-acceptance.json \
+    || fail "installed continuation contracts refused; see report/log"
+# Join full raw evidence and its digest to the already-retained native report;
+# the explicit scope keeps these synthetic vectors separate from native facts.
+python3 -I -B "$PWD/.github/candidate/committed_continuation_acceptance.py" \
+    bind candidate-native-acceptance.json candidate-committed-continuation-acceptance.json \
+    "$WORKDIR/native-coordinate.json" \
+    || fail "installed continuation report could not bind to the native candidate"
+pass "installed continuation contracts: every core/host/operator case executed; zero skips/errors/failures"
+
+step "5  database ownership, roles, grants and isolation"
+# `::text` on every flag, and it is load-bearing rather than tidy. PostgreSQL
+# has TWO renderings of a boolean and they do not agree: the type's own output
+# function — which is what `format('%s', ...)` calls — emits `t`/`f`, while the
+# boolean-to-text CAST emits `true`/`false`. Written without the casts this
+# assertion compared `f|f|t|t` against a declared `false|false|true|true` and
+# could never hold, on any correct database. It was measured failing in run
+# 33407635872 on protected main, at the FIRST assertion of step 5, which is why
+# nothing after it in this battery had ever executed.
+#
+# The declared form is kept in the readable spelling and the QUERY is corrected,
+# rather than the other way round: `false|false|true|true` says what the role
+# contract IS to someone reading the failure message, and `f|f|t|t` does not.
+SQL="
+SELECT format('%s|%s|%s|%s',
+  (SELECT rolsuper::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolcreaterole::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolbypassrls::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolcanlogin::text FROM pg_roles WHERE rolname='app_admin'));
+"
+role_contract="$(psql_admin --tuples-only --no-align --dbname restored_ok -c "$SQL" | tr -d ' ')"
+test "$role_contract" = "false|false|true|true" \
+    || fail "app_admin role contract is $role_contract, expected false|false|true|true"
+owner_contract="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT pg_get_userbyid(datdba) || '|' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public') FROM pg_database WHERE datname=current_database();")"
+test "$owner_contract" = "app_admin|app_admin" \
+    || fail "database/schema ownership is $owner_contract, expected app_admin|app_admin"
+pass "app_admin is a non-superuser BYPASSRLS owner of the database and public schema"
+
+module_schemas="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT count(*) FROM information_schema.schemata WHERE schema_name LIKE 'mod\\_%';" | tr -d ' ')"
+test "$module_schemas" -ge 1 \
+    || fail "no module schema exists, so the isolation assertion below would be vacuous"
+leaked="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT count(*) FROM information_schema.schemata WHERE schema_name LIKE 'mod\\_%' AND has_schema_privilege('app_user', schema_name, 'USAGE');" | tr -d ' ')"
+test "$leaked" = "0" \
+    || fail "app_user holds USAGE on $leaked module schema(s); the plane boundary is open"
+reachable="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT count(*) FROM information_schema.schemata WHERE schema_name LIKE 'mod\\_%' AND has_schema_privilege('platform_api', schema_name, 'USAGE');" | tr -d ' ')"
+test "$reachable" = "$module_schemas" \
+    || fail "platform_api reaches $reachable of $module_schemas module schemas; the online role cannot work"
+pass "$module_schemas module schemas: app_user reaches none, platform_api reaches all"
+
+# NAMED, not counted, and declared as an EQUALITY rather than an emptiness.
+#
+# Two corrections live here, both measured. The first version reported a number:
+# "1 tenant-scoped table does not have RLS forced" does not say which table, in
+# which schema, or whether the gap is enabled-but-not-forced or no row security
+# at all, so an operator reading the failure has to reproduce the whole battery
+# to learn what it found.
+#
+# The second is the predicate itself. Carrying a column NAMED `tenant_id` is not
+# the same as being tenant-SCOPED. `public.tenant_domains` maps a hostname to a
+# tenant and is precisely what `dotmac_kernel.middleware.tenant` reads IN ORDER
+# TO DISCOVER which tenant a request belongs to — necessarily before any tenant
+# context exists. Row security there would make every request fail to resolve,
+# so the kernel declares it platform-level and grants `app_user` SELECT on it
+# explicitly (kernel migration `0001_initial_tenant_schema`: "`tenants` and
+# `tenant_domains` (NOT under RLS — platform-level)").
+#
+# So it is DECLARED, not exempted-by-silence, and declared as an equality so the
+# ratchet bites in both directions: a newly unprotected tenant-scoped table makes
+# the observed set grow and fails, and `tenant_domains` acquiring row security
+# makes it shrink and also fails — either way the declaration is revisited
+# rather than quietly satisfied.
+RESOLVER_INPUT_TABLES="public.tenant_domains"
+unforced="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT COALESCE(string_agg(DISTINCT n.nspname||'.'||c.relname, ', ' ORDER BY n.nspname||'.'||c.relname), '') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r' AND NOT (c.relrowsecurity AND c.relforcerowsecurity);")"
+test "$unforced" = "$RESOLVER_INPUT_TABLES" \
+    || fail "tables carrying tenant_id without RLS enabled AND forced are [$unforced]; the declared resolver-input set is [$RESOLVER_INPUT_TABLES]"
+# NON-VACUITY: the assertion above is satisfied by a database with no
+# tenant-scoped table at all, which is exactly what a wrong schema name or a
+# mis-joined catalogue query would produce.
+tenant_scoped="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r';" | tr -d ' ')"
+test "$tenant_scoped" -gt 1 \
+    || fail "only $tenant_scoped table carries tenant_id, so the equality above is satisfied by the declaration alone"
+pass "$tenant_scoped tables carry tenant_id; all but the declared resolver input force row security"
+
+step "9  the exact UI assets this artifact serves"
+SCRIPT="
+import hashlib, pathlib
+from dotmac_kernel.templating import static_dir
+root = pathlib.Path(static_dir())
+entries = sorted(
+    (p.relative_to(root).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest())
+    for p in root.rglob('*') if p.is_file()
+)
+manifest = '\n'.join(f'{name}  {digest}' for name, digest in entries)
+print(len(entries))
+print(hashlib.sha256(manifest.encode()).hexdigest())
+"
+asset_report="$(in_image)"
+asset_count="$(printf '%s\n' "$asset_report" | sed -n '1p')"
+asset_digest="$(printf '%s\n' "$asset_report" | sed -n '2p')"
+expected_count="$(sed -n '1p' .github/candidate/ui-assets.expected)"
+expected_digest="$(sed -n '2p' .github/candidate/ui-assets.expected)"
+test "$asset_count" = "$expected_count" \
+    || fail "the artifact serves $asset_count UI assets, declared $expected_count"
+test "$asset_digest" = "$expected_digest" \
+    || fail "UI asset manifest digest $asset_digest does not match the declared $expected_digest"
+pass "$asset_count UI assets, manifest digest matches .github/candidate/ui-assets.expected"
+
+# ── The running application ─────────────────────────────────────────────────
+step "6  dependency-aware readiness, against liveness as the control"
+signing_key="$(docker run --rm --network none --entrypoint python "$IMAGE" -c "
+import base64
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+raw = Ed25519PrivateKey.generate().private_bytes(
+    serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+print(base64.urlsafe_b64encode(raw).rstrip(b'=').decode())
+")"
+printf '%s' "$signing_key" > "$WORKDIR/primary.key"
+unset signing_key
+
+# This battery starts ONE container: the application, and no relay. Saying so
+# with VENDOR_RELAY_EXPECTED=false is a statement about THIS composition, not
+# a switch on the check. Readiness still refuses an ageing backlog here, and
+# it correctly reports that relay liveness during quiescence is not
+# measurable in this arrangement, because there is no relay to measure.
+APP_OPTIONS=()
+start_app() {
+    local database_url="$1" profile="${2:-production-bootstrap}"
+    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+    # This synthetic fixture uses host networking, so bind only to loopback.
+    docker run -d --name "$APP_CONTAINER" --network host \
+        --env "DATABASE_URL=$database_url" \
+        --env "PLATFORM_DATABASE_URL=$database_url" \
+        --env APP_ENV=production \
+        --env ENVIRONMENT=production \
+        --env "VENDOR_DEPLOYMENT_PROFILE=$profile" \
+        --env "PLATFORM_ROOT_DOMAIN=${HOSTNAME_HEADER}" \
+        --env "TRUSTED_HOSTS=${HOSTNAME_HEADER}" \
+        --env TENANCY=multi \
+        --env JWT_SECRET=candidate-jwt-secret-not-a-real-one \
+        --env SESSION_HASH_SECRET=candidate-session-secret-not-a-real-one \
+        --env CSRF_ENABLED=true \
+        --env CSRF_SECRET=candidate-csrf-secret-not-a-real-one-0123456789 \
+        --env RATE_LIMIT_ENABLED=false \
+        --env VENDOR_PROVIDER_MODE=fake \
+        --env 'VENDOR_PRODUCT_RELEASE_PINS_JSON={}' \
+        --env VENDOR_PRODUCT_MANIFEST_DIRECTORY=/tmp/manifests \
+        --env VENDOR_LICENCE_SIGNING_MODE=configured \
+        --env VENDOR_LICENCE_SIGNING_KEY_FILE=/run/candidate/primary.key \
+        --env VENDOR_LICENCE_SIGNING_KEY_ID=candidate-1 \
+        --env VENDOR_LICENCE_DELIVERY_MODE=logging \
+        --env VENDOR_RELAY_EXPECTED=false \
+        --volume "$WORKDIR/primary.key:/run/candidate/primary.key:ro" \
+        "${APP_OPTIONS[@]}" "$IMAGE" \
+        uvicorn vendor_cp.main:app --host 127.0.0.1 --port 8000 >/dev/null
+}
+
+probe() { curl --silent --output /dev/null --write-out '%{http_code}' \
+    --max-time 5 --header "Host: ${HOSTNAME_HEADER}" "http://127.0.0.1:8000$1"; }
+
+await_liveness() {
+    for _ in $(seq 1 60); do
+        test "$(probe /health)" = "200" && return 0
+        sleep 1
+    done
+    docker logs "$APP_CONTAINER" 2>&1 | tail -30 >&2
+    return 1
+}
+
+# The negative case FIRST, so a passing readiness check later cannot be the
+# result of a probe that returns 200 unconditionally.
+start_app "postgresql+psycopg://app_admin@127.0.0.1:1/nothing-listens-here"
+await_liveness || fail "the candidate did not come up with an unreachable database"
+test "$(probe /health)" = "200" \
+    || fail "liveness should answer 200 even with no database — it does not touch one"
+ready_code="$(probe /health/ready)"
+test "$ready_code" = "503" \
+    || fail "readiness returned $ready_code with an unreachable database, expected 503"
+pass "database unreachable: /health 200 (alive) and /health/ready 503 (not ready) — they differ"
+
+start_app "$(dsn app_admin restored_ok)"
+await_liveness || fail "the candidate did not come up against a migrated database"
+for _ in $(seq 1 30); do test "$(probe /health/ready)" = "200" && break; sleep 1; done
+test "$(probe /health/ready)" = "200" \
+    || fail "readiness never became 200 against a reachable, migrated database"
+pass "database reachable: /health/ready 200 — the probe tracks the dependency, not the process"
+
+step "7  one journey across browser, API and CLI"
+admin_email="candidate@${HOSTNAME_HEADER}"
+admin_password="candidate-password-$RANDOM$RANDOM"
+printf '%s' "$admin_password" | docker run --rm --interactive --network host \
+    --env "DATABASE_URL=$(dsn app_admin restored_ok)" \
+    --env "PLATFORM_DATABASE_URL=$(dsn app_admin restored_ok)" \
+    --entrypoint dotmac-platform "$IMAGE" \
+    admin create "$admin_email" --password-stdin >/dev/null \
+    || fail "the CLI could not create a platform administrator"
+pass "CLI: platform administrator created, password read from stdin and never on argv"
+
+login_status="$(curl --silent --output "$WORKDIR/login.json" --write-out '%{http_code}' \
+    --max-time 10 --header "Host: ${HOSTNAME_HEADER}" \
+    --header 'Content-Type: application/json' \
+    --data "{\"email\":\"${admin_email}\",\"password\":\"${admin_password}\"}" \
+    "http://127.0.0.1:8000/platform/auth/login")"
+token="$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("access_token", ""))
+except Exception:
+    print("")' "$WORKDIR/login.json")"
+test -n "$token" \
+    || fail "the API did not issue a bearer token to the CLI-created identity (HTTP $login_status): $(refusal_reason "$WORKDIR/login.json")"
+pass "API: the identity the CLI created authenticates over the bearer plane"
+
+doc_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+    --header "Host: ${HOSTNAME_HEADER}" --header "Authorization: Bearer ${token}" \
+    "http://127.0.0.1:8000/openapi.json")"
+test "$doc_code" = "200" \
+    || fail "the bearer-protected document plane returned $doc_code to a platform admin"
+pass "API: /openapi.json answers 200 to a platform-admin bearer token"
+
+# Cookies are REPLAYED from the response headers rather than kept in curl's
+# cookie jar, and that is forced by a real property of the artifact rather than
+# by convenience. `CSRFMiddleware` names its cookie `__Host-csrf_token` when
+# `production` is set, and the `__Host-` prefix requires `Secure` — so curl,
+# which correctly refuses to return a Secure cookie over plain `http://`, sent
+# nothing back and the login was 403. Production terminates TLS at nginx; this
+# battery drives the container directly, so the transport differs and only the
+# transport does. Replaying `Set-Cookie` verbatim is what a browser over TLS
+# would do.
+#
+# It does not weaken the check: the token is still signed, still expiring, and
+# still bound to the very cookie set being replayed, and the non-vacuity case
+# below proves the refusal still fires.
+replay_cookies() {
+    tr -d '\r' < "$1" \
+        | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' \
+        | paste -sd ';' - \
+        | sed 's/;/; /g'
+}
+
+login_page="$(curl --silent --max-time 10 --dump-header "$WORKDIR/login.head" \
+    --header "Host: ${HOSTNAME_HEADER}" "http://127.0.0.1:8000/platform/login")"
+issued_cookies="$(replay_cookies "$WORKDIR/login.head")"
+test -n "$issued_cookies" \
+    || fail "the login page issued no cookie at all, so the CSRF proof cannot be bound to one"
+csrf="$(printf '%s' "$login_page" | grep -o 'name="csrf_token" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')"
+test -n "$csrf" || fail "the login page carries no hidden csrf_token field"
+
+# NON-VACUITY, first: replaying cookies must not have turned the protection off.
+# The same request without the proof has to be refused, or "the login succeeded"
+# says nothing about whether anything was checked.
+unproven_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+    --header "Host: ${HOSTNAME_HEADER}" --header "Cookie: ${issued_cookies}" \
+    --data-urlencode "email=${admin_email}" \
+    --data-urlencode "password=${admin_password}" \
+    "http://127.0.0.1:8000/platform/login")"
+test "$unproven_code" = "403" \
+    || fail "a form POST with no CSRF proof returned $unproven_code, expected 403 — the check is not live"
+pass "browser: a form POST carrying no CSRF proof is refused 403"
+
+login_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+    --dump-header "$WORKDIR/session.head" \
+    --header "Host: ${HOSTNAME_HEADER}" --header "Cookie: ${issued_cookies}" \
+    --data-urlencode "email=${admin_email}" \
+    --data-urlencode "password=${admin_password}" \
+    --data-urlencode "csrf_token=${csrf}" \
+    "http://127.0.0.1:8000/platform/login")"
+case "$login_code" in
+    200|302|303) ;;
+    *) fail "the browser login returned $login_code — no session can be obtained" ;;
+esac
+# Anything the login response set (the platform session, a rotated CSRF token)
+# comes LAST so it overrides the value issued by the page.
+session_cookies="$(replay_cookies "$WORKDIR/session.head")"
+test -n "$session_cookies" \
+    || fail "the browser login set no cookie, so it granted no session"
+console_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+    --header "Cookie: ${issued_cookies}; ${session_cookies}" \
+    --header "Host: ${HOSTNAME_HEADER}" \
+    "http://127.0.0.1:8000/platform/console")"
+test "$console_code" = "200" \
+    || fail "the console returned $console_code to a freshly logged-in admin"
+pass "browser: form login yields a session that reaches the console"
+
+docker run --rm --network host \
+    --env "DATABASE_URL=$(dsn app_admin restored_ok)" \
+    --env "PLATFORM_DATABASE_URL=$(dsn app_admin restored_ok)" \
+    --entrypoint dotmac-platform "$IMAGE" \
+    --format json admin accounts >/dev/null \
+    || fail "the CLI could not read through the same owner the surfaces use"
+pass "CLI: a read reaches the same owner the browser and API just used"
+
+step "8  wrong credential and wrong standing are refused"
+bad_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+    --header "Host: ${HOSTNAME_HEADER}" --header 'Content-Type: application/json' \
+    --data "{\"email\":\"${admin_email}\",\"password\":\"not-the-password\"}" \
+    "http://127.0.0.1:8000/platform/auth/login")"
+test "$bad_code" = "401" \
+    || fail "a wrong password returned $bad_code, expected 401"
+pass "wrong credential: 401"
+
+inactive_email="inactive@${HOSTNAME_HEADER}"
+printf '%s' "$admin_password" | docker run --rm --interactive --network host \
+    --env "DATABASE_URL=$(dsn app_admin restored_ok)" \
+    --env "PLATFORM_DATABASE_URL=$(dsn app_admin restored_ok)" \
+    --entrypoint dotmac-platform "$IMAGE" \
+    admin create "$inactive_email" --password-stdin --inactive >/dev/null \
+    || fail "could not create the inactive identity the refusal case needs"
+inactive_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+    --header "Host: ${HOSTNAME_HEADER}" --header 'Content-Type: application/json' \
+    --data "{\"email\":\"${inactive_email}\",\"password\":\"${admin_password}\"}" \
+    "http://127.0.0.1:8000/platform/auth/login")"
+test "$inactive_code" = "401" \
+    || fail "an inactive administrator with the CORRECT password returned $inactive_code, expected 401"
+pass "wrong standing: a correct password on an inactive identity is still 401"
+
+unauth_code="$(probe /openapi.json)"
+test "$unauth_code" = "401" \
+    || fail "the document plane returned $unauth_code without a token, expected 401"
+pass "no credential: the bearer-protected document plane is 401, not 200"
+
+step "17  separation: the deployment tool is not in the application image"
+# An OBSERVATION about this candidate, not a rule about future ones.
+#
+# `dotmac-deployment-foundation` is the deployment TOOL. It renders the
+# execution plan and computes the digest an authorization binds; it has no
+# business inside the application. Today it stays out because it is in no
+# dependency group and the Dockerfile installs `--only main` — a mechanism,
+# with nothing asserting the result. This reads the RESULT, off the exact bytes
+# about to be published, because the recipe and the artifact are different
+# claims and this pipeline exists for the cases where they disagree.
+#
+# `--network none`: the answer must come from the image, not from an index.
+separation="$(docker run --rm --network none --entrypoint python "$IMAGE" -c '
+import importlib.metadata as md, importlib.util as iu, json
+names = sorted((d.metadata["Name"] or "").lower() for d in md.distributions())
+try:
+    importable = iu.find_spec("dotmac_deployment_foundation") is not None
+except ModuleNotFoundError:
+    importable = False
+print(json.dumps({
+    "present": [n for n in names if n == "dotmac-deployment-foundation"],
+    "importable": importable,
+    "distributions_seen": len(names),
+}))')"
+printf '  image reports %s\n' "$separation"
+
+python3 - "$separation" <<'SEPARATION' || fail "the deployment tool must not be inside the application image"
+import json, sys
+
+observed = json.loads(sys.argv[1])
+problems = []
+if observed["present"]:
+    problems.append(f"the image carries {observed['present']}")
+if observed["importable"]:
+    problems.append("dotmac_deployment_foundation is importable inside the image")
+# NON-VACUITY. An empty `present` list is also what a broken enumeration
+# returns, and "we found nothing" would then be indistinguishable from "we
+# looked at nothing" — the same shape as a validator only ever seen refusing.
+if observed["distributions_seen"] < 2:
+    problems.append(
+        f"only {observed['distributions_seen']} distribution(s) were enumerated, "
+        "so the absence above is not evidence of anything"
+    )
+if problems:
+    print("; ".join(problems), file=sys.stderr)
+    raise SystemExit(1)
+SEPARATION
+pass "the deployment tool must not be inside the application image, and is not"
+pass "and the enumeration saw the image's other distributions, so the absence means something"
+
+step "18  the foundation profile, READ BACK out of the artifact"
+# The reading half of the pair. `vendor_cp.deployment.profile_readback` shipped
+# BEFORE the document it verifies and has, until this step existed, only ever
+# been driven against `tmp_path` fixtures — so "the verifier works" meant "the
+# verifier agrees with files a test wrote", which is a different claim from
+# anything about an image.
+#
+# It runs INSIDE the candidate, against `/app/application_foundation_profile.json`
+# and `/app/distributions.json` as the image actually carries them, and it prints
+# the verdict. What this step asserts about that verdict changes exactly once, in
+# the commit that embeds the document — and that CHANGE is the evidence the
+# document is consumed rather than merely shipped. Presence is not consumption.
+#
+# ## What the expectation is, and what it is not
+#
+# `CANDIDATE_SOURCE_REVISION` is supplied by the CALLER — the workflow's own
+# commit SHA in the PR rehearsal, the selected source SHA on the publication
+# path — so the revision expectation genuinely comes from outside the image.
+#
+# The WHEEL expectation does not, and saying so is the point. There is no
+# external source for it today: the release receipt itself reads the wheel digest
+# out of `/app/distributions.json` (step 13), so taking it from anywhere else here
+# would be inventing a witness. The verifier's three-witness design therefore
+# collapses to two on this path — the document's claim against the image's
+# independent per-file record — and the "expectation from a receipt" leg is NOT
+# exercised until a receipt exists to hold it. That is a named limitation, not a
+# check pretending to be one.
+: "${CANDIDATE_SOURCE_REVISION:?the caller must supply the revision it expects; \
+reading it back out of the image would make the expectation a copy of the claim}"
+
+profile_expected_wheel="$(docker run --rm --network none --entrypoint python "$IMAGE" -c '
+import json
+files = json.load(open("/app/distributions.json"))["files"]
+wheels = [f["sha256"] for f in files if f["filename"].endswith(".whl")]
+assert len(wheels) == 1, wheels
+print(wheels[0])
+')" || fail "the candidate carries no single-wheel distribution record to expect against"
+
+SCRIPT="
+import json
+from vendor_cp.deployment.profile_readback import ExpectedArtifact, verify_embedded_profile
+
+outcome = verify_embedded_profile(
+    ExpectedArtifact(
+        source_revision='${CANDIDATE_SOURCE_REVISION}',
+        wheel_sha256='${profile_expected_wheel}',
+    )
+)
+print(json.dumps({
+    'verdict': str(outcome.verdict),
+    'bound': list(outcome.bound_concerns),
+    'detail': outcome.detail,
+}))
+"
+profile_readback="$(in_image)" \
+    || fail "the profile readback could not run inside the candidate at all"
+printf '  image reports %s\n' "$profile_readback"
+
+python3 - "$profile_readback" <<'PROFILE' || fail "the candidate's foundation profile is not in the state this commit expects"
+import json, sys
+
+observed = json.loads(sys.argv[1])
+verdict = observed["verdict"]
+
+# THE DOCUMENT IS NOW EMBEDDED, and the verdict moved. One commit ago this block
+# asserted `document_absent` and CI observed exactly that against a real image;
+# that observation is what this assertion is measured against. A verdict that
+# moved with no diff here, or a diff here with no movement there, is caught by
+# `tests/architecture/test_profile_embedding.py::EXPECTED_CANDIDATE_VERDICT`.
+#
+# `concerns_incomplete` is the CORRECT verdict for this artifact, not a
+# shortfall being tolerated. Reaching it means the document was found, parsed,
+# its own digest covered its own content, its revision matched what the caller
+# expected, and its wheel claim agreed with the image's independent per-file
+# record — every one of those is an earlier verdict in the precedence order and
+# any of them would have been reported instead.
+#
+# Two concerns are genuinely unsatisfied and are named: `request_evidence_context`
+# belongs to `dotmac-kernel` and must not be declared from this side, and
+# `integration` needs a proof type that deliberately is not in this image (step
+# 17 proves that). Asserting them BY NAME is what makes this fail the day either
+# one lands — at which point the expectation becomes `admitted`, not a wider net.
+if verdict != "concerns_incomplete":
+    print(f"expected concerns_incomplete, got {verdict}: {observed['detail']}", file=sys.stderr)
+    raise SystemExit(1)
+bound = set(observed["bound"])
+if len(bound) != 11:
+    print(f"expected 11 bound concerns, got {sorted(bound)}", file=sys.stderr)
+    raise SystemExit(1)
+unsatisfied = {"request_evidence_context", "integration"}
+if bound & unsatisfied:
+    print(f"{sorted(bound & unsatisfied)} must not be bound from this side", file=sys.stderr)
+    raise SystemExit(1)
+for concern in sorted(unsatisfied):
+    if concern not in observed["detail"]:
+        print(f"the verdict does not name {concern}", file=sys.stderr)
+        raise SystemExit(1)
+PROFILE
+pass "the foundation profile readback found, parsed and bound-checked the artifact's document"
+pass "11 of 13 concerns bound; request_evidence_context and integration named unsatisfied"
+pass "the verdict moved from document_absent to concerns_incomplete, which is the proof it is READ"
+
+step "19  enabled deploy runtime in the actual keyless production image"
+# Disposable local transport proves runtime closure only. Sub GitHub permission,
+# protected-remote policy and signed Seabone effects remain live Gate 0 proofs.
+# Neither this fixture nor its generated signing key grants production custody.
+gh_digest=sha256:a95a4e011d77e9cd0e9922c13fda2b95195c6be29dfa58207075fd983bbae744
+DEPLOY_VOLUME="$(docker volume create)"
+docker run --rm --interactive --network none --user 0:0 \
+    --volume "$DEPLOY_VOLUME:/run/candidate/deploy" \
+    --volume "$WORKDIR:/fixture" \
+    --entrypoint python "$IMAGE" - <<'DEPLOY_FIXTURE'
+import base64
+import os
+import pathlib
+import subprocess
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+root = pathlib.Path("/run/candidate/deploy")
+root.chmod(0o755)
+os.chown(root, 10001, 10001)
+raw = Ed25519PrivateKey.generate().private_bytes(
+    serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+    serialization.NoEncryption(),
+)
+with pathlib.Path("/fixture/desired.key").open("xb") as key:
+    os.fchmod(key.fileno(), 0o600)
+    os.fchown(key.fileno(), 10001, 10001)
+    key.write(base64.urlsafe_b64encode(raw).rstrip(b"="))
+os.environ["HOME"] = str(root)
+os.setgid(10001)
+os.setuid(10001)
+
+def git(*args):
+    subprocess.run(["/usr/bin/git", *args], check=True, capture_output=True)
+
+git("init", "--bare", "--initial-branch=main", str(root / "remote.git"))
+git("clone", str(root / "remote.git"), str(root / "ledger"))
+git("-C", str(root / "ledger"), "config", "user.name", "Candidate fixture")
+git("-C", str(root / "ledger"), "config", "user.email", "candidate@example.com")
+git("-C", str(root / "ledger"), "commit", "--allow-empty", "-m", "fixture")
+git("-C", str(root / "ledger"), "push", "-u", "origin", "main")
+DEPLOY_FIXTURE
+APP_OPTIONS=(
+    --read-only --cap-drop ALL --security-opt no-new-privileges:true
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m
+    --volume "$DEPLOY_VOLUME:/run/candidate/deploy"
+    --volume "$WORKDIR/desired.key:/run/candidate/desired.key:ro"
+    --env VENDOR_DEPLOY_AGENT_ENABLED=false
+    --env VENDOR_DESIRED_SIGNING_KEY_ID=candidate-desired
+    --env VENDOR_DESIRED_SIGNING_KEY_FILE=/run/candidate/desired.key
+    --env VENDOR_DESIRED_SIGNING_KEY_POINTER=secret/dotmac/platform-cp/desired-state/signing-key
+    --env VENDOR_DEPLOY_LEDGER_DIR=/run/candidate/deploy/ledger
+    --env VENDOR_DEPLOY_GH_EXECUTABLE=/usr/local/bin/gh
+    --env "VENDOR_DEPLOY_GH_SHA256=$gh_digest"
+)
+# Pipe the existing bearer into curl's config instead of putting it on argv.
+deploy_read() {
+    printf 'header = "Authorization: Bearer %s"\n' "$token" | curl --config - \
+        --silent --output "$WORKDIR/deploy.json" --write-out '%{http_code}' \
+        --max-time 10 --header "Host: ${HOSTNAME_HEADER}" \
+        http://127.0.0.1:8000/platform/deploy/drift
+}
+assert_enabled_deployment() {
+    local code
+    code="$(deploy_read)" || fail "enabled deployment transport failed"
+    test "$code" = 200 || fail "enabled deployment read returned $code"
+    python3 - "$WORKDIR/deploy.json" <<'DEPLOY_READ'
+import json
+import sys
+
+body = json.load(open(sys.argv[1]))
+assert set(body) == {"deployment_ref", "desired", "applied", "drift"}, body.keys()
+assert body["deployment_ref"] and body["desired"] is None
+assert body["applied"] is None and body["drift"] is False
+DEPLOY_READ
+}
+start_app "$(dsn app_admin restored_ok)" production-keyless-v1
+await_liveness || fail "keyless disabled control did not boot"
+test "$(deploy_read)" = 503 || fail "disabled deployment control did not refuse"
+python3 - "$WORKDIR/deploy.json" <<'DISABLED'
+import json
+import sys
+body = json.load(open(sys.argv[1]))
+assert set(body) == {"code", "message", "details", "request_id"}, body.keys()
+assert body["code"] == "http_error" and body["message"] == "feature_disabled"
+assert body["details"] is None
+DISABLED
+# The same readiness-only result must fail the enabled acceptance predicate.
+if (assert_enabled_deployment) >/dev/null 2>&1; then
+    fail "disabled mode passed the enabled deployment gate"
+fi
+APP_OPTIONS+=(--env VENDOR_DEPLOY_AGENT_ENABLED=true)
+start_app "$(dsn app_admin restored_ok)" production-keyless-v1
+await_liveness || fail "enabled keyless deploy runtime did not boot"
+for _ in $(seq 1 30); do test "$(probe /health/ready)" = 200 && break; sleep 1; done
+test "$(probe /health/ready)" = 200 || fail "enabled runtime is not database-ready"
+assert_enabled_deployment || fail "enabled authenticated deployment read failed"
+docker exec "$APP_CONTAINER" /usr/local/bin/gh --version \
+    | grep -q '^gh version 2\.87\.3 ' || fail "packaged GitHub CLI version mismatch"
+# A service-owned 0600 key on a writable mount would still pass the signer.
+# Require the production read-only mount: O_WRONLY never truncates or writes.
+docker exec --interactive "$APP_CONTAINER" python - <<'READ_ONLY_KEY'
+import errno
+import os
+
+try:
+    fd = os.open(os.environ["VENDOR_DESIRED_SIGNING_KEY_FILE"], os.O_WRONLY)
+except OSError as error:
+    assert error.errno == errno.EROFS, error.errno
+else:
+    os.close(fd)
+    raise SystemExit("desired signing key mount is writable")
+READ_ONLY_KEY
+# Exercise the real ledger owner's append -> commit -> PUSH and next FETCH,
+# alongside the reader's independent executable digest check, as service UID.
+docker exec --interactive "$APP_CONTAINER" python - <<'DEPLOY_TRANSPORT'
+import os
+from vendor_cp.deploy_agent.candidates import GitHubCandidateEvidenceReader
+from vendor_cp.deploy_agent.ledger import GitLedger
+
+GitHubCandidateEvidenceReader(
+    os.environ["VENDOR_DEPLOY_GH_EXECUTABLE"], os.environ["VENDOR_DEPLOY_GH_SHA256"],
+)
+ledger = GitLedger(os.environ["VENDOR_DEPLOY_LEDGER_DIR"])
+with ledger.transaction():
+    assert ledger.append("candidate-runtime.json", {"fixture": True})
+with ledger.transaction():
+    assert ledger.read("candidate-runtime.json") is not None
+assert ledger.git("rev-parse", "HEAD") == ledger.git("rev-parse", "origin/main")
+DEPLOY_TRANSPORT
+# Each isolated constructor refusal keeps the same mounted key and real ledger.
+# No key bytes, bearer or credential values are printed by these checks.
+expect_runtime_refusal() {
+    local reason="$1" override="$2"
+    docker exec --interactive --env "$override" "$APP_CONTAINER" python - "$reason" <<'REFUSE_RUNTIME'
+import sys
+from vendor_cp.deploy_agent.contracts import ContractError
+from vendor_cp.deploy_agent.runtime import install_runtime
+
+try:
+    install_runtime()
+except ContractError as error:
+    assert error.code == sys.argv[1], error.code
+except RuntimeError as error:
+    assert str(error) == sys.argv[1], "unexpected runtime refusal"
+else:
+    raise SystemExit("invalid enabled runtime configuration was accepted")
+REFUSE_RUNTIME
+}
+expect_runtime_refusal candidate_reader_unavailable \
+    VENDOR_DEPLOY_GH_SHA256=sha256:0000000000000000000000000000000000000000000000000000000000000000
+expect_runtime_refusal ledger_unavailable VENDOR_DEPLOY_LEDGER_DIR=/tmp/absent-ledger
+# Only the root fixture owner changes permissions, through its temporary bind.
+# The application keeps the same read-only key mount throughout both cases.
+fixture_key_mode() {
+    docker run --rm --network none --user 0:0 \
+        --volume "$WORKDIR:/fixture" --entrypoint python "$IMAGE" -c \
+        'import os, sys; os.chmod("/fixture/desired.key", int(sys.argv[1], 8))' "$1"
+}
+fixture_key_mode 0644
+expect_runtime_refusal 'desired-state signing key unavailable' VENDOR_DEPLOY_AGENT_ENABLED=true
+fixture_key_mode 0600
+assert_enabled_deployment || fail "enabled deployment read failed after negative controls"
+pass "enabled keyless runtime: authenticated read, packaged gh, Git FETCH/PUSH and refusal controls"
+
+printf '\nCANDIDATE ACCEPTED\n'
