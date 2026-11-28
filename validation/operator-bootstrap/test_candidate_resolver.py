@@ -17,6 +17,10 @@ class Owner:
     """Small file-aware double; driver structural checks remain fully exercised."""
     def __init__(self):
         self.projections = []
+        self.metadata_calls = []
+        self.identity_calls = []
+        self.metadata_identity_calls = []
+        self.control_requirements = ["dotmac-kernel (>=0.1.0a100)"]
 
     def parse_dependency_delta(self, *args):
         return args
@@ -34,7 +38,22 @@ class Owner:
         return [] if acquired == {f["file"]: f["hash"] for f in entry["files"]} else ["files disagree"]
 
     def metadata_binding_problems(self, entry, wheel, digests):
+        self.metadata_calls.append(entry["name"])
+        if entry["name"] != r.CONTROL:
+            raise r.Refused("unchanged Kernel conditional metadata must not enter unconditional map")
+        if any(";" in value for value in self.control_requirements):
+            raise r.Refused("Control conditional Requires-Dist refused by inherited unconditional map")
         return [] if wheel.is_file() and r.digest(wheel) == digests[wheel.name] else ["missing wheel"]
+
+    def wheel_identity_problems(self, wheel, name, version):
+        self.identity_calls.append((name, version))
+        return [] if wheel.is_file() and self.artifact_belongs_to(wheel.name, name, version) else ["wrong identity"]
+
+    def wheel_metadata(self, wheel, name, version):
+        self.metadata_identity_calls.append((name, version))
+        return {"name": [name], "version": [version],
+                "requires-dist": ['cryptography (>=42) ; extra == "licensing" or extra == "settings-crypto"']
+                if name == "dotmac-kernel" else self.control_requirements if name == r.CONTROL else []}
 
     def lock_wheel_problems(self, lock):
         return [e["name"] for e in lock["package"] if not any(f["file"].endswith(".whl") for f in e["files"])]
@@ -49,7 +68,9 @@ class CandidatePairTests(unittest.TestCase):
         self.bundle = Path(self.temp.name)
         (self.bundle / "files").mkdir()
         self.owner = Owner()
-        self.private = {r.CONTROL: "0.1.0a17", "dotmac-kernel": "0.1.0a100", "dotmac-approvals": "0.1.0a8"}
+        self.private = {r.CONTROL: "0.1.0a17", "dotmac-kernel": "0.1.0a100", "dotmac-approvals": "0.1.0a8",
+                        "dotmac-commercial-agreements": "0.1.0a4", "dotmac-entitlement-allocation": "0.1.0a6",
+                        "dotmac-licensing": "0.1.0a1", "dotmac-release-catalog": "0.1.0a4"}
         source = {"type": "legacy", "url": "https://registry.dotmac.io/api/packages/dotmac/pypi/simple", "reference": "forgejo"}
         packages = []
         self.digests = {}
@@ -64,6 +85,9 @@ class CandidatePairTests(unittest.TestCase):
                 (self.bundle / "files" / filename).write_bytes(payload)
                 self.digests[filename] = value
         self.before = {"package": packages, "metadata": {"content-hash": "before", "lock-version": "2.1"}}
+        packages[1]["dependencies"] = {"cryptography": {"version": ">=42", "optional": True,
+                                                       "markers": 'extra == "licensing" or extra == "settings-crypto"'}}
+        packages[1]["extras"] = {"licensing": ["cryptography (>=42)"], "settings-crypto": ["cryptography (>=42)"]}
         self.actual = copy.deepcopy(self.before)
         control = self.actual["package"][0]
         control.update(version="0.1.0a18", source={"type": "legacy", "url": r.CANDIDATE_URL, "reference": r.CANDIDATE_NAME})
@@ -93,6 +117,14 @@ class CandidatePairTests(unittest.TestCase):
         self.assertEqual(self.actual, unchanged)
         self.assertEqual(self.owner.projections[0]["package"][0]["source"], self.before["package"][0]["source"])
         self.assertEqual(self.actual["package"][0]["source"]["reference"], r.CANDIDATE_NAME)
+        self.assertEqual(self.owner.metadata_calls, [r.CONTROL])
+        self.assertEqual(len(self.owner.identity_calls), 7)
+        self.assertEqual(len(self.owner.metadata_identity_calls), 7)
+        self.assertEqual(set(self.owner.metadata_identity_calls), set(self.owner.identity_calls))
+        self.assertEqual(self.actual["package"][1], self.before["package"][1])
+        self.assertEqual(set(self.owner.identity_calls),
+                         {(name, "0.1.0a18" if name == r.CONTROL else version)
+                          for name, version in self.private.items()})
 
     def test_wrong_actual_candidate_source_url_name_or_fake_forgejo(self):
         for change in ({"url": "https://evil.invalid/simple"}, {"reference": "candidate-alias"}, self.before["package"][0]["source"]):
@@ -119,8 +151,17 @@ class CandidatePairTests(unittest.TestCase):
         with self.assertRaises(r.Refused):
             self.verify()
 
+    def test_conditional_control_metadata_still_enters_inherited_map_and_refuses(self):
+        self.owner.control_requirements = ['dotmac-kernel (>=0.1.0a100) ; extra == "licensing"']
+        with self.assertRaisesRegex(r.Refused, "Control conditional Requires-Dist"):
+            self.verify()
+        self.assertEqual(self.owner.metadata_calls, [r.CONTROL])
+        self.assertIn((r.CONTROL, "0.1.0a18"), self.owner.metadata_identity_calls)
+
     def test_changed_kernel_unrelated_entry_or_source(self):
-        for index, field, value in ((1, "version", "0.1.0a110"), (2, "groups", ["dev"]), (2, "source", {})):
+        for index, field, value in ((1, "version", "0.1.0a110"), (1, "files", [{"file": "changed.whl", "hash": "sha256:" + "0" * 64}]),
+                                    (1, "dependencies", {"cryptography": ">=99"}),
+                                    (2, "groups", ["dev"]), (2, "source", {})):
             with self.subTest(index=index, field=field):
                 original = copy.deepcopy(self.actual)
                 self.actual["package"][index][field] = value

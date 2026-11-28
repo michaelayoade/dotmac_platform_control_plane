@@ -29,6 +29,7 @@ CANDIDATE_NAME = "a2-control-candidate"
 CANDIDATE_URL = "http://127.0.0.1:8899/a2-control-candidate/simple"
 MIRROR = "http://127.0.0.1:8899/baseline/simple"
 BINDINGS = {
+    "README.md": "4e1715a20142eaf69deac87c25be71a0bbff4b042cdf55db4f9661e22c56f271",
     "scripts/kernel_lock.py": "ef80e927e1aefba218ec528ac165d2b2c590645dfa9ab1f24b080e2b186ed27d",
     "scripts/warm_reviewed_private_artifacts.py": "568870bc0e1fbd9be262490ac9022a97240569feb0dcf6c58be45676f505ba12",
     ".github/bootstrap/poetry-requirements.txt": "8416ab4e2a619884937ed3be34ea1928829fee0df76773e25108e73acd97ab1f",
@@ -111,7 +112,10 @@ def verify_candidate_pair(before, actual, manifest, planned, owner, bundle, dige
         require(not owner.acquired_matches_lock(digests, actual, name, version), "actual acquired/lock mismatch")
         wheels = [bundle / "files" / f for f in digests if f.endswith(".whl") and owner.artifact_belongs_to(f, name, version)]
         require(len(wheels) == 1, "missing or ambiguous private wheel")
-        require(not owner.metadata_binding_problems(new[name], wheels[0], digests), "actual wheel metadata mismatch")
+        require(not owner.wheel_identity_problems(wheels[0], name, version), "actual wheel identity mismatch")
+        owner.wheel_metadata(wheels[0], name, version)
+        if name == CONTROL:
+            require(not owner.metadata_binding_problems(new[name], wheels[0], digests), "actual Control metadata mismatch")
     require(not owner.lock_wheel_problems(actual), "closing wheel-only gate refused")
     return True
 
@@ -234,7 +238,11 @@ def main():
     old_entries = entries(before)
     for name, version in private.items():
         wheel = args.baseline_bundle / f"{name.replace('-', '_')}-{version}-py3-none-any.whl"
-        require(not owner.metadata_binding_problems(old_entries[name], wheel, expected), "baseline metadata binding refused")
+        require(not owner.acquired_matches_lock(expected, before, name, version), "baseline acquired/lock mismatch")
+        require(not owner.wheel_identity_problems(wheel, name, version), "baseline wheel identity refused")
+        owner.wheel_metadata(wheel, name, version)
+        if name == CONTROL:
+            require(not owner.metadata_binding_problems(old_entries[name], wheel, expected), "baseline Control metadata binding refused")
     require(not owner.wheel_identity_problems(args.control_wheel, CONTROL, "0.1.0a18"), "a18 identity refused")
     deps = owner.metadata_dependencies(owner.requires_dist(owner.wheel_metadata(args.control_wheel, CONTROL, "0.1.0a18")))
     require(deps == owner.locked_dependencies(old_entries[CONTROL]) and deps.get("dotmac-kernel") == ">=0.1.0a100", "a18 dependencies mismatch")
@@ -250,6 +258,7 @@ def main():
     work = out / "pair"
     work.mkdir()
     manifest, lock = work / "pyproject.toml", work / "poetry.lock"
+    shutil.copyfile(source / "README.md", work / "README.md")
     text, planned = planned_manifest(manifest_bytes.decode(), owner)
     manifest.write_text(owner.point_at_mirror(text, MIRROR))
     lock.write_bytes(lock_bytes)
@@ -282,7 +291,7 @@ def main():
                     "runtime": {"python": sys.version.split()[0], "poetry": "2.4.1"},
                     "actual_control_source": actual["package"][[e["name"] for e in actual["package"]].index(CONTROL)]["source"],
                     "checks": {"normal_manifest_guard_before_candidate_edit": True, "opening_closing_wheel_only": True,
-                               "actual_pair_and_owner_drift": True, "actual_metadata_binding_all_seven": True,
+                               "actual_pair_and_owner_drift": True, "actual_wheel_identity_all_seven_and_control_metadata": True,
                                "input_rehash_before_after": True, "poetry_check_lock": True},
                     "source_ephemeral": True, "published": False, "image_qualified": False,
                     "normal_producer_admission": False, "publication_or_deployment": False}
