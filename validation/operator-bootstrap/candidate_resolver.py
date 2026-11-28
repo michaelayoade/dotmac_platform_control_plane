@@ -195,6 +195,15 @@ def poetry_argv(*arguments):
     return [sys.executable, "-I", "-B", "-m", "poetry", "--no-plugins", *arguments]
 
 
+def verify_control_dependencies(headers, baseline_entry, owner):
+    """Use the unchanged owner's dependency map AND its canonical key spelling."""
+    deps = owner.metadata_dependencies(owner.requires_dist(headers))
+    require(deps == owner.locked_dependencies(baseline_entry)
+            and deps.get(owner._normalised("dotmac-kernel")) == ">=0.1.0a100",
+            "a18 dependencies mismatch")
+    return deps
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("source-root", "baseline-bundle", "control-wheel", "out", "acceptance", "transfer-receipt"):
@@ -244,8 +253,7 @@ def main():
         if name == CONTROL:
             require(not owner.metadata_binding_problems(old_entries[name], wheel, expected), "baseline Control metadata binding refused")
     require(not owner.wheel_identity_problems(args.control_wheel, CONTROL, "0.1.0a18"), "a18 identity refused")
-    deps = owner.metadata_dependencies(owner.requires_dist(owner.wheel_metadata(args.control_wheel, CONTROL, "0.1.0a18")))
-    require(deps == owner.locked_dependencies(old_entries[CONTROL]) and deps.get("dotmac-kernel") == ">=0.1.0a100", "a18 dependencies mismatch")
+    verify_control_dependencies(owner.wheel_metadata(args.control_wheel, CONTROL, "0.1.0a18"), old_entries[CONTROL], owner)
     selected = {f: d for f, d in expected.items() if not owner.artifact_belongs_to(f, CONTROL, "0.1.0a17")}
     selected[WHEEL] = WHEEL_SHA
     bundle = out / "candidate_bundle"

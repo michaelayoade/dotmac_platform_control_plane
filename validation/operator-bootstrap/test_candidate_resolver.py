@@ -222,5 +222,79 @@ class CommandShapeTests(unittest.TestCase):
         self.assertNotIn("--regenerate", r.poetry_argv("lock"))
 
 
+class ControlDependencyMapTests(unittest.TestCase):
+    class DependencyOwner:
+        """Underscore-keyed owner contract; no driver-side normalization."""
+        def __init__(self):
+            self.normalised_calls = []
+
+        def requires_dist(self, headers):
+            return headers["requires-dist"]
+
+        def metadata_dependencies(self, requirements):
+            if any(";" in value for value in requirements):
+                raise r.Refused("conditional requirement")
+            constraint = requirements[0].removeprefix("dotmac-kernel (").removesuffix(")")
+            return {"dotmac_kernel": constraint}
+
+        def locked_dependencies(self, entry):
+            return entry["dependencies"]
+
+        def _normalised(self, name):
+            if name != "dotmac-kernel":
+                raise AssertionError("unexpected owner normalization argument")
+            self.normalised_calls.append(name)
+            return "dotmac_kernel"
+
+    def test_underscore_owner_key_and_exact_kernel_floor(self):
+        owner = self.DependencyOwner()
+        expected = {"dotmac_kernel": ">=0.1.0a100"}
+        actual = r.verify_control_dependencies({"requires-dist": ["dotmac-kernel (>=0.1.0a100)"]},
+                                               {"dependencies": expected}, owner)
+        self.assertEqual(actual, expected)
+        self.assertEqual(owner.normalised_calls, ["dotmac-kernel"])
+
+    def test_wrong_floor_rejected_even_when_maps_agree(self):
+        for constraint in (">=0.1.0a99", ">=0.1.0a110", "==0.1.0a100"):
+            with self.subTest(constraint=constraint), self.assertRaises(r.Refused):
+                r.verify_control_dependencies({"requires-dist": [f"dotmac-kernel ({constraint})"]},
+                                              {"dependencies": {"dotmac_kernel": constraint}}, self.DependencyOwner())
+
+    def test_changed_or_conditional_control_requirement_rejected(self):
+        baseline = {"dependencies": {"dotmac_kernel": ">=0.1.0a100"}}
+        for requirement in ("dotmac-kernel (>=0.1.0a110)", 'dotmac-kernel (>=0.1.0a100) ; extra == "licensing"'):
+            with self.subTest(requirement=requirement), self.assertRaises(r.Refused):
+                r.verify_control_dependencies({"requires-dist": [requirement]}, baseline, self.DependencyOwner())
+
+
+class PinnedOwnerDependencyMapTests(unittest.TestCase):
+    def test_actual_pinned_owner_normalization_and_conditional_boundary(self):
+        candidates = [Path(__file__).with_name("kernel_lock.py"), Path("/source/scripts/kernel_lock.py"),
+                      Path(__file__).resolve().parents[1] / "source/scripts/kernel_lock.py"]
+        path = next((candidate for candidate in candidates if candidate.is_file()), None)
+        self.assertIsNotNone(path, "provide the pinned owner beside the tests or at /source/scripts/kernel_lock.py")
+        self.assertEqual(r.digest(path), r.BINDINGS["scripts/kernel_lock.py"])
+        name = "candidate_test_pinned_owner"
+        owner_spec = importlib.util.spec_from_file_location(name, path)
+        owner = importlib.util.module_from_spec(owner_spec)
+        sys.modules[name] = owner
+        try:
+            exec(compile(path.read_bytes(), str(path), "exec"), owner.__dict__)
+            baseline = {"dependencies": {"dotmac-kernel": ">=0.1.0a100"}}
+            headers = owner.parse_core_metadata("Metadata-Version: 2.3\nName: dotmac-deployment-control\nVersion: 0.1.0a18\nRequires-Dist: dotmac-kernel (>=0.1.0a100)\n\n")
+            self.assertEqual(r.verify_control_dependencies(headers, baseline, owner),
+                             {"dotmac_kernel": ">=0.1.0a100"})
+            wrong = copy.deepcopy(headers)
+            wrong["requires-dist"] = ["dotmac-kernel (>=0.1.0a110)"]
+            with self.assertRaises(r.Refused):
+                r.verify_control_dependencies(wrong, baseline, owner)
+            conditional = copy.deepcopy(headers)
+            conditional["requires-dist"] = ['dotmac-kernel (>=0.1.0a100) ; extra == "licensing"']
+            with self.assertRaises(owner.Refusal):
+                r.verify_control_dependencies(conditional, baseline, owner)
+        finally:
+            del sys.modules[name]
+
+
 if __name__ == "__main__":
     unittest.main()
