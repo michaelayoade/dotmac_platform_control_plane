@@ -1,0 +1,303 @@
+[tool.poetry]
+name = "dotmac-vendor-control-plane"
+version = "0.1.0"
+description = "DotMac Vendor Control Plane — a vendor/product-lifecycle assembly composed from the pinned dotmac-kernel. It is NOT a product data plane; it owns vendor-side accounts, provisioning contracts, and (later) deployment lifecycle."
+authors = ["DotMac"]
+readme = "README.md"
+packages = [{ include = "vendor_cp", from = "src" }]
+
+# The installed operator surface. `dotmac-platform` is a CONSOLE SCRIPT with
+# distribution metadata behind it, not a path into a checkout: production usage
+# is `docker compose run --rm --no-deps ops dotmac-platform ...`, and
+# `dotmac-platform diagnose self --strict` proves at runtime that every module
+# it reached resolves under the interpreter's purelib/platlib.
+#
+# Nothing reads this name back out of this file. The checks that need to know
+# which console scripts are sanctioned read them from installed metadata — see
+# `vendor_cp.installed_surface.sanctioned_entry_points` — because a literal
+# would restore exactly the substring matching those checks exist to replace.
+[tool.poetry.scripts]
+dotmac-platform = "vendor_cp.cli:run"
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.14"
+# The kernel is PINNED EXACTLY to the published alpha and resolved ONLY from the
+# private Forgejo index (`dotmac_starter_mt` ADR-0005 — the Forgejo private
+# artifact registry, not this repository's ADR-0005). The `testing` extra ships
+# the kernel's supported test kit (harness + fakes + provisioning contract + WS8
+# FakeLicenceSigner) this assembly's tests consume; `licensing` adds the Ed25519
+# dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
+# requires to sign and to round-trip its envelopes through `verify_licence`.
+# No copied kernel modules, no import-path shims.
+#
+# a100 is the truthful COMPOSED FLOOR (`scripts/kernel_floor.py`): Control a17
+# and Approvals a8 each declare `dotmac-kernel >=0.1.0a100`, and the pin equals
+# the highest floor anything composed declares. It is NOT the final kernel
+# state and is NOT independently adoptable: a98, a99 and a100 all reach a
+# product-owned PostgreSQL driver on the public `create_app` import path
+# (`docs/operations/kernel-a100-assessment-2026-09-01.md`). This assembly stays
+# operational because its assembled environment supplies that driver, exactly
+# as it did at a98. The repair is a101 (Starter #573), and adopting it is held
+# with Governance schema 11 and a truthful Foundation render check (debt D2);
+# it is not admitted here through any local exception.
+dotmac-kernel = { version = "0.1.0a100", extras = [
+    "testing",
+    "licensing",
+], source = "forgejo" }
+# Vendor-owned immutable artifact identity and attestations. Exact-pinned from
+# the same private index; its manifest and migration locator are composed by the
+# assembly through the package's public top-level surface.
+#
+# a4 is required, not merely preferred. Through a3 the module declared its two
+# tables in `ModuleManifest.tables` — the TENANT contract — while its migration
+# actually creates platform-shaped tables (no `tenant_id`, REVOKEd from
+# `app_user`). Nothing noticed, because nothing audited the live catalogue here.
+# The composed audit added in `tests/migration/test_composed_live_catalog.py`
+# does, and an a3 module fails it correctly: the declaration and the database
+# disagree. a4 moves both tables to `platform_tables`, which is what makes the
+# declaration true (`dotmac_starter_mt` ADR-0023).
+dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
+# The allocation authority under ADR-0006. Vendor migration `v014` checked the
+# greenfield premise, dropped the empty local tables and retired their writer;
+# Vendor retains only its typed assembly adapter. Exact-pinned from the private
+# index; never a path dependency and never a silent dual-write.
+#
+# a4 moved its `allocations` / `allocation_entries` to declared
+# `platform_tables`, so the composed live-catalogue audit can hold them to the
+# plane they are actually built on.
+#
+# a6 declares the two kernel effects `stage_allocation` writes at REQUEST time
+# and every release through a4 consumed without naming: the idempotency ledger
+# it delegates at-most-once execution to, and the platform audit log it writes
+# inside that same operation. `ea_0002` and `ea_0003` are DDL-free revisions
+# whose entire bodies verify those prerequisites, so the dependency fails at
+# deploy rather than on the first allocation.
+#
+# a5 is skipped deliberately and must never be pinned: it carried only the first
+# half of that repair and was never published to the index.
+dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
+# The dual-plane approval-state authority (ADR-0005 and
+# `dotmac_starter_mt` ADR-0028), composed on its PLATFORM plane only. Vendor
+# migration `v013` restored the module's online DML,
+# dropped the empty legacy tables and retired the local writer; Vendor retains
+# only its typed adapter.
+#
+# a5 declares `outbox_relay.v1`. Every release through a4 called
+# `emit_platform_events` -> `enqueue_platform_event`, writing
+# `public.platform_outbox_events` at REQUEST time, while declaring nothing:
+# `ap_0001` creates the approval tables in `mod_approvals` and the relay is the
+# kernel's. An adopter running only its own lineage took `UndefinedTable` on the
+# first approval decision that emitted an event, with the approval transaction
+# rolling back alongside it.
+#
+# This assembly was never exposed to that, because it runs the whole kernel base
+# lineage and therefore already has both relay tables. What it lacked was the
+# PROOF — which is why the repin comes with the `outbox_relay.v1` binding in
+# `vendor_cp.migration_bindings` and the DDL-free `ap_0002_outbox_relay`
+# verification revision. See ADR-0005 s "Adoption plan".
+#
+# a7 (Gate-0 composition adoption, ADR-0013 s A7). a6 added the module's
+# `database_catalog=` declaration; a7 adds platform/tenant withdrawal with its
+# `ap_0003_withdrawals` migration and the durable `approval.withdrawn` outbox
+# event the protected rehearsal issuer consumes, and declares
+# `dotmac-kernel >=0.1.0a100`. Oracles: tag `dotmac-approvals-v0.1.0a7`, tag
+# object `d59ee6f273755c2c2e7330bfd9f45e6ca1e1d85a`, peeled commit
+# `7cab65c56272c1d8e3a2784ce5b91ce601dd9b05`, release run 36151575723, wheel
+# `ef8b804b…3d61b7`, recorded in Starter's
+# `docs/inventories/module-release-verifications.json`.
+#
+# a8 adds `hold_platform_approval`: a FOR SHARE hold on the platform request
+# row, validated under the lock, that a caller keeps through its dependent
+# Control transition and commit (the C2 barrier). No migration; kernel floor
+# unchanged. Oracles: tag `dotmac-approvals-v0.1.0a8`, tag object
+# `0f307476725579c0fd22d1e64fb3ad05778ae528`, peeled commit
+# `9e2d69f4913474d9504cfaeca81a9105919b8555`, release run 36235355877, wheel
+# `f37f02ac…8f01d7`, recorded by Starter #758 (`d26324f4`), resolved by
+# protected `kernel-lock.yml` run 36239987393.
+dotmac-approvals = { version = "0.1.0a8", source = "forgejo" }
+# The platform-only owner of deployment identity, desired state, immutable
+# plans, rollouts and authenticated observations (ADR-0011). Atomic: it declares
+# one supported plane set, so no `ModulePlaneSelection` is possible and none is
+# made. Its two declared prerequisites were already bound here.
+#
+# a6. Three published versions below it are refused, and they failed three
+# DIFFERENT questions — deliberately not collapsed into one "use the latest".
+#
+#   a3  its evidence chain: published by a defective internal verifier.
+#   a4  its BEHAVIOUR: `snapshot_digest` returned bare hex while its sibling
+#       `spec_digest` returned `sha256:`-prefixed, ten lines apart in one file,
+#       compared with a raw `!=` in `approve_plan`. A caller using the module's
+#       own canonical form was refused with a message about the plan having
+#       changed — a formatting bug wearing a tampering refusal.
+#   a5  its DECLARATION: it imported `dotmac_kernel.transactions`, first shipped
+#       in kernel a98, while declaring `dotmac-kernel >=0.1.0a77`. This assembly
+#       found that the expensive way — resolution succeeded, the lock wrote
+#       cleanly, the artifact hashes matched the release evidence, and the
+#       container died at boot on `ModuleNotFoundError`. A hash comparison
+#       proves you got the published bytes; it cannot prove they import.
+#
+# a5's artifact identity and behaviour both passed; only its declared floor was
+# wrong. It remains published and is refused BY NAME by the release guard.
+#
+# a15, never a14 (Gate-0 composition adoption, ADR-0013 s A7). a6 through
+# a14 remain published and verified; a15 adds the frozen plan purpose
+# (`foundation_execution` / `rehearsal_issuer_operation`) and the single
+# Foundation V3 execution consumption, and declares
+# `dotmac-kernel >=0.1.0a100`. Under a15 a plan proposal must carry its
+# operation, descriptor digest and execution-plan digest, which ADR-0013 A6.4
+# requires to be DERIVED; CP cannot derive them before Gate 3, so its
+# Foundation-execution propose/authorize refuse with
+# `a6_4_derivation_not_available` rather than supply them. a14 is skipped on
+# purpose: a14 -> a15 needs every a14 process stopped before `dc_0015` (debt
+# D15), and this assembly never ran a14.
+#
+# a16 locks `cancel_plan` target-then-plan, the same order as every other plan
+# transition; no migration, kernel floor unchanged.
+#
+# a17 permanently refuses controller-key reuse across leases and targets,
+# including revoked/spent history; dc_0016 refuses duplicate history without
+# rewriting it and refuses a populated downgrade. No runtime fallback to a16.
+# Oracles: tag `dotmac-deployment-control-v0.1.0a17`, peeled commit
+# `574418944d35ddf3559d17e59e9184b5f545ebe4`, tag object
+# `2b8458bc7c7c6bc38644b2bcb117d01bf317ef2c`; release run 36876808565,
+# independent VERIFIED run 36877181012 (15 installed-artifact canaries),
+# record PR #74 (`ad95f4e1`). Protected `kernel-lock.yml` run 36880146793
+# resolved the exact wheel `ecd3478a…f39f9` and sdist `52f2d1f0…2196a`.
+# BOTH resolver files were applied byte-identically before these comment edits.
+#
+# This pin is not deployment authorization: the a98 -> a100 kernel move and the
+# dc_0003..dc_0016 and ap_0003 migrations still owe a rehearsal against a
+# RESTORED isolated database before they reach the running deployment.
+dotmac-deployment-control = { version = "0.1.0a17", source = "forgejo" }
+# The platform-only Commercial Agreements authority. Vendor migration `v015`
+# checks the greenfield premise under lock, drops the empty legacy tables, and
+# leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
+# retains only typed offer, catalogue and approval-evidence adapters.
+dotmac-commercial-agreements = { version = "0.1.0a4", source = "forgejo" }
+# The platform-only Licensing issuer authority. Vendor v016 checks the
+# greenfield premise under lock, drops the empty local issuer tables and keeps
+# only key custody plus the separately owned delivery projection.
+dotmac-licensing = { version = "0.1.0a1", source = "forgejo" }
+uvicorn = "^0.30"
+# The one control-plane database's driver (Postgres). There is exactly ONE
+# database; no product DSNs, no cross-database access (deny-case D1/D2).
+psycopg = { version = "^3.2", extras = ["binary"] }
+# Migrations: the vendor lineage is composed with the kernel's shipped base
+# lineage (dotmac_kernel.migrations.versions_dir) at deploy time.
+alembic = "^1.13"
+
+# Starlette's form parser. NOT optional and not a convenience: `request.form()`
+# asserts this library is installed BEFORE it inspects the content type, so
+# without it `platform_web.login_submit` and `require_csrf`'s header-absent
+# fallback both raise unconditionally — the platform console is reachable BY a
+# session and there is no way to obtain one. The kernel ships no form parser
+# deliberately; parsing a form is an assembly concern.
+#
+# Pinned EXACTLY, like every other dependency here. A mutable version reference
+# in a control plane is the same defect as a mutable image tag.
+python-multipart = "0.0.20"
+
+# Public Dotmac packages resolve from Forgejo; everything else from PyPI. Marked
+# `explicit` so ONLY named Dotmac packages are pulled from here (no
+# dependency-confusion aggregation of public names).
+[[tool.poetry.source]]
+name = "forgejo"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+priority = "explicit"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+ruff = "^0.6"
+mypy = "^1.11"
+PyYAML = "6.0.2"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+[tool.ruff.lint.per-file-ignores]
+# asserts are the point in tests; S105/S106 flag dummy fixture "passwords"
+# (e.g. password_hash="x") that are not real secrets.
+"tests/**" = ["S101", "S105", "S106"]
+# conformance/ is a real-dependency integration suite (see its own README):
+# functionally a test directory, deliberately kept outside tests/ only so
+# pytest's testpaths=["tests"] never tries to collect/import it before the
+# real dotmac_deployment_control/dotmac_deployment_foundation wheels exist.
+# Same S101 rationale as tests/** above applies verbatim.
+"conformance/**" = ["S101"]
+# The rotation preflight is GENERATED Python that runs on the target host, and
+# executing it is the only way to test it. S102's premise is a string of unknown
+# provenance reaching `exec`: this string is produced by
+# `production_secrets.rotation_target_preflight_program()` in this repository,
+# compiled with a fixed filename, and run with `subprocess`, `Path.read_text` and
+# `urlopen` all monkeypatched — nothing external reaches it. Refusing to execute
+# it would leave the program that REFUSES a 404 readiness probe untested, which
+# is the one behaviour that cancelled a production window.
+"tests/unit/test_production_secret_rotation.py" = ["S101", "S105", "S106", "S102"]
+# The concurrency proof interpolates a per-test scratch TABLE NAME it generated
+# itself (uuid4 hex) — table identifiers cannot be bound as parameters, and no
+# external input reaches these statements.
+"tests/migration/test_replay_concurrency.py" = ["S101", "S105", "S106", "S608"]
+# The rehearsal repair EMITS SQL text rather than executing it, and every value
+# that reaches a statement is first proven to be a declared upper-case member
+# name or a 64-character lowercase hex fingerprint (`shadow._literal`, which
+# REFUSES rather than escapes). Nothing that could need escaping can reach the
+# statement, so S608's premise — a value of unknown provenance interpolated into
+# a query — does not hold. `tests/architecture/test_commercial_backfill.py`
+# proves the refusal, so this ignore rests on a check rather than on a comment.
+"src/vendor_cp/commercial_backfill/shadow.py" = ["S608"]
+# The candidate verifier reads the GitHub REST API over https. S310's premise is
+# a URL of unknown provenance reaching a URL opener: the host is a module
+# constant (`API`), the scheme is fixed in it, and the only caller-supplied part
+# is a path built from a run id and a repository name that the workflow already
+# constrains. Nothing here can be redirected to `file:` by an input, because no
+# input reaches the scheme. It is a CI-only operator tool that never runs in the
+# application.
+".github/candidate/verify_source_revision.py" = ["S310"]
+# The Foundation passthrough executes a console script it resolved from PATH.
+# S603's premise is an argument of unknown provenance reaching an executed
+# command: the executable is a fixed console-script name (or an explicitly
+# configured override), the vector is a list so no shell parses it, and the
+# forwarded arguments are the operator's own — this command's entire purpose is
+# to hand them across UNINTERPRETED, because interpreting them would be the
+# reimplementation the delegation exists to avoid.
+"src/vendor_cp/cli/delegate.py" = ["S603", "S404"]
+# The post-rename GHCR checker shells out to `gh api`. S603's premise is an
+# argument of unknown provenance reaching an executed command; the only
+# non-constant part of the argument vector is the package name, and
+# `_require_safe_name` REFUSES anything that is not a plain package identifier
+# rather than escaping it. The vector is a list, so no shell parses it, and the
+# module is an operator tool that CI never runs — it needs a `read:packages`
+# credential CI deliberately does not have.
+"scripts/verify_ghcr_package_state.py" = ["S603"]
+# The rehearsal replay reads the shadow back through the SAME declared schema and
+# table constants the repair wrote, interpolated as identifiers — which cannot be
+# bound as parameters. No external input reaches these statements; the only
+# non-constant values are bound (`:role`, `:schema`).
+"tests/migration/test_commercial_backfill_replay.py" = ["S101", "S105", "S106", "S608"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/vendor_cp"]
+
+# `dotmac-deployment-foundation` is deliberately NOT a dependency of this
+# assembly: pinning it would be a composition decision this repository has not
+# taken, and `vendor_cp.recovery.bundle` imports it INSIDE the function so its
+# absence is a runtime answer (`evidence.tool_absent`, exit 4) rather than a
+# collection error. The facility owns every recovery decision; nothing here
+# re-implements one.
+[[tool.mypy.overrides]]
+module = "dotmac_deployment_foundation.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

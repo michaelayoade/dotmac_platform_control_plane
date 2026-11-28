@@ -42,6 +42,7 @@ jobs:
               added.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(name)))
           sys.path.insert(0, str(pathlib.Path(sys.argv[3]).parent / "candidate-image"))
           added.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module("test_candidate_install")))
+          added.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module("test_historical_fixture_install")))
           new_count = added.countTestCases()
           assert new_count > 0, "new mocked coverage absent"
           suite.addTests(added)
