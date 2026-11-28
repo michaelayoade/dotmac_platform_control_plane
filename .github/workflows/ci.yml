@@ -37,7 +37,7 @@ jobs:
           assert old_count == 130, "old mocked coverage changed"
           sys.path.insert(0, sys.argv[3])
           added = unittest.TestSuite()
-          for name in ("test_reader_lifecycle", "test_reader_revocation_sql", "test_operator_acquisition", "test_operator_bootstrap"):
+          for name in ("test_reader_lifecycle", "test_reader_revocation_sql", "test_operator_acquisition", "test_operator_bootstrap", "test_candidate_resolver"):
               added.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(name)))
           new_count = added.countTestCases()
           assert new_count > 0, "new mocked coverage absent"
