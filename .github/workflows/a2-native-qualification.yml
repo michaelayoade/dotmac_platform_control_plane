@@ -43,9 +43,10 @@ permissions:
 env:
   # The COMBINED draft ref: CP #269 + #272 + the Control a18 lock (kernel-lock run
   # 45759607636). The image and the recovery source both come from it.
-  CP_REF_DEFAULT: 78ad34888c228116189f0d397428aac3fea8c9df
+  CP_REF_DEFAULT: c512c23d059b51cace2f98df4d61432e2f24ba3b
   CONTROL_REF_DEFAULT: 3bd99c2ce19b287f22f9ff8ad92907b4e45324c8
-  # CP draft #272 (recovery source): carries conformance/recovery_source/test_contract.py.
+  # The recovery source (conformance/recovery_source/test_contract.py) comes from the
+  # same combined ref, not from a separate #272 checkout.
   # C4 seed pairing (architect r8 D3): the seed uses the Control version the BUILT
   # IMAGE carries (a18 on the combined ref); this checkout supplies only the test signer.
   C4_SEED_CONTROL_REF: b48ebb9f824fa2a63adca33491308431bebd13ab
