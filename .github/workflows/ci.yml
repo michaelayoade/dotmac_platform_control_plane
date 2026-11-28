@@ -22,6 +22,7 @@ jobs:
           cd validation/host-gated
           sha256sum -c SOURCE-SHA256SUMS
           (cd "$GITHUB_WORKSPACE/validation/operator-bootstrap" && sha256sum -c SOURCE-SHA256SUMS)
+          (cd "$GITHUB_WORKSPACE/validation/candidate-image" && sha256sum -c SOURCE-SHA256SUMS)
           chmod 700 .
           chmod 600 *.py *.json README.md
       - name: Run fully mocked owner, SQL and API tests
@@ -39,6 +40,8 @@ jobs:
           added = unittest.TestSuite()
           for name in ("test_reader_lifecycle", "test_reader_revocation_sql", "test_operator_acquisition", "test_operator_bootstrap", "test_candidate_resolver"):
               added.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(name)))
+          sys.path.insert(0, str(pathlib.Path(sys.argv[3]).parent / "candidate-image"))
+          added.addTests(unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module("test_candidate_install")))
           new_count = added.countTestCases()
           assert new_count > 0, "new mocked coverage absent"
           suite.addTests(added)
@@ -72,6 +75,7 @@ jobs:
           cd validation/host-gated
           sha256sum -c SOURCE-SHA256SUMS
           (cd "$GITHUB_WORKSPACE/validation/operator-bootstrap" && sha256sum -c SOURCE-SHA256SUMS)
+          (cd "$GITHUB_WORKSPACE/validation/candidate-image" && sha256sum -c SOURCE-SHA256SUMS)
       - name: Qualify exact transactions in isolated Unix-only PostgreSQL16
         run: |
           set -euo pipefail

@@ -1,0 +1,219 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS builder
+
+ENV POETRY_HOME=/opt/poetry \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/opt/poetry/bin:$PATH
+
+COPY .github/bootstrap/poetry-requirements.txt /tmp/poetry-requirements.txt
+RUN python -m venv "$POETRY_HOME" \
+    && "$POETRY_HOME/bin/pip" install --disable-pip-version-check \
+        --require-hashes --only-binary=:all: \
+        --requirement /tmp/poetry-requirements.txt \
+    && python -m venv "$VIRTUAL_ENV" \
+    && poetry config virtualenvs.create false
+
+WORKDIR /app
+
+COPY pyproject.toml poetry.lock README.md ./
+# Private Forgejo credentials are a BuildKit secret: they never become an ARG,
+# ENV value, image label, or filesystem layer.
+RUN --mount=type=secret,id=forgejo_token \
+    POETRY_HTTP_BASIC_FORGEJO_USERNAME=ci-reader \
+    POETRY_HTTP_BASIC_FORGEJO_PASSWORD="$(cat /run/secrets/forgejo_token)" \
+    poetry install --only main --no-root --no-interaction --no-ansi
+
+# The assembly is INSTALLED, not put on an import path. Building the wheel here
+# and installing it into the same virtual environment is what makes
+# `dotmac-platform` a console script with distribution metadata behind it —
+# which is what `dotmac-platform diagnose self --strict` proves at runtime, and
+# what lets every version this process reports come from the installer rather
+# than from a literal in a source file.
+#
+# `--no-deps` because the resolver already ran, against the lock, above. A
+# second resolution here could pick a different version from the one the lock
+# pinned, and the image would then contain something the lock does not describe.
+#
+# Both formats are built. The wheel is what gets installed; the sdist exists so
+# the release receipt can carry a digest for it, and so that "which source
+# archive corresponds to this image?" has an answer that is not a rebuild.
+COPY --chown=root:root src ./src
+RUN poetry build --no-interaction --no-ansi \
+    && "$VIRTUAL_ENV/bin/pip" install --no-deps --no-index dist/*.whl \
+    && "$VIRTUAL_ENV/bin/dotmac-platform" --version
+
+# Per-file digests of the distributions this image was assembled from, computed
+# in the SAME stage that built and installed them, and carried into the image.
+#
+# The release receipt recorded identity at bundle granularity only — the image
+# config digest and the layer chain. Those name the container; they say nothing
+# about the artifacts inside it, so "which wheel is in this image?" had no
+# answer that did not involve rebuilding and hoping `poetry build` is
+# deterministic. It is not: a zip carries timestamps, so a wheel measured beside
+# the image describes bytes the image does not contain.
+#
+# Computing them here and shipping the result makes the receipt's claim
+# re-checkable by anyone who can pull the image, against the same bytes `pip`
+# installed one instruction earlier.
+RUN python3 <<'DIGESTS'
+import hashlib
+import json
+import pathlib
+
+files = sorted(p for p in pathlib.Path("/app/dist").iterdir() if p.is_file())
+names = [p.name for p in files]
+# The receipt promises a digest per distribution. If poetry ever stops emitting
+# one of the two formats the receipt would silently narrow instead of failing,
+# so the requirement is asserted where it is produced rather than where it is
+# read.
+if not any(n.endswith(".whl") for n in names):
+    raise SystemExit(f"no wheel was built: {names}")
+if not any(n.endswith(".tar.gz") for n in names):
+    raise SystemExit(f"no sdist was built: {names}")
+
+document = {
+    "contract": "dotmac-distribution-digests/1",
+    "files": [
+        {
+            "filename": path.name,
+            "size_bytes": path.stat().st_size,
+            "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in files
+    ],
+}
+pathlib.Path("/app/distributions.json").write_text(
+    json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+DIGESTS
+
+# The `ApplicationFoundationProfile` document, built from the INSTALLED wheel.
+#
+# `python -m vendor_cp.deployment.profile`, not a heredoc like the block above,
+# and the difference is the whole design. The digests above are a measurement of
+# files, which a script in a build file can honestly take. A profile is a set of
+# CLAIMS about which providers this artifact carries, and a claim written into a
+# build file is a literal — the fixture-shaped binding this replaces. Running the
+# installed module instead means every concern in the document is there because
+# a provider RESOLVED in this environment, and a missing symbol fails the build
+# here rather than shipping a profile that describes an artifact which cannot
+# serve it.
+#
+# The dummy DSNs are so the kernel can construct its engine at import; nothing
+# connects, and the build has no database. `SOURCE_REVISION` must be a peeled
+# commit: `scripts/deploy_production.sh` already refuses anything else when it
+# reads the revision back off the image, so a document built from a branch name
+# would describe an artifact the deploy then rejects.
+ARG SOURCE_REVISION=unknown
+RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+    PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+    python -m vendor_cp.deployment.profile \
+        --source-revision "$SOURCE_REVISION" \
+        --dist-dir /app/dist \
+        --lock /app/poetry.lock \
+        --output /app/application_foundation_profile.json
+
+# The migration lineage travels as data (see the runtime stage's own COPY of
+# it below), and the builder stage otherwise never sees it — `image_heads`
+# needs it to compute the composed effective heads offline, so it lands here
+# too, ahead of that step and nowhere else in the builder stage.
+COPY --chown=root:root alembic ./alembic
+COPY --chown=root:root alembic.ini ./alembic.ini
+
+# `migration_heads.json`: the composed effective migration heads THIS image's
+# installed lineages produce, frozen at build time so a deploy-time check can
+# compare a pulled image's claim against a live database without re-deriving
+# it from a checkout that may not be the one that built the image (D16 PR 1;
+# `vendor_cp.deployment.image_heads`). No database is dialled — the same
+# `make_alembic_config` offline-`Config` construction
+# `tests/architecture/test_descriptor_promotion.py` already relies on.
+RUN VENDOR_MIGRATION_ROOT=/app python -m vendor_cp.deployment.image_heads \
+        --emit \
+        --source-revision "$SOURCE_REVISION" \
+        --output /app/migration_heads.json
+
+# Public upstream release, independently pinned by cli/cli's published checksums:
+# https://github.com/cli/cli/releases/download/v2.87.3/gh_2.87.3_checksums.txt
+# This deployment target and its acceptance runner are linux/amd64; refuse
+# another architecture instead of installing the wrong executable silently.
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS github-cli
+RUN test "$(dpkg --print-architecture)" = amd64
+RUN python - <<'GITHUB_CLI'
+import hashlib
+import io
+import pathlib
+import tarfile
+import urllib.request
+
+url = "https://github.com/cli/cli/releases/download/v2.87.3/gh_2.87.3_linux_amd64.tar.gz"
+archive = urllib.request.urlopen(url, timeout=120).read()
+expected = "c6e5537631fca45f277ef405ce8751d139b491e9402cc20891a003525a8773b2"
+if hashlib.sha256(archive).hexdigest() != expected:
+    raise SystemExit("GitHub CLI release checksum mismatch")
+with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as release:
+    executable = release.extractfile("gh_2.87.3_linux_amd64/bin/gh").read()
+path = pathlib.Path("/gh")
+path.write_bytes(executable)
+path.chmod(0o755)
+GITHUB_CLI
+
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
+
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/michaelayoade/dotmac_platform_control_plane" \
+      org.opencontainers.image.revision="$SOURCE_REVISION"
+
+# There is deliberately no PYTHONPATH. `vendor_cp` is imported from
+# site-packages because the wheel is installed, and the runtime stage copies no
+# `src` and no `scripts` at all — so a checkout-relative invocation has nothing
+# to resolve against and fails loudly instead of quietly running whatever bytes
+# were last copied into /app.
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VENDOR_MIGRATION_ROOT=/app
+
+# GitLedger deliberately invokes /usr/bin/git. Git, HTTPS transport and TLS roots
+# come from the pinned base image's Debian APT repositories and their signed
+# package indexes (no extra repository or floating upstream installer). Package
+# versions follow that OS owner's security updates; they are not exact pins.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=github-cli --chown=root:root /gh /usr/local/bin/gh
+
+RUN groupadd --gid 10001 vendor \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin vendor
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+# The migration lineage travels as DATA, not as code. Packaging it into the
+# wheel would put a top-level `alembic` directory at the wheel root, colliding
+# with the Alembic distribution's own import name; `VENDOR_MIGRATION_ROOT` above
+# names where it landed instead.
+COPY --chown=10001:10001 alembic ./alembic
+COPY --chown=10001:10001 alembic.ini ./alembic.ini
+# The per-file distribution digests travel WITH the artifact they describe, so
+# the receipt's claim about the wheel and the sdist can be re-derived from a
+# pulled image rather than trusted.
+COPY --from=builder --chown=10001:10001 /app/distributions.json ./distributions.json
+# The profile travels BESIDE the distribution record, and for the same reason: a
+# claim about an artifact must be re-derivable from a pulled image rather than
+# trusted from the pipeline that made it. `vendor_cp.deployment.profile_readback`
+# reads exactly this path, and until this line existed it returned
+# DOCUMENT_ABSENT against every real image — which was the honest answer.
+COPY --from=builder --chown=10001:10001 /app/application_foundation_profile.json \
+     ./application_foundation_profile.json
+# The composed effective migration heads THIS image's lineages produce,
+# frozen at build time (D16 PR 1). PR 2's deploy-time check extracts this file
+# from a pulled image before anything is running, so it has to be a document
+# rather than a live computation against a database.
+COPY --from=builder --chown=10001:10001 /app/migration_heads.json \
+     ./migration_heads.json
+
+USER 10001:10001
+
+EXPOSE 8000
+CMD ["uvicorn", "vendor_cp.main:app", "--host", "0.0.0.0", "--port", "8000"]
